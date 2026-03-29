@@ -339,17 +339,22 @@ setProjects(
 
         const completedSubs: any[] = [];
         for (const s of rawSubs) {
-            // Step 2: Derive comprehensive functional failures from the function description
-            const expanded = await AIService.generateCompleteSubsystem(s.name, s.specs, s.func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
-            const failures: any[] = expanded?.failures?.length > 0 ? expanded.failures : (s.failures || []);
+            // Step 2: Regenerate func using the same mechanism as the Function field magic wand
+            // (empty currentText triggers the structured function generation prompt)
+            const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, subsystem: s.name, specs: s.specs }, aiProvider, azureEndpoint);
+            const enrichedSub = { ...s, func: funcDesc || s.func };
 
-            // Step 3: Derive comprehensive failure modes for each functional failure
+            // Step 3: Derive comprehensive functional failures from the enriched function description
+            const expanded = await AIService.generateCompleteSubsystem(enrichedSub.name, enrichedSub.specs, enrichedSub.func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
+            const failures: any[] = expanded?.failures?.length > 0 ? expanded.failures : (enrichedSub.failures || []);
+
+            // Step 4: Derive comprehensive failure modes for each functional failure
             const fullFailures: any[] = [];
             for (const f of failures) {
-                const modes = await AIService.generateModesForFailure(f.desc, s.name, s.specs, s.func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
+                const modes = await AIService.generateModesForFailure(f.desc, enrichedSub.name, enrichedSub.specs, enrichedSub.func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
                 fullFailures.push({ ...f, modes: modes?.length > 0 ? modes : (f.modes || []) });
             }
-            completedSubs.push({ ...s, failures: fullFailures });
+            completedSubs.push({ ...enrichedSub, failures: fullFailures });
         }
 
         const newSubs = completedSubs.map(s => ({
