@@ -337,21 +337,27 @@ setProjects(
         const rawSubs = await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
         if (!rawSubs || !Array.isArray(rawSubs) || rawSubs.length === 0) { alert("Generation failed."); setLoadingMaster(false); return; }
 
+        // Build a rich project context so all downstream steps see the full system description,
+        // not just the name — this is what generateMasterStructure already receives via sysDesc.
+        const projectContext = activeProject.desc
+            ? `${activeProject.name}: ${activeProject.desc.substring(0, 800)}`
+            : activeProject.name;
+
         const completedSubs: any[] = [];
         for (const s of rawSubs) {
             // Step 2: Regenerate func using the same mechanism as the Function field magic wand
-            // (empty currentText triggers the structured function generation prompt)
-            const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, subsystem: s.name, specs: s.specs }, aiProvider, azureEndpoint);
+            // Pass projectContext so the function description is aware of the full system config.
+            const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: projectContext, subsystem: s.name, specs: s.specs }, aiProvider, azureEndpoint);
             const enrichedSub = { ...s, func: funcDesc || s.func };
 
-            // Step 3: Derive comprehensive functional failures from the enriched function description
-            const expanded = await AIService.generateCompleteSubsystem(enrichedSub.name, enrichedSub.specs, enrichedSub.func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
+            // Step 3: Derive comprehensive functional failures — pass full projectContext.
+            const expanded = await AIService.generateCompleteSubsystem(enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
             const failures: any[] = expanded?.failures?.length > 0 ? expanded.failures : (enrichedSub.failures || []);
 
-            // Step 4: Derive comprehensive failure modes for each functional failure
+            // Step 4: Derive comprehensive failure modes — pass full projectContext.
             const fullFailures: any[] = [];
             for (const f of failures) {
-                const modes = await AIService.generateModesForFailure(f.desc, enrichedSub.name, enrichedSub.specs, enrichedSub.func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
+                const modes = await AIService.generateModesForFailure(f.desc, enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
                 fullFailures.push({ ...f, modes: modes?.length > 0 ? modes : (f.modes || []) });
             }
             completedSubs.push({ ...enrichedSub, failures: fullFailures });
