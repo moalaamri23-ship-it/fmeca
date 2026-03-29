@@ -12,9 +12,10 @@ interface MitigationBuilderProps {
     contextData?: ContextData;
     aiProvider?: string;
     azureEndpoint?: string;
+    systemContext?: string;
 }
 
-export const MitigationBuilder: React.FC<MitigationBuilderProps> = ({ value, onChange, apiKey, modelName, aiSourceMode, referenceFileText, contextData, aiProvider, azureEndpoint }) => {
+export const MitigationBuilder: React.FC<MitigationBuilderProps> = ({ value, onChange, apiKey, modelName, aiSourceMode, referenceFileText, contextData, aiProvider, azureEndpoint, systemContext }) => {
     const [act, setAct] = useState(""); 
     const [own, setOwn] = useState("");
     const insert = (e: React.MouseEvent) => { 
@@ -32,7 +33,7 @@ export const MitigationBuilder: React.FC<MitigationBuilderProps> = ({ value, onC
                 <input className="border rounded p-1 text-[10px] w-24 outline-none focus:border-brand-500" placeholder="Owner" value={own} onChange={e=>setOwn(e.target.value)} onClick={e=>e.stopPropagation()} />
                 <button onClick={insert} className="bg-blue-50 text-blue-600 px-2 py-1 rounded font-bold text-[10px] hover:bg-blue-100 border border-blue-200">+</button>
             </div>
-            <SmartInput label="" value={value} onChange={onChange} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={referenceFileText} contextData={contextData} aiProvider={aiProvider} azureEndpoint={azureEndpoint} placeholder="Mitigation..." />
+            <SmartInput label="" value={value} onChange={onChange} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={referenceFileText} contextData={contextData} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} placeholder="Mitigation..." />
         </div> 
     );
 };

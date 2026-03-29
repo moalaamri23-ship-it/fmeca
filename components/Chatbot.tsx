@@ -11,6 +11,7 @@ interface ChatbotProps {
   responseStyle: "normal" | "concise" | "one_sentence";
   aiProvider?: string;
   azureEndpoint?: string;
+  systemContext?: string;
 }
 
 function styleDirective(style: "normal" | "concise" | "one_sentence") {
@@ -102,7 +103,7 @@ function safeJsonParse(raw: string) {
 }
 
 
-export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelName, responseStyle, aiProvider = '', azureEndpoint = '' }) => {
+export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelName, responseStyle, aiProvider = '', azureEndpoint = '', systemContext = '' }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState("");
@@ -342,9 +343,11 @@ ${retrievedContext}
 
 const styleBlock = styleDirective(responseStyle);
 
-const systemPrompt = isRagEnabled
+const baseSystemPrompt = isRagEnabled
   ? (styleBlock ? `${systemPromptRagOn}\n\n${styleBlock}` : systemPromptRagOn)
   : (styleBlock ? `${SYSTEM_RAG_OFF}\n\n${styleBlock}` : SYSTEM_RAG_OFF);
+
+const systemPrompt = systemContext ? `${baseSystemPrompt}\n\n${systemContext}` : baseSystemPrompt;
 
     const apiMessages: AIMessage[] = [
   { role: 'system', content: systemPrompt },

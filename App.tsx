@@ -4,6 +4,7 @@ import XLSX from 'xlsx-js-style';
 import { Icon } from './components/Icon';
 import { SmartInput } from './components/SmartInput';
 import { MitigationBuilder } from './components/MitigationBuilder';
+import { SystemModesModal, SystemMode } from './components/SystemModesModal';
 import { TreeNode } from './components/TreeNode';
 import { AttachmentModal } from './components/AttachmentModal';
 import { Chatbot } from './components/Chatbot';
@@ -106,6 +107,12 @@ const App = () => {
 
     const [rpnLoadingId, setRpnLoadingId] = useState<string | null>(null);
 
+    // System Modes / System Context
+    const [systemType, setSystemType] = useState('');
+    const [systemModes, setSystemModes] = useState<SystemMode[]>([]);
+    const [systemContextEnabled, setSystemContextEnabled] = useState(true);
+    const [showSystemModes, setShowSystemModes] = useState(false);
+
 
     const toggleTree = (id: string) => setTreeExpanded(prev => {
         const next = new Set(prev);
@@ -145,6 +152,17 @@ const collapseAllTree = () => {
 };
 
 
+// Builds the system context injection block from operational failure data
+    const buildSystemContext = (type: string, modes: SystemMode[]): string => {
+        if (!modes.length) return '';
+        const sorted = [...modes].sort((a, b) => b.count - a.count).slice(0, 20);
+        const lines = sorted.map((m, i) => `${i + 1}. ${m.mode} — ${m.count} occurrences`).join('\n');
+        return `---\nSYSTEM CONTEXT (Informed by Operational Failure Data):\nSystem Type: ${type || 'N/A'}\nTop Failure Modes by Occurrence (ranked):\n${lines}\nUse this data to inform your analysis — these failure modes are known to occur in this type of system.\n---`;
+    };
+
+    // Derived: non-empty only when data is present AND enabled
+    const systemContext = (systemContextEnabled && systemModes.length > 0) ? buildSystemContext(systemType, systemModes) : '';
+
 const tryIso=(x:any)=>{ try{ if(!x) return null; const d=new Date(x); return Number.isNaN(d.getTime())?null:d.toISOString(); }catch(e){ return null; } };
 const normalizeProjectDates=(sp:any)=>{ const now=nowIso(); const createdAt=sp.createdAt||sp.updatedAt||tryIso(sp.created)||tryIso(sp.updated)||now; const updatedAt=sp.updatedAt||tryIso(sp.updated)||createdAt; return { ...sp, createdAt, updatedAt }; };
 
@@ -181,6 +199,9 @@ setProjects(
     setChatbotStyle((localStorage.getItem('rcm_chatbot_style') as ChatbotResponseStyle) || 'normal');
     setGlobalFileText(localStorage.getItem('rcm_global_file_text') || '');
     setGlobalFileName(localStorage.getItem('rcm_global_file_name') || '');
+    setSystemType(localStorage.getItem('rcm_system_type') || '');
+    setSystemModes(safeGet('rcm_system_modes', []));
+    setSystemContextEnabled(localStorage.getItem('rcm_system_context_enabled') !== 'false');
     
 
     // Init Storage Provider
@@ -220,7 +241,10 @@ setProjects(
         localStorage.setItem('rcm_chatbot_style', chatbotStyle);
         localStorage.setItem('rcm_global_file_text', globalFileText);
         localStorage.setItem('rcm_global_file_name', globalFileName);
-    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, enableChatbot, chatbotStyle, globalFileText, globalFileName]);
+        localStorage.setItem('rcm_system_type', systemType);
+        localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
+        localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
+    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, enableChatbot, chatbotStyle, globalFileText, globalFileName, systemType, systemModes, systemContextEnabled]);
 
     const createProject=()=>{ const now=nowIso(); const p:any={id:generateId(),name:"New Analysis",desc:"",createdAt:now,updatedAt:now,subsystems:[]}; setProjects([p,...projects]); setActiveProject(p); setView('editor'); };
     const closeEditor = () => { if(activeProject) setProjects(projects.map(p => p.id === activeProject.id ? activeProject : p)); setView('dashboard'); setActiveProject(null); };
@@ -321,20 +345,20 @@ setProjects(
     };
 
 
-    const aiScoreModeRpn = async (sId:any, fId:any, mId:any) => { try { if(!activeProject) return; if(!apiKey) return alert("API Key required."); const sid=String(sId), fid=String(fId), mid=String(mId); const sub=activeProject.subsystems.find(s=>String(s.id)===sid); const fail=sub?.failures.find(f=>String(f.id)===fid); const mode=fail?.modes.find(m=>String(m.id)===mid); if(!sub||!fail||!mode) return alert("RPN AI error: Mode not found"); setRpnLoadingId(mid); const r=await AIService.evaluateRpnFromText({ project: activeProject.name, subName: sub.name||"", subSpecs: sub.specs||"", subFunc: sub.func||"", failDesc: fail.desc||"", mode: mode.mode||"", effect: mode.effect||"", cause: mode.cause||"", mitigation: mode.mitigation||"", key: apiKey, modelName, modeSource: aiSourceMode as any, refText: globalFileText||"", aiProvider, azureEndpoint }); setActiveProject(p=>!p? p : ({...p, subsystems: p.subsystems.map(s=>String(s.id)!==sid? s : ({...s, failures: s.failures.map(f=>String(f.id)!==fid? f : ({...f, modes: f.modes.map(m=>String(m.id)!==mid? m : ({...m, rpn:{...m.rpn, s:r.s, o:r.o, d:r.d}}))}))}))})); } catch(e:any){ console.error(e); alert("RPN AI error: " + (e?.message||e)); } finally { setRpnLoadingId(String(mId)); setTimeout(()=>setRpnLoadingId(null), 150); } };
+    const aiScoreModeRpn = async (sId:any, fId:any, mId:any) => { try { if(!activeProject) return; if(!apiKey) return alert("API Key required."); const sid=String(sId), fid=String(fId), mid=String(mId); const sub=activeProject.subsystems.find(s=>String(s.id)===sid); const fail=sub?.failures.find(f=>String(f.id)===fid); const mode=fail?.modes.find(m=>String(m.id)===mid); if(!sub||!fail||!mode) return alert("RPN AI error: Mode not found"); setRpnLoadingId(mid); const r=await AIService.evaluateRpnFromText({ project: activeProject.name, subName: sub.name||"", subSpecs: sub.specs||"", subFunc: sub.func||"", failDesc: fail.desc||"", mode: mode.mode||"", effect: mode.effect||"", cause: mode.cause||"", mitigation: mode.mitigation||"", key: apiKey, modelName, modeSource: aiSourceMode as any, refText: globalFileText||"", aiProvider, azureEndpoint, systemContext }); setActiveProject(p=>!p? p : ({...p, subsystems: p.subsystems.map(s=>String(s.id)!==sid? s : ({...s, failures: s.failures.map(f=>String(f.id)!==fid? f : ({...f, modes: f.modes.map(m=>String(m.id)!==mid? m : ({...m, rpn:{...m.rpn, s:r.s, o:r.o, d:r.d}}))}))}))})); } catch(e:any){ console.error(e); alert("RPN AI error: " + (e?.message||e)); } finally { setRpnLoadingId(String(mId)); setTimeout(()=>setRpnLoadingId(null), 150); } };
 
 
     const setBusy = (id: string, on: boolean) => setRpnBusy(prev => { const next = new Set(prev); on ? next.add(id) : next.delete(id); return next; });
 
-    const autoGen = async (sId: string, name: string, specs: string, func: string) => { setGenId(sId); if(activeProject) { const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint); if(res && res.failures) { setActiveProject(p => p ? ({ ...p, subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: [...s.failures, ...res.failures.map((f: any) => ({...f, id: generateId(), modes: f.modes.map((m: any) => ({...m, id: generateId()}))}))] }) }) : null); } } setGenId(null); };
-    const genModes = async (sId: string, fId: string, name: string, specs: string, func: string, failDesc: string) => { setModeGenId(fId); if(activeProject) { const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint); if(modes) setActiveProject(p => p ? ({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, ...modes.map(m => ({...m, id: generateId()}))]} : f)} : s)}) : null); } setModeGenId(null); };
+    const autoGen = async (sId: string, name: string, specs: string, func: string) => { setGenId(sId); if(activeProject) { const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext); if(res && res.failures) { setActiveProject(p => p ? ({ ...p, subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: [...s.failures, ...res.failures.map((f: any) => ({...f, id: generateId(), modes: f.modes.map((m: any) => ({...m, id: generateId()}))}))] }) }) : null); } } setGenId(null); };
+    const genModes = async (sId: string, fId: string, name: string, specs: string, func: string, failDesc: string) => { setModeGenId(fId); if(activeProject) { const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext); if(modes) setActiveProject(p => p ? ({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, ...modes.map(m => ({...m, id: generateId()}))]} : f)} : s)}) : null); } setModeGenId(null); };
     const masterGen = async () => {
         if (!apiKey) return alert("API Key required.");
         if (!activeProject?.name) return alert("Enter System Name.");
         setLoadingMaster(true);
 
         // Step 1: Generate subsystem skeletons (name, specs, func, initial failures)
-        const rawSubs = await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
+        const rawSubs = await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext);
         if (!rawSubs || !Array.isArray(rawSubs) || rawSubs.length === 0) { alert("Generation failed."); setLoadingMaster(false); return; }
 
         // Build a rich project context so all downstream steps see the full system description,
@@ -347,17 +371,17 @@ setProjects(
         for (const s of rawSubs) {
             // Step 2: Regenerate func using the same mechanism as the Function field magic wand
             // Pass projectContext so the function description is aware of the full system config.
-            const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: projectContext, subsystem: s.name, specs: s.specs }, aiProvider, azureEndpoint);
+            const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: projectContext, subsystem: s.name, specs: s.specs }, aiProvider, azureEndpoint, systemContext);
             const enrichedSub = { ...s, func: funcDesc || s.func };
 
             // Step 3: Derive comprehensive functional failures — pass full projectContext.
-            const expanded = await AIService.generateCompleteSubsystem(enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
+            const expanded = await AIService.generateCompleteSubsystem(enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext);
             const failures: any[] = expanded?.failures?.length > 0 ? expanded.failures : (enrichedSub.failures || []);
 
             // Step 4: Derive comprehensive failure modes — pass full projectContext.
             const fullFailures: any[] = [];
             for (const f of failures) {
-                const modes = await AIService.generateModesForFailure(f.desc, enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
+                const modes = await AIService.generateModesForFailure(f.desc, enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext);
                 fullFailures.push({ ...f, modes: modes?.length > 0 ? modes : (f.modes || []) });
             }
             completedSubs.push({ ...enrichedSub, failures: fullFailures });
@@ -427,6 +451,7 @@ setProjects(
     responseStyle={chatbotStyle}
     aiProvider={aiProvider}
     azureEndpoint={azureEndpoint}
+    systemContext={systemContext}
   />
 )}
 
@@ -560,6 +585,20 @@ setProjects(
                                 <div className="bg-white p-6 rounded shadow-sm mb-8">
                                     <div className="flex items-center gap-4 mb-2">
                                         <input className="text-2xl font-bold w-full outline-none flex-1" value={activeProject.name} onChange={e => updateHeader('name', e.target.value)} />
+                                        {systemModes.length > 0 && systemContextEnabled && (
+                                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-green-700 bg-green-50 border border-green-200 px-2 py-1 rounded whitespace-nowrap">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse inline-block"></span>
+                                                System Context Active
+                                            </span>
+                                        )}
+                                        <button
+                                            onClick={() => setShowSystemModes(true)}
+                                            className={`px-3 py-2 rounded border font-bold text-xs inline-flex items-center gap-1 whitespace-nowrap transition ${systemModes.length > 0 ? 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                                            title="Configure System Modes context for AI"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                                            System Modes
+                                        </button>
                                         <button
                                             onClick={masterGen}
                                             className="bg-gradient-to-r from-brand-600 to-indigo-600 text-white px-4 py-2 rounded shadow font-bold text-xs inline-flex items-center whitespace-nowrap hover:shadow-lg transition"
@@ -574,7 +613,7 @@ setProjects(
                                             )}
                                         </button>
                                     </div>
-                                    <SmartInput label="Context" value={activeProject.desc} onChange={v => updateHeader('desc', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} />
+                                    <SmartInput label="Context" value={activeProject.desc} onChange={v => updateHeader('desc', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} />
                                 </div>
                                 {activeProject.subsystems.map((sub, i) => (
                                     <div key={sub.id} draggable={dragAllowed===i||dragId===i} onDragStart={(e)=>handleDragStart(e,i)} onDragEnd={handleDragEnd} onDragOver={(e)=>e.preventDefault()} onDragEnter={()=>handleDragEnter(i)} onDrop={(e)=>{ e.preventDefault(); setDragId(null); setDragAllowed(null); }} onClick={()=>setActiveSubId(sub.id)} className={`bg-white rounded border shadow-sm mb-8 overflow-hidden animate-enter transition-all cursor-pointer border-2 ${activeSubId===sub.id?'border-brand-500 ring-2 ring-brand-100':'border-slate-200'} ${dragId===i?'is-dragging opacity-50 border-dashed border-brand-500':''} ${dragId!==null&&dragId!==i?'':' '}`}>
@@ -583,9 +622,9 @@ setProjects(
                                                 <div className="flex gap-2 items-center">
                                                     <div className="text-slate-400 cursor-grab hover:text-brand-600 drag-handle p-1" title="Reorder" onMouseEnter={()=>setDragAllowed(i)} onMouseLeave={()=>{ if(dragId===null) setDragAllowed(null); }}><Icon name="move"/></div>
                                                     <button onClick={(e) => {e.stopPropagation(); toggleSub(sub.id)}} className="text-slate-400"><Icon name={sub.collapsed ? "chevronDown" : "chevronUp"} /></button>
-                                                    <SmartInput label="Subsystem" value={sub.name} onChange={v => updateSub(sub.id, 'name', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} contextData={{project: activeProject.name, subsystem: sub.name}} />
+                                                    <SmartInput label="Subsystem" value={sub.name} onChange={v => updateSub(sub.id, 'name', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} contextData={{project: activeProject.name, subsystem: sub.name}} />
                                                 </div>
-                                                <SmartInput label="Specs" value={sub.specs} onChange={v => updateSub(sub.id, 'specs', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} contextData={{project: activeProject.name, subsystem: sub.name}} />
+                                                <SmartInput label="Specs" value={sub.specs} onChange={v => updateSub(sub.id, 'specs', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} contextData={{project: activeProject.name, subsystem: sub.name}} />
                                                 <div className="mt-2 space-y-1">
                                                     <div className="text-[10px] font-semibold uppercase text-slate-500">Subsystem image (AI)</div>
                                                     <div className="flex items-center gap-2 flex-nowrap">
@@ -627,7 +666,7 @@ setProjects(
                                         </div>
                                         {!sub.collapsed && (
                                             <div className="animate-enter">
-                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2">{genId===sub.id ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
+                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2">{genId===sub.id ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full text-left text-sm border-collapse">
                                                         <thead className="bg-slate-50 text-slate-500 text-xs font-bold uppercase"><tr><th className="p-2 border-r w-1/5">Functional Failure</th><th className="p-2 border-r w-1/6">Mode</th><th className="p-2 border-r w-1/6">Effect</th><th className="p-2 border-r w-1/6">Cause</th><th className="p-2 border-r w-1/5">Mitigation</th>{showRPN && <th className="p-2 text-center">RPN</th>}<th className="p-2 text-center">Edit</th></tr></thead>
@@ -639,7 +678,7 @@ setProjects(
                                                                             <div className="flex items-start p-2 gap-2 group">
                                                                                 <button onClick={(e)=>{e.stopPropagation(); toggleFail(sub.id, fail.id)}} className="mt-1 text-slate-400"><Icon name={fail.collapsed?"chevronDown":"chevronUp"}/></button>
                                                                                 <div className="flex-1">
-                                                                                    <SmartInput value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} contextData={{project: activeProject.name, subsystem: sub.name}} />
+                                                                                    <SmartInput value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} contextData={{project: activeProject.name, subsystem: sub.name}} />
                                                                                     <div className="flex gap-4 mt-1">
                                                                                         <button onClick={(e)=>{e.stopPropagation(); genModes(sub.id, fail.id, sub.name, sub.specs, sub.func, fail.desc)}} disabled={modeGenId === fail.id} className="text-xs text-brand-600 font-bold flex gap-1 items-center hover:underline">{modeGenId === fail.id ? "..." : <span><Icon name="bolt"/> Generate Modes</span>}</button>
                                                                                         <button onClick={(e)=>{e.stopPropagation(); openAttachments('fail', sub, fail)}} className="text-xs text-slate-500 font-bold flex gap-1 items-center hover:text-brand-600"><Icon name="clip" className="w-3 h-3"/> References</button>
@@ -652,10 +691,10 @@ setProjects(
                                                                     {!fail.collapsed && fail.modes.map((mode, mIdx) => (
                                                                         <tr key={mode.id} className="group hover:bg-slate-50">
                                                                             <td className="p-2 border-r bg-slate-50/10 text-right text-xs text-slate-300">M{mIdx+1}</td>
-                                                                            <td className="p-2 border-r"><SmartInput value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
-                                                                            <td className="p-2 border-r"><SmartInput value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} isTextArea apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
-                                                                            <td className="p-2 border-r"><SmartInput value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
-                                                                            <td className="p-2 border-r"><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
+                                                                            <td className="p-2 border-r"><SmartInput value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
+                                                                            <td className="p-2 border-r"><SmartInput value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} isTextArea apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
+                                                                            <td className="p-2 border-r"><SmartInput value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
+                                                                            <td className="p-2 border-r"><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
                                                                             {showRPN && <td className="p-2 text-center"><div className="flex justify-center gap-0.5 mb-1"><input className="w-5 text-center border text-xs" value={mode.rpn.s} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, s:e.target.value})}/><input className="w-5 text-center border text-xs" value={mode.rpn.o} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, o:e.target.value})}/><input className="w-5 text-center border text-xs" value={mode.rpn.d} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, d:e.target.value})}/></div><div className={`text-xs font-bold rounded py-1 border ${getRpnColor((Number(mode.rpn.s)||1)*(Number(mode.rpn.o)||1)*(Number(mode.rpn.d)||1))}`}>{(Number(mode.rpn.s)||1)*(Number(mode.rpn.o)||1)*(Number(mode.rpn.d)||1)}</div></td>}
                                                                             <td className="p-2 text-center opacity-0 group-hover:opacity-100"><div className="flex flex-col items-center gap-1"><button onClick={(e)=>{e.stopPropagation();deleteMode(sub.id,fail.id,mode.id)}} className="text-red-500 mb-2"><Icon name="trash"/></button><button onClick={(e)=>{e.stopPropagation();aiScoreModeRpn(sub.id,fail.id,mode.id)}} className={`text-blue-500 text-sm ${rpnLoadingId===String(mode.id) ? "animate-pulse scale-110 drop-shadow-[0_0_6px_rgba(59,130,246,0.6)]" : ""}`} title="AI score S/O/D">🤖</button></div></td>
                                                                         </tr>
@@ -826,8 +865,8 @@ setProjects(
                             {Object.entries(library).map(([k, v]) => (<div key={k} className="mb-6"><h4 className="text-xs font-bold uppercase text-slate-400 border-b pb-1 mb-2">{k}</h4>{v.map((item, i) => (<div key={i} onClick={()=>injectLib(item)} className="p-3 border rounded-lg mb-2 text-xs hover:bg-brand-50 cursor-pointer shadow-sm bg-white"><div className="font-bold text-brand-700 mb-1">{item.fail}</div><div><b>Mode:</b> {item.mode}</div><div><b>Effect:</b> {item.effect}</div><div><b>Cause:</b> {item.cause}</div><div className="mt-1 text-slate-400">Task: {item.task}</div></div>))}</div>))}
                         </div>
                     )}
-                    <AttachmentModal 
-                        isOpen={attachModal.open} 
+                    <AttachmentModal
+                        isOpen={attachModal.open}
                         onClose={()=>setAttachModal({...attachModal, open: false})}
                         entityType={attachModal.type}
                         entityName={attachModal.type==='sub' ? (attachModal.entity && attachModal.entity.name) : (attachModal.entity && attachModal.entity.desc)}
@@ -836,6 +875,17 @@ setProjects(
                         pathParts={getAttachmentPath()}
                     />
                 </div>
+            )}
+            {showSystemModes && (
+                <SystemModesModal
+                    systemType={systemType}
+                    systemModes={systemModes}
+                    systemContextEnabled={systemContextEnabled}
+                    onInsert={(type, modes) => { setSystemType(type); setSystemModes(modes); setSystemContextEnabled(true); }}
+                    onClear={() => { setSystemType(''); setSystemModes([]); setSystemContextEnabled(true); }}
+                    onToggle={() => setSystemContextEnabled(e => !e)}
+                    onClose={() => setShowSystemModes(false)}
+                />
             )}
         </div>
     );

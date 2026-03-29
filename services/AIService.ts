@@ -97,10 +97,10 @@ export const AIService = {
     // FEATURE IMPLEMENTATIONS (Refactored to use contract)
     // -------------------------------------------------------------------------
 
-    async generate(prompt: string, currentText: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', contextData: ContextData = {}, aiProvider: string = '', azureEndpoint: string = ''): Promise<string> {
+    async generate(prompt: string, currentText: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', contextData: ContextData = {}, aiProvider: string = '', azureEndpoint: string = '', systemContext: string = ''): Promise<string> {
         if (!key || key.length < 10) { await new Promise(r => setTimeout(r, 600)); const wc = currentText ? currentText.trim().split(/\s+/).filter(Boolean).length : 0; return currentText && wc > 5 ? currentText + " [Enhanced]" : currentText && wc > 0 ? currentText + " [Spell-checked]" : "AI Suggested Text"; }
-        
-        const fieldLabel = prompt || "text"; 
+
+        const fieldLabel = prompt || "text";
         const lowerLabel = fieldLabel.toLowerCase();
         let corePrompt = "";
 
@@ -138,12 +138,14 @@ export const AIService = {
             }
         }
 
+        const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
+
         return this.chat({
             feature: 'field-generation',
             provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
             azureEndpoint: azureEndpoint || undefined,
             model: modelName,
-            messages: [{ role: 'user', content: corePrompt }],
+            messages: [{ role: 'user', content: content }],
             mode: mode as 'ai'|'file'|'hybrid',
             refText,
             contextData,
@@ -152,47 +154,49 @@ export const AIService = {
         });
     },
 
-    async generateMasterStructure(sysName: string, sysDesc: string, key: string, modelName: string, mode: string, refText: string, aiProvider: string = '', azureEndpoint: string = ''): Promise<any> {
+    async generateMasterStructure(sysName: string, sysDesc: string, key: string, modelName: string, mode: string, refText: string, aiProvider: string = '', azureEndpoint: string = '', systemContext: string = ''): Promise<any> {
         if(!key || key.length < 10) { await new Promise(r => setTimeout(r, 2000)); return []; }
-        const corePrompt = `Act as Senior Reliability Engineer. Analyze System "${sysName}" (${sysDesc}). 
-        Break into 3-6 critical Subsystems. 
+        const corePrompt = `Act as Senior Reliability Engineer. Analyze System "${sysName}" (${sysDesc}).
+        Break into 3-6 critical Subsystems.
         Step 1: For each subsystem, generate 'specs' first using format "Key: Value Unit, Key: Value Unit".
         Step 2: Generate 'func' (Function) using: Action + Specs Values + Normal Expectations (continuous op, no noise/leaks).
         Step 3: Generate multiple (2-4) distinct 'failures' (Functional Failures) that represent different ways the function can fail (e.g., total loss, partial loss, intermittent operation, over-function).
         Step 4: For EACH failure, generate 1-2 Failure Modes, Effects, Causes, and Mitigations (Hierarchy: Func -> Multiple Failures -> Mode -> Effect -> Cause -> Mitigation).
-        Output strictly valid JSON object: 
-        { "subsystems": [ { 
-            "name": "string (Subsystem Name)", 
-            "specs": "string (Key: Value Unit, ...)", 
-            "func": "string (Action + Specs + Normal Expectations)", 
-            "failures": [ { 
-                "desc": "string (Functional Failure 1)", 
-                "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] 
+        Output strictly valid JSON object:
+        { "subsystems": [ {
+            "name": "string (Subsystem Name)",
+            "specs": "string (Key: Value Unit, ...)",
+            "func": "string (Action + Specs + Normal Expectations)",
+            "failures": [ {
+                "desc": "string (Functional Failure 1)",
+                "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ]
             },
-            { 
-                "desc": "string (Functional Failure 2)", 
-                "modes": [ ... ] 
-            } ] 
+            {
+                "desc": "string (Functional Failure 2)",
+                "modes": [ ... ]
+            } ]
         } ] }`;
 
-        try { 
+        const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
+
+        try {
             const res = await this.chat({
                 feature: 'master-structure',
                 provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 model: modelName,
-                messages: [{ role: 'user', content: corePrompt }],
+                messages: [{ role: 'user', content: content }],
                 mode: mode as 'ai'|'file'|'hybrid',
                 refText,
                 apiKey: key,
                 responseFormat: 'json'
-            }); 
-            const parsed = this.extractJSON(res); 
-            return parsed.subsystems || []; 
+            });
+            const parsed = this.extractJSON(res);
+            return parsed.subsystems || [];
         } catch(e) { return []; }
     },
 
-    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = ''): Promise<any> {
+    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = ''): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if(!key || key.length < 10) { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "Inspection", rpn: {s:5,o:5,d:5} }] }] }; }
@@ -203,23 +207,25 @@ export const AIService = {
         3. For each failure, generate Failure Modes, Effects, Causes, and Mitigations.
         Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] } ] }`;
 
-        try { 
+        const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
+
+        try {
             const res = await this.chat({
                 feature: 'subsystem-generation',
                 provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 model: modelName,
-                messages: [{ role: 'user', content: corePrompt }],
+                messages: [{ role: 'user', content: content }],
                 mode: mode as 'ai'|'file'|'hybrid',
                 refText,
                 apiKey: key,
                 responseFormat: 'json'
             });
-            return this.extractJSON(res); 
+            return this.extractJSON(res);
         } catch(e) { return null; }
     },
 
-    async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = ''): Promise<any[]> {
+    async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = ''): Promise<any[]> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if (!key || key.length < 10) { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Effect", cause: "Cause", mitigation: "Task", rpn: {s:6,o:4,d:3} }]; }
@@ -227,21 +233,23 @@ export const AIService = {
         Task: Generate 2-3 specific Failure Modes that result in this Functional Failure.
         For each mode, determine Effect, Root Cause, and Mitigation Task.
         Return JSON object: { "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] }`;
-        
-        try { 
+
+        const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
+
+        try {
             const res = await this.chat({
                 feature: 'mode-generation',
                 provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 model: modelName,
-                messages: [{ role: 'user', content: corePrompt }],
+                messages: [{ role: 'user', content: content }],
                 mode: mode as 'ai'|'file'|'hybrid',
                 refText,
                 apiKey: key,
                 responseFormat: 'json'
             });
-            const parsed = this.extractJSON(res); 
-            return parsed.modes || []; 
+            const parsed = this.extractJSON(res);
+            return parsed.modes || [];
         } catch(e) { return []; }
     },
 
@@ -262,13 +270,14 @@ async evaluateRpnFromText(
     refText?: string;
     aiProvider?: string;
     azureEndpoint?: string;
+    systemContext?: string;
   }
 ): Promise<{ s: number; o: number; d: number; reason?: string }> {
   const {
     project, subName, subSpecs, subFunc, failDesc,
     mode, effect, cause, mitigation,
     key, modelName, modeSource = 'ai', refText = '',
-    aiProvider = '', azureEndpoint = ''
+    aiProvider = '', azureEndpoint = '', systemContext = ''
   } = args;
 
   if (!key || key.length < 10) {
@@ -341,12 +350,14 @@ Output format:
 }
 `.trim();
 
+  const rpnContent = corePrompt + (systemContext ? '\n\n' + systemContext : '');
+
   const res = await this.chat({
     feature: 'rpn-evaluation',
     provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
     azureEndpoint: azureEndpoint || undefined,
     model: modelName,
-    messages: [{ role: 'user', content: corePrompt }],
+    messages: [{ role: 'user', content: rpnContent }],
     mode: modeSource,
     refText,
     apiKey: key,

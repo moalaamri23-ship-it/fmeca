@@ -16,19 +16,20 @@ interface SmartInputProps {
     contextData?: ContextData;
     aiProvider?: string;
     azureEndpoint?: string;
+    systemContext?: string;
 }
 
-export const SmartInput: React.FC<SmartInputProps> = ({ label, value, onChange, isTextArea, apiKey, modelName, placeholder, aiSourceMode = 'ai', referenceFileText = '', contextData = {}, aiProvider = '', azureEndpoint = '' }) => {
+export const SmartInput: React.FC<SmartInputProps> = ({ label, value, onChange, isTextArea, apiKey, modelName, placeholder, aiSourceMode = 'ai', referenceFileText = '', contextData = {}, aiProvider = '', azureEndpoint = '', systemContext = '' }) => {
     const [loading, setLoading] = useState(false);
-    const handleAI = async () => { 
-        setLoading(true); 
+    const handleAI = async () => {
+        setLoading(true);
         try {
-            const res = await AIService.generate(label || "", value, apiKey, modelName, aiSourceMode, referenceFileText, contextData, aiProvider, azureEndpoint);
-            onChange(res); 
+            const res = await AIService.generate(label || "", value, apiKey, modelName, aiSourceMode, referenceFileText, contextData, aiProvider, azureEndpoint, systemContext);
+            onChange(res);
         } catch(e) {
             console.error(e);
         }
-        setLoading(false); 
+        setLoading(false);
     };
     return ( 
         <div className="w-full mb-1 relative group">
