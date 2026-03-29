@@ -1,0 +1,5 @@
+{
+  "name": "FMECA Studio",
+  "description": "A specialized editor for Failure Mode, Effects, and Criticality Analysis (FMECA) featuring AI-assisted content generation, hierarchical mapping, and file system attachments.",
+  "requestFramePermissions": []
+}
