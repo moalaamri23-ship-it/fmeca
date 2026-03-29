@@ -162,8 +162,8 @@ setProjects(
     // Migration:
     // - Old "updated" was effectively creation date.
     // - New behavior: created = creation date, updated = last modified
-    const created = sp.created || sp.updated || todayStr();
-    const updated = sp.updated || sp.updatedAt || created;
+    const created = sp.createdAt || sp.created || sp.updated || nowIso();
+    const updated = sp.updatedAt || sp.updated || created;
 
     return {
       ...sp,
