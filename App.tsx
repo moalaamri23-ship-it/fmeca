@@ -328,7 +328,41 @@ setProjects(
 
     const autoGen = async (sId: string, name: string, specs: string, func: string) => { setGenId(sId); if(activeProject) { const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint); if(res && res.failures) { setActiveProject(p => p ? ({ ...p, subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: [...s.failures, ...res.failures.map((f: any) => ({...f, id: generateId(), modes: f.modes.map((m: any) => ({...m, id: generateId()}))}))] }) }) : null); } } setGenId(null); };
     const genModes = async (sId: string, fId: string, name: string, specs: string, func: string, failDesc: string) => { setModeGenId(fId); if(activeProject) { const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint); if(modes) setActiveProject(p => p ? ({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, ...modes.map(m => ({...m, id: generateId()}))]} : f)} : s)}) : null); } setModeGenId(null); };
-    const masterGen = async () => { if(!apiKey) return alert("API Key required."); if(!activeProject?.name) return alert("Enter System Name."); setLoadingMaster(true); const rawSubs = await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint); if (rawSubs && Array.isArray(rawSubs)) { const newSubs = rawSubs.map(s => ({ id: generateId(), name: s.name, specs: s.specs, func: s.func, imageData: "", imageName: "", imageJson: "", showImageJson: false, failures: (s.failures || []).map((f: any) => ({ id: generateId(), desc: f.desc, modes: (f.modes || []).map((m: any) => ({ id: generateId(), mode: m.mode, effect: m.effect, cause: m.cause, mitigation: m.mitigation, rpn: m.rpn || {s:5,o:5,d:5} })) })) })); setActiveProject(p => p ? ({...p, subsystems: [...p.subsystems, ...newSubs]}) : null); } else { alert("Generation failed."); } setLoadingMaster(false); };
+    const masterGen = async () => {
+        if (!apiKey) return alert("API Key required.");
+        if (!activeProject?.name) return alert("Enter System Name.");
+        setLoadingMaster(true);
+
+        // Step 1: Generate subsystem skeletons (name, specs, func, initial failures)
+        const rawSubs = await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
+        if (!rawSubs || !Array.isArray(rawSubs) || rawSubs.length === 0) { alert("Generation failed."); setLoadingMaster(false); return; }
+
+        const completedSubs: any[] = [];
+        for (const s of rawSubs) {
+            // Step 2: Derive comprehensive functional failures from the function description
+            const expanded = await AIService.generateCompleteSubsystem(s.name, s.specs, s.func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
+            const failures: any[] = expanded?.failures?.length > 0 ? expanded.failures : (s.failures || []);
+
+            // Step 3: Derive comprehensive failure modes for each functional failure
+            const fullFailures: any[] = [];
+            for (const f of failures) {
+                const modes = await AIService.generateModesForFailure(f.desc, s.name, s.specs, s.func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint);
+                fullFailures.push({ ...f, modes: modes?.length > 0 ? modes : (f.modes || []) });
+            }
+            completedSubs.push({ ...s, failures: fullFailures });
+        }
+
+        const newSubs = completedSubs.map(s => ({
+            id: generateId(), name: s.name, specs: s.specs, func: s.func,
+            imageData: "", imageName: "", imageJson: "", showImageJson: false,
+            failures: (s.failures || []).map((f: any) => ({
+                id: generateId(), desc: f.desc,
+                modes: (f.modes || []).map((m: any) => ({ id: generateId(), mode: m.mode, effect: m.effect, cause: m.cause, mitigation: m.mitigation, rpn: m.rpn || { s: 5, o: 5, d: 5 } }))
+            }))
+        }));
+        setActiveProject(p => p ? ({ ...p, subsystems: [...p.subsystems, ...newSubs] }) : null);
+        setLoadingMaster(false);
+    };
     const injectLib = (item: LibraryItem) => { if(!activeProject) return; if(activeProject.subsystems.length === 0) return alert("Add Subsystem"); let targetSubId = activeSubId || activeProject.subsystems[0].id; const targetIndex = activeProject.subsystems.findIndex(s => s.id === targetSubId); if(targetIndex === -1) return; const nm: Mode = {id: generateId(), mode: item.mode, effect: item.effect || "", cause: item.cause, mitigation: item.task, rpn:{s:5,o:5,d:5}}; const nf: Failure = {id: generateId(), desc: item.fail || `Failure`, modes: [nm]}; const newSubs = [...activeProject.subsystems]; newSubs[targetIndex] = {...newSubs[targetIndex], failures: [...newSubs[targetIndex].failures, nf]}; setActiveProject({...activeProject, subsystems: newSubs}); };
     const getRpnColor = (r: number) => r >= 100 ? "bg-red-100 text-red-800" : r >= 40 ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800";
     const getSubRowSpan = (sub: Subsystem) => { if (sub.failures.length === 0) return 1; return sub.failures.reduce((acc, f) => acc + (f.modes.length || 1), 0); };
