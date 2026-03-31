@@ -109,7 +109,36 @@ export const AIService = {
         if (currentText && wordCount > 0 && wordCount <= 5) {
             corePrompt = `Fix only the grammar and spelling of the following text. Return only the corrected text with no explanations or changes to meaning. Original: """${currentText}"""`;
         } else if (currentText && wordCount > 5) {
-            corePrompt = `As Reliability Engineer, enhance and improve this text for field "${fieldLabel}". Improve clarity, completeness, and technical quality while strictly preserving the original meaning. Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}". Original: """${currentText}"""`;
+            if (lowerLabel.includes("function")) {
+                corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
+                The user wrote this Function Description: """${currentText}"""
+                Task: Rewrite and enhance it as a proper Function Description.
+                Requirements:
+                1. Start directly with the verb/action (e.g., "Pumps", "Delivers", "Regulates").
+                2. NO introductory phrases like "The function is" or "Description:".
+                3. State what the subsystem does within the System.
+                4. Include key operating values from Specs if available.
+                5. Clearly state normal expectations (e.g., continuous operation, no abnormal vibration, leakage, or temperature).
+                6. Preserve the user's core meaning and any specific values they provided.
+                Output strictly the description text only.`;
+            } else if (lowerLabel.includes("spec")) {
+                corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}".
+                The user wrote these specifications: """${currentText}"""
+                Task: Rewrite and enhance them in the correct format.
+                Format: Comma-separated list of "Key: Value Unit".
+                Example: Power: 400 W, Voltage: 415 V, Speed: 3590 RPM, Material: SS316, Protection: IP55.
+                Requirements: Preserve all values the user provided. Keep it technical and concise. Do not include the word "Specs:" at the start.
+                Output strictly the specifications text only.`;
+            } else {
+                corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}".
+                The user wrote the following for the field "${fieldLabel}": """${currentText}"""
+                Task: Rewrite and enhance this as ONE concise phrase for the field "${fieldLabel}" from a reliability engineering perspective.
+                Requirements:
+                1. Return ONLY the field value — no prefixes, no labels, no explanations, no discussion.
+                2. Preserve the user's core meaning and any specific technical details.
+                3. Use proper reliability engineering terminology.
+                Output strictly the field value only.`;
+            }
         } else {
             if (lowerLabel.includes("function")) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
