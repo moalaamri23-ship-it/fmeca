@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AIService, AIMessage } from '../services/AIService';
+import { AIService, AIMessage, ToolDefinition } from '../services/AIService';
 import { RAGService } from '../services/RAGService';
 import { Project } from '../types';
 import { Icon } from './Icon';
@@ -40,11 +40,23 @@ interface Message {
 }
 // ===== System Prompts =====
 
-const SYSTEM_RAG_ON = `
-You are an FMECA project copilot. Use the provided project context as the primary source of truth.
-If required details are missing from the context, say what is missing and ask for the minimum needed info.
-Keep answers structured and practical for reliability engineering.
-`.trim();
+const SYSTEM_RAG_ON = `You are "FMECA Copilot", a senior Reliability / RCM consultant.
+Answer questions about the user's FMECA project using the RETRIEVED DATA provided below.
+
+SCOPE (hard rule):
+- Ground all answers in the RETRIEVED DATA. Do not invent project data.
+- If something is absent from the retrieved data, say so clearly, then optionally suggest "Candidate (Not in project)" items.
+
+ANSWER GUIDELINES:
+- Locate/trace questions: Report the full path — Subsystem → Functional Failure → Failure Mode → [Field].
+- List/overview questions: Use the data structure; note counts and hierarchy.
+- Consistency checks: Critique only what is in the data; label suggestions as "Candidate (Not in project)".
+- Gap analysis: Point out missing fields first, then suggest "Candidate (Not in project)" improvements.
+- Risk/priority questions: Reference RPN scores and rank modes accordingly.
+
+OUTPUT STYLE:
+- Be concise and workshop-ready. Quote project fields when present.
+- End with one targeted follow-up question.`.trim();
 
 const SYSTEM_RAG_OFF = `
 You are a senior reliability-focused subject-matter expert.
@@ -55,6 +67,64 @@ failure modes, degradation mechanisms, risk, safe operation,
 maintainability, inspection, and lifecycle considerations.
 Do not assume access to any project-specific data unless it is provided.
 `.trim();
+
+// ===== Tool Definitions =====
+
+const FMECA_TOOLS: ToolDefinition[] = [
+    {
+        name: 'list_subsystems',
+        description: 'List all subsystems in the project with functional failure counts and top RPN values. Call this first for overview or orientation questions.',
+        parameters: { type: 'object', properties: {}, required: [] }
+    },
+    {
+        name: 'get_subsystem_detail',
+        description: 'Get full details of a specific subsystem: specs, function description, and list of all functional failures with mode counts.',
+        parameters: {
+            type: 'object',
+            properties: {
+                subsystem_name: { type: 'string', description: 'Subsystem name or partial name (fuzzy matched)' }
+            },
+            required: ['subsystem_name']
+        }
+    },
+    {
+        name: 'get_failure_modes',
+        description: 'Get all failure modes for a subsystem with effect, cause, mitigation and RPN scores. Optionally filter to a specific functional failure.',
+        parameters: {
+            type: 'object',
+            properties: {
+                subsystem_name: { type: 'string', description: 'Subsystem name (fuzzy matched)' },
+                functional_failure: { type: 'string', description: 'Optional: filter to a specific functional failure description' }
+            },
+            required: ['subsystem_name']
+        }
+    },
+    {
+        name: 'search_project',
+        description: 'Search across all project data — subsystems, functional failures, failure modes, effects, causes, mitigations — for a term or phrase.',
+        parameters: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'Term or phrase to search for' }
+            },
+            required: ['query']
+        }
+    },
+    {
+        name: 'get_rpn_summary',
+        description: 'Get all failure modes ranked by RPN (Risk Priority Number), highest first. Optionally filter by subsystem or set a minimum RPN threshold.',
+        parameters: {
+            type: 'object',
+            properties: {
+                subsystem_name: { type: 'string', description: 'Optional: filter to a specific subsystem' },
+                min_rpn: { type: 'number', description: 'Optional: only return modes with RPN >= this value' }
+            },
+            required: []
+        }
+    }
+];
+
+// ===== Fallback planner helpers (used when provider doesn't support function calling) =====
 
 const SYSTEM_RETRIEVAL_PLANNER = `
 You are a retrieval planner for an FMECA chatbot.
@@ -224,147 +294,123 @@ export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelNa
 
         setMessages(newHistory);
 
-// --- RAG: Planner → Retrieval Plan → Retrieved Context ---
-const outline = (isRagEnabled && activeProject)
-  ? `System: "${activeProject.name || 'Unnamed'}"\nSubsystems (${(activeProject.subsystems||[]).length}): ${(activeProject.subsystems||[]).map(s=>s.name||'(unnamed)').slice(0,60).join(' | ')}${(activeProject.subsystems||[]).length>60?' …':''}`
-  : 'System: (none)\nSubsystems: (none)';
-
-let retrievalPlan: any = null;
+// --- RAG: Tool-calling → Precise Retrieval → Answer ---
+const provider = (aiProvider || (apiKey.startsWith('sk-') ? 'openai' : 'gemini')) as any;
+const richIndex = (isRagEnabled && activeProject) ? RAGService.buildRichIndex(activeProject) : '';
 let retrievedContext = "";
 
 if (isRagEnabled && activeProject) {
-  try {
-    const plannerInput =
-      `User question:\n${userText}\n\n` +
-      `Project:\n` +
-      `System Name: "${activeProject.name || "Unnamed"}"\n` +
-      `Subsystems (${(activeProject.subsystems || []).length}): ` +
-      `${(activeProject.subsystems || []).map(s => s.name || "(unnamed)").slice(0, 60).join(" | ")}` +
-      `${(activeProject.subsystems || []).length > 60 ? " …" : ""}\n`;
+    // Step 1: Tool selection via real function calling
+    // The AI sees the rich index (orientation) and calls the right tool(s) to fetch exact data.
+    const toolSelectorMessages: AIMessage[] = [
+        {
+            role: 'system',
+            content: `You are a data retrieval agent for an FMECA project.
+Your ONLY job is to call the right tool(s) to fetch data that answers the user's question.
+Do NOT answer the question yourself — only call tools.
+If a subsystem name is ambiguous, call list_subsystems first.
 
-    const planRaw = await AIService.chat({
-      sessionId: 'chatbot-session',
-      feature: 'chatbot-planner',
-      provider: (aiProvider || (apiKey.startsWith('sk-') ? 'openai' : 'gemini')) as any,
-      azureEndpoint: azureEndpoint || undefined,
-      model: modelName,
-      messages: [
-        { role: 'system', content: SYSTEM_RETRIEVAL_PLANNER },
-        { role: 'user', content: plannerInput }
-      ],
-      mode: 'ai',
-      apiKey
-    });
+PROJECT INDEX (orientation only):
+"""
+${richIndex}
+"""`
+        },
+        { role: 'user', content: userText }
+    ];
 
-    retrievalPlan = safeJsonParse(planRaw);
-  } catch {
-    retrievalPlan = null;
-  }
+    let toolsSucceeded = false;
+    try {
+        const toolResult = await AIService.chatWithTools({
+            sessionId: 'chatbot-tool-select',
+            feature: 'chatbot-planner',
+            provider,
+            azureEndpoint: azureEndpoint || undefined,
+            model: modelName,
+            messages: toolSelectorMessages,
+            mode: 'ai',
+            apiKey
+        }, FMECA_TOOLS);
 
-  try {
-    if (retrievalPlan) {
-      // Uses your schema: include/filters/strategy/budget
-      retrievedContext = RAGService.buildContextByPlan(retrievalPlan, userText, activeProject);
+        if (toolResult.type === 'tool_calls' && toolResult.calls && toolResult.calls.length > 0) {
+            const resultParts: string[] = [];
+            for (const call of toolResult.calls) {
+                const result = RAGService.executeToolCall(call.name, call.args, activeProject);
+                resultParts.push(`[${call.name}(${JSON.stringify(call.args)})]\n${result}`);
+            }
+            retrievedContext = resultParts.join('\n\n---\n\n');
+            toolsSucceeded = true;
+        }
+    } catch {
+        toolsSucceeded = false;
     }
+
+    // Step 1b (fallback): JSON planner for providers that don't support function calling
+    if (!toolsSucceeded || !retrievedContext) {
+        try {
+            const plannerInput =
+                `User question:\n${userText}\n\n` +
+                `Project:\n${richIndex}`;
+            const planRaw = await AIService.chat({
+                sessionId: 'chatbot-session',
+                feature: 'chatbot-planner',
+                provider,
+                azureEndpoint: azureEndpoint || undefined,
+                model: modelName,
+                messages: [
+                    { role: 'system', content: SYSTEM_RETRIEVAL_PLANNER },
+                    { role: 'user', content: plannerInput }
+                ],
+                mode: 'ai',
+                apiKey
+            });
+            const plan = safeJsonParse(planRaw);
+            if (plan) retrievedContext = RAGService.buildContextByPlan(plan, userText, activeProject);
+        } catch { /* continue to keyword fallback */ }
+    }
+
+    // Step 1c (last resort): keyword retrieval
     if (!retrievedContext) {
-      retrievedContext = RAGService.retrieveContext(userText, activeProject, 80);
+        retrievedContext = RAGService.retrieveContext(userText, activeProject, 80);
     }
-  } catch {
-    retrievedContext = RAGService.retrieveContext(userText, activeProject, 80);
-  }
-} else if (!isRagEnabled && activeProject) {
-  // RAG off: no retrieval context
-  retrievedContext = "";
 }
 
+// Step 2: Build the answering system prompt
+const styleBlock = styleDirective(responseStyle);
 
-
-        // System Prompt Construction
-const systemPromptRagOn = `You are “FMECA Copilot”, a senior Reliability / RCM consultant supporting the user in reviewing and improving the CURRENT FMECA project.
-
-SCOPE (hard rule):
-- Ground answers in the provided Project Context and Project Outline. Do NOT invent project data.
-- If something is not in the project, say so, then optionally suggest "Candidate (Not in project)" items.
-
-INTENT ROUTER (MANDATORY — do this FIRST):
-Classify the user request into exactly ONE intent and respond accordingly:
-
-A) STRUCTURE REVIEW (project-level questions)
-Examples: "What do you think of the subsystems?", "Do they relate to the main system?", "Is the breakdown logical?", "Any overlaps/gaps?"
-Response rules:
-1) Use Project Outline first (list subsystems and counts).
-2) Evaluate alignment using only project content. If details are missing, state what's missing.
-3) Identify gaps/overlaps/ambiguities.
-4) If you propose additions, label them exactly: "Candidate (Not in project)".
-5) Ask ONE focused follow-up question.
-
-B) LOCATE / TRACE (term- or row-specific)
-Examples: "Where is 'bearing seizure'?", "Show mitigation for X", "What causes Y?"
-Response rules (HIERARCHY + NAVIGATION):
-- Search Project Context for the user’s term and close variants across ALL fields (Subsystem, Function, Functional Failure, Failure Mode, Effect, Cause, Mitigation/Controls, S/O/D/RPN notes).
-- If found, report the path:
-  "Found in project at: Subsystem → Functional Failure → Failure Mode → [Field]"
-- Then answer using ONLY those located rows.
-- If multiple matches, list up to 3 and ask which one they mean.
-- If no match, say: "I cannot find '<term>' in the provided Project Context." Then ask where it belongs.
-
-C) CONSISTENCY CHECK (quality review of a specific row)
-Examples: "Does this effect match the mode?", "Is mitigation adequate for the cause?"
-Rules:
-- Locate the exact row(s).
-- Critique only using what is in the project.
-- Suggestions must be labeled: "Candidate (Not in project)".
-
-D) GAP ANALYSIS (what’s missing)
-Examples: "What should I add?", "What is weak or incomplete?"
-Rules:
-- First point out what is missing in the project fields.
-- Then provide "Candidate (Not in project)" improvements.
-
-CRITICAL RESPONSE RULE:
-- Never answer with "I cannot find 'subsystems'" or similar for STRUCTURE REVIEW questions.
-- "I cannot find…" is allowed ONLY for LOCATE / TRACE questions.
-
-OUTPUT STYLE:
-- Be concise and workshop-ready.
-- Quote project fields when present.
-- End with one targeted question.
+const systemPromptRagOn = `${SYSTEM_RAG_ON}
 
 PROJECT OUTLINE:
 """
-${outline}
+${richIndex}
 """
 
-
-PROJECT CONTEXT (retrieved snippets):
+RETRIEVED DATA:
 """
 ${retrievedContext}
 """`;
 
-const styleBlock = styleDirective(responseStyle);
-
 const baseSystemPrompt = isRagEnabled
-  ? (styleBlock ? `${systemPromptRagOn}\n\n${styleBlock}` : systemPromptRagOn)
-  : (styleBlock ? `${SYSTEM_RAG_OFF}\n\n${styleBlock}` : SYSTEM_RAG_OFF);
+    ? (styleBlock ? `${systemPromptRagOn}\n\n${styleBlock}` : systemPromptRagOn)
+    : (styleBlock ? `${SYSTEM_RAG_OFF}\n\n${styleBlock}` : SYSTEM_RAG_OFF);
 
 const systemPrompt = systemContext ? `${baseSystemPrompt}\n\n${systemContext}` : baseSystemPrompt;
 
-    const apiMessages: AIMessage[] = [
-  { role: 'system', content: systemPrompt },
-  ...newHistory
-    .filter((m): m is { role: 'user' | 'assistant'; content: string } =>
-      m.role === 'user' || m.role === 'assistant'
-    )
-    .slice(-12)
-    .map(m => ({ role: m.role, content: m.content }))
-    ];
+const apiMessages: AIMessage[] = [
+    { role: 'system', content: systemPrompt },
+    ...newHistory
+        .filter((m): m is { role: 'user' | 'assistant'; content: string } =>
+            m.role === 'user' || m.role === 'assistant'
+        )
+        .slice(-12)
+        .map(m => ({ role: m.role, content: m.content }))
+];
 
-
+// Step 3: Generate final answer (plain chat — no tools, just context + history)
         try {
             const response = await AIService.chat({
                 sessionId: 'chatbot-session',
                 feature: 'chatbot',
-                provider: (aiProvider || (apiKey.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                provider,
                 azureEndpoint: azureEndpoint || undefined,
                 model: modelName,
                 messages: apiMessages,

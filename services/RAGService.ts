@@ -455,6 +455,162 @@ if (ffInc) {
         return chunks;
     },
 
+    // -------------------------------------------------------------------------
+    // TOOL EXECUTION ENGINE
+    // -------------------------------------------------------------------------
+
+    /**
+     * Fuzzy-matches a user-supplied name to an actual subsystem in the project.
+     * Priority: exact → contains → contained-by → word-overlap.
+     */
+    resolveSubsystem(name: string, project: Project): any | null {
+        const q = (name || '').toLowerCase().trim();
+        if (!q || !project?.subsystems?.length) return null;
+        // 1. Exact
+        let hit = project.subsystems.find(s => (s.name || '').toLowerCase() === q);
+        if (hit) return hit;
+        // 2. Sub name contains query
+        hit = project.subsystems.find(s => (s.name || '').toLowerCase().includes(q));
+        if (hit) return hit;
+        // 3. Query contains sub name
+        hit = project.subsystems.find(s => q.includes((s.name || '').toLowerCase()));
+        if (hit) return hit;
+        // 4. Word-overlap scoring
+        const qWords = q.split(/\s+/).filter(w => w.length > 2);
+        let best: any = null, bestScore = 0;
+        for (const sub of project.subsystems) {
+            const sWords = (sub.name || '').toLowerCase().split(/\s+/);
+            const overlap = qWords.filter(w => sWords.some(sw => sw.includes(w) || w.includes(sw))).length;
+            if (overlap > bestScore) { bestScore = overlap; best = sub; }
+        }
+        return bestScore > 0 ? best : null;
+    },
+
+    /**
+     * Builds a two-level project index (subsystems + their functional failure descriptions).
+     * Used as orientation context sent to the AI alongside tool definitions.
+     */
+    buildRichIndex(project: Project): string {
+        const lines: string[] = [
+            `System: "${project.name}"`,
+            `Subsystems (${(project.subsystems || []).length}):`
+        ];
+        (project.subsystems || []).forEach(sub => {
+            const ffCount = (sub.failures || []).length;
+            const modeCount = (sub.failures || []).reduce((a, f) => a + (f.modes || []).length, 0);
+            lines.push(`  • ${sub.name} — ${ffCount} functional failure(s), ${modeCount} failure mode(s)`);
+            (sub.failures || []).forEach(ff => {
+                lines.push(`      FF: "${ff.desc}" (${(ff.modes || []).length} mode(s))`);
+            });
+        });
+        return lines.join('\n');
+    },
+
+    /**
+     * Executes a named tool call and returns the result as a plain text string.
+     * Tools: list_subsystems | get_subsystem_detail | get_failure_modes | search_project | get_rpn_summary
+     */
+    executeToolCall(name: string, args: Record<string, any>, project: Project): string {
+        const safe = (v: any, fallback = 'N/A') => { const s = String(v ?? '').trim(); return s || fallback; };
+
+        if (name === 'list_subsystems') {
+            if (!(project.subsystems || []).length) return 'No subsystems found.';
+            return project.subsystems.map(sub => {
+                const modeCount = (sub.failures || []).reduce((a, f) => a + (f.modes || []).length, 0);
+                const rpns = (sub.failures || []).flatMap(f =>
+                    (f.modes || []).map(m => (Number(m.rpn?.s) || 1) * (Number(m.rpn?.o) || 1) * (Number(m.rpn?.d) || 1))
+                );
+                const topRpn = rpns.length ? Math.max(...rpns) : 0;
+                return `Subsystem="${safe(sub.name)}" | FFs=${sub.failures.length} | Modes=${modeCount} | TopRPN=${topRpn}`;
+            }).join('\n');
+        }
+
+        if (name === 'get_subsystem_detail') {
+            const sub = this.resolveSubsystem(safe(args.subsystem_name), project);
+            if (!sub) return `Subsystem not found: "${args.subsystem_name}". Available: ${project.subsystems.map(s => s.name).join(', ')}`;
+            return [
+                `Subsystem: ${safe(sub.name)}`,
+                `Function: ${safe(sub.func)}`,
+                `Specs: ${safe(sub.specs)}`,
+                `Functional Failures (${(sub.failures || []).length}):`,
+                ...(sub.failures || []).map((f: any, i: number) =>
+                    `  ${i + 1}. "${safe(f.desc)}" — ${(f.modes || []).length} failure mode(s)`)
+            ].join('\n');
+        }
+
+        if (name === 'get_failure_modes') {
+            const sub = this.resolveSubsystem(safe(args.subsystem_name), project);
+            if (!sub) return `Subsystem not found: "${args.subsystem_name}". Available: ${project.subsystems.map(s => s.name).join(', ')}`;
+            let failures: any[] = sub.failures || [];
+            if (args.functional_failure) {
+                const ffQ = String(args.functional_failure).toLowerCase();
+                const filtered = failures.filter((f: any) => (f.desc || '').toLowerCase().includes(ffQ));
+                if (filtered.length > 0) failures = filtered;
+            }
+            if (!failures.length) return `No functional failures found in subsystem "${safe(sub.name)}".`;
+            const lines: string[] = [`Failure Modes for Subsystem "${safe(sub.name)}":`];
+            failures.forEach((ff: any) => {
+                lines.push(`\nFunctional Failure: "${safe(ff.desc)}"`);
+                if (!(ff.modes || []).length) { lines.push('  (No failure modes defined)'); return; }
+                ff.modes.forEach((m: any) => {
+                    const s = Number(m.rpn?.s) || 1, o = Number(m.rpn?.o) || 1, d = Number(m.rpn?.d) || 1;
+                    lines.push(`  Mode: ${safe(m.mode)} | RPN=${s * o * d} (S${s} O${o} D${d})`);
+                    lines.push(`    Effect: ${safe(m.effect)}`);
+                    lines.push(`    Cause: ${safe(m.cause)}`);
+                    lines.push(`    Mitigation: ${safe(m.mitigation)}`);
+                });
+            });
+            return lines.join('\n');
+        }
+
+        if (name === 'search_project') {
+            const q = String(args.query || '').toLowerCase().trim();
+            if (!q) return 'No search query provided.';
+            const results: string[] = [];
+            (project.subsystems || []).forEach(sub => {
+                if ([(sub.name || ''), (sub.func || ''), (sub.specs || '')].some(t => t.toLowerCase().includes(q)))
+                    results.push(`[Subsystem] "${safe(sub.name)}" — ${safe(sub.func)}`);
+                (sub.failures || []).forEach((ff: any) => {
+                    if ((ff.desc || '').toLowerCase().includes(q))
+                        results.push(`[Functional Failure in "${safe(sub.name)}"] ${safe(ff.desc)}`);
+                    (ff.modes || []).forEach((m: any) => {
+                        const inMode = [m.mode, m.effect, m.cause, m.mitigation].some(f => (f || '').toLowerCase().includes(q));
+                        if (inMode) {
+                            const rpn = (Number(m.rpn?.s) || 1) * (Number(m.rpn?.o) || 1) * (Number(m.rpn?.d) || 1);
+                            results.push(`[Mode in "${safe(sub.name)}" / "${safe(ff.desc)}"] ${safe(m.mode)} | RPN=${rpn}`);
+                        }
+                    });
+                });
+            });
+            return results.length ? results.join('\n') : `No matches found for "${args.query}".`;
+        }
+
+        if (name === 'get_rpn_summary') {
+            type Row = { sub: string; ff: string; mode: string; rpn: number; s: number; o: number; d: number };
+            const rows: Row[] = [];
+            (project.subsystems || []).forEach(sub => {
+                if (args.subsystem_name) {
+                    const resolved = this.resolveSubsystem(args.subsystem_name, project);
+                    if (!resolved || (resolved as any).id !== (sub as any).id) return;
+                }
+                (sub.failures || []).forEach((ff: any) => {
+                    (ff.modes || []).forEach((m: any) => {
+                        const s = Number(m.rpn?.s) || 1, o = Number(m.rpn?.o) || 1, d = Number(m.rpn?.d) || 1;
+                        const rpn = s * o * d;
+                        if (typeof args.min_rpn === 'number' && rpn < args.min_rpn) return;
+                        rows.push({ sub: safe(sub.name), ff: safe(ff.desc), mode: safe(m.mode), rpn, s, o, d });
+                    });
+                });
+            });
+            rows.sort((a, b) => b.rpn - a.rpn);
+            return rows.length
+                ? rows.map(r => `RPN=${r.rpn}(S${r.s} O${r.o} D${r.d}) | Sub="${r.sub}" | FF="${r.ff}" | Mode="${r.mode}"`).join('\n')
+                : 'No failure modes found.';
+        }
+
+        return `Unknown tool: "${name}"`;
+    },
+
     /**
      * Retrieves the most relevant context strings for a given query.
      */

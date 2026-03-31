@@ -29,6 +29,28 @@ export interface AIMessage {
     content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
 }
 
+export interface ToolDefinition {
+    name: string;
+    description: string;
+    parameters: {
+        type: 'object';
+        properties: Record<string, { type: string; description?: string }>;
+        required: string[];
+    };
+}
+
+export interface ToolCall {
+    id: string;
+    name: string;
+    args: Record<string, any>;
+}
+
+export interface ToolChatResult {
+    type: 'text' | 'tool_calls';
+    content?: string;
+    calls?: ToolCall[];
+}
+
 export interface AIRequestPayload {
     sessionId?: string;
     feature: string; // Identifier for the feature calling the service
@@ -60,6 +82,121 @@ export const AIService = {
             }
         }
         return this._directChat(req);
+    },
+
+    /**
+     * Sends a chat request with tool definitions.
+     * Returns either tool_calls (AI wants to call tools) or text (final answer).
+     * Supports: openai, azure, openrouter (tools param), gemini (function_declarations).
+     * Falls back to plain chat() for anthropic and on any error.
+     */
+    async chatWithTools(req: AIRequestPayload, tools: ToolDefinition[]): Promise<ToolChatResult> {
+        try {
+            if (req.provider === 'openai' || req.provider === 'azure' || req.provider === 'openrouter') {
+                const openAITools = tools.map(t => ({
+                    type: 'function' as const,
+                    function: { name: t.name, description: t.description, parameters: t.parameters }
+                }));
+
+                let url: string;
+                let headers: Record<string, string>;
+                if (req.provider === 'azure') {
+                    const endpoint = (req.azureEndpoint || '').replace(/\/$/, '');
+                    url = `${endpoint}/openai/deployments/${req.model}/chat/completions?api-version=2024-02-01`;
+                    headers = { 'Content-Type': 'application/json', 'api-key': req.apiKey };
+                } else if (req.provider === 'openrouter') {
+                    url = 'https://openrouter.ai/api/v1/chat/completions';
+                    headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${req.apiKey}` };
+                } else {
+                    url = 'https://api.openai.com/v1/chat/completions';
+                    headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${req.apiKey}` };
+                }
+
+                const body = {
+                    model: (req.model && req.model.trim()) || 'gpt-4o-mini',
+                    messages: req.messages,
+                    tools: openAITools,
+                    tool_choice: 'auto'
+                };
+
+                const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+
+                const msg = data.choices[0].message;
+                if (msg.tool_calls && msg.tool_calls.length > 0) {
+                    return {
+                        type: 'tool_calls',
+                        calls: msg.tool_calls.map((tc: any) => ({
+                            id: tc.id,
+                            name: tc.function.name,
+                            args: (() => { try { return JSON.parse(tc.function.arguments || '{}'); } catch { return {}; } })()
+                        }))
+                    };
+                }
+                return { type: 'text', content: msg.content || '' };
+            }
+
+            if (req.provider === 'gemini') {
+                const functionDeclarations = tools.map(t => ({
+                    name: t.name,
+                    description: t.description,
+                    parameters: t.parameters
+                }));
+
+                const systemMsg = req.messages.find(m => m.role === 'system');
+                const contents = req.messages
+                    .filter(m => m.role !== 'system')
+                    .map(m => ({
+                        role: m.role === 'assistant' ? 'model' : 'user',
+                        parts: [{ text: typeof m.content === 'string' ? m.content : '' }]
+                    }));
+
+                const body: any = {
+                    contents,
+                    tools: [{ function_declarations: functionDeclarations }],
+                    tool_config: { function_calling_config: { mode: 'AUTO' } }
+                };
+                if (systemMsg) {
+                    body.system_instruction = { parts: [{ text: typeof systemMsg.content === 'string' ? systemMsg.content : '' }] };
+                }
+
+                const model = (req.model && req.model.trim()) || 'gemini-2.0-flash';
+                const res = await fetch(
+                    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${req.apiKey}`,
+                    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+                );
+                const data = await res.json();
+                if (data.error) throw new Error(data.error.message);
+
+                const parts: any[] = data.candidates?.[0]?.content?.parts || [];
+                const funcCallParts = parts.filter((p: any) => p.functionCall);
+                if (funcCallParts.length > 0) {
+                    return {
+                        type: 'tool_calls',
+                        calls: funcCallParts.map((p: any) => ({
+                            id: p.functionCall.name,
+                            name: p.functionCall.name,
+                            args: p.functionCall.args || {}
+                        }))
+                    };
+                }
+                const textPart = parts.find((p: any) => p.text);
+                return { type: 'text', content: textPart?.text || '' };
+            }
+
+            // Fallback for anthropic and unknown providers: plain chat
+            const content = await this.chat(req);
+            return { type: 'text', content };
+        } catch {
+            // On any error fall back to plain chat so the user still gets a response
+            try {
+                const content = await this.chat(req);
+                return { type: 'text', content };
+            } catch (e2) {
+                throw e2;
+            }
+        }
     },
 
     async vision(req: AIRequestPayload): Promise<string> {
