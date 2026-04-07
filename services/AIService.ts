@@ -729,5 +729,92 @@ Output format:
                 return data.candidates[0].content.parts[0].text;
             }
         } catch (e) { throw e; }
+    },
+
+    // -------------------------------------------------------------------------
+    // LIVE MODEL FETCHING
+    // -------------------------------------------------------------------------
+
+    async fetchModels(provider: 'gemini' | 'openai' | 'anthropic', apiKey: string): Promise<TieredModels> {
+        let all: string[] = [];
+
+        if (provider === 'openai') {
+            const res = await fetch('https://api.openai.com/v1/models', {
+                headers: { 'Authorization': `Bearer ${apiKey}` }
+            });
+            if (!res.ok) throw new Error(`OpenAI models fetch failed: ${res.status}`);
+            const data = await res.json();
+            const ids: string[] = (data.data || []).map((m: any) => m.id as string);
+            // Allowlist: only keep models with known chat prefixes
+            const CHAT_PREFIX = /^(gpt-|o[0-9]|chatgpt-)/i;
+            // Denylist: explicitly exclude non-chat even if prefix matched
+            const EXCLUDE = /^ft:|sora|dall-e|whisper|^tts|text-embedding|text-moderation|babbage|davinci|curie|^ada|omni-mini/i;
+            // Drop old dated snapshots (e.g. gpt-4-0314, gpt-3.5-turbo-0613)
+            const OLD_SNAPSHOT = /-(03|06|09|12)(01|14|13|28|30)\b/;
+            all = ids.filter(id => CHAT_PREFIX.test(id) && !EXCLUDE.test(id) && !OLD_SNAPSHOT.test(id));
+        } else if (provider === 'gemini') {
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}&pageSize=100`);
+            if (!res.ok) throw new Error(`Gemini models fetch failed: ${res.status}`);
+            const data = await res.json();
+            // Allowlist: only gemini-* chat models (excludes Imagen, Veo, PaLM/Bison/Gecko etc.)
+            const GEMINI_CHAT = /^gemini-/i;
+            // Denylist: vision-only, embedding, and non-chat Gemini variants
+            const GEMINI_EXCLUDE = /embed|aqa|retrieval|vision(?!.*gemini)|imagen|veo|bison|gecko|^text-|legacy/i;
+            all = (data.models || [])
+                .filter((m: any) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+                .map((m: any) => (m.name as string).replace('models/', ''))
+                .filter((id: string) => GEMINI_CHAT.test(id) && !GEMINI_EXCLUDE.test(id));
+        } else if (provider === 'anthropic') {
+            const res = await fetch('https://api.anthropic.com/v1/models', {
+                headers: {
+                    'x-api-key': apiKey,
+                    'anthropic-version': '2023-06-01',
+                    'anthropic-dangerous-direct-browser-access': 'true'
+                }
+            });
+            if (!res.ok) throw new Error(`Anthropic models fetch failed: ${res.status}`);
+            const data = await res.json();
+            all = (data.data || []).map((m: any) => m.id as string);
+        }
+
+        return _classifyModels(all);
     }
 };
+
+export interface TieredModels {
+    pro: string[];
+    balanced: string[];
+    efficient: string[];
+    fetchedAt: number;
+}
+
+function _getTier(id: string): 'pro' | 'balanced' | 'efficient' {
+    const s = id.toLowerCase();
+    // P1: deep-research → always Pro (most capable task type, regardless of model size)
+    if (s.includes('deep-research') || s.includes('deepresearch')) return 'pro';
+    // P2: efficient — small/fast/cheap model keywords
+    if (/\b(mini|flash|haiku|lite|small|nano|micro|basic|instant|speed)\b/.test(s)) return 'efficient';
+    // P3: pro — capability or top-tier markers
+    if (/\b(pro|opus|plus|ultra|large|advanced|max|heavy|premium|turbo)\b/.test(s)) return 'pro';
+    // P4: OpenAI o-series reasoning models (o3, o4, o5…) without mini — Pro
+    if (/^o[3-9](-\d{4}-\d{2}-\d{2})?$/.test(s)) return 'pro';
+    // P5: everything else is Balanced
+    return 'balanced';
+}
+
+function _classifyModels(ids: string[]): TieredModels {
+    const buckets: Record<'pro' | 'balanced' | 'efficient', string[]> = { pro: [], balanced: [], efficient: [] };
+
+    for (const id of ids) {
+        buckets[_getTier(id)].push(id);
+    }
+
+    // Sort each bucket so newest (highest version / latest date suffix) comes first
+    const sortDesc = (a: string, b: string) => b.localeCompare(a, undefined, { numeric: true });
+    return {
+        pro: buckets.pro.sort(sortDesc),
+        balanced: buckets.balanced.sort(sortDesc),
+        efficient: buckets.efficient.sort(sortDesc),
+        fetchedAt: Date.now()
+    };
+}

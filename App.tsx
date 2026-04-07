@@ -8,7 +8,8 @@ import { SystemModesModal, SystemMode } from './components/SystemModesModal';
 import { TreeNode } from './components/TreeNode';
 import { AttachmentModal } from './components/AttachmentModal';
 import { Chatbot } from './components/Chatbot';
-import { AIService } from './services/AIService';
+import { ModelSelector } from './components/ModelSelector';
+import { AIService, TieredModels } from './services/AIService';
 import { LocalFileSystemProvider, sanitizeName } from './services/FileSystem';
 import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem } from './types';
@@ -77,6 +78,10 @@ const App = () => {
     const [aiSourceMode, setAiSourceMode] = useState('ai');
     const [aiProvider, setAiProvider] = useState<AIProvider>('gemini');
     const [azureEndpoint, setAzureEndpoint] = useState('');
+    const [liveModels, setLiveModels] = useState<Record<string, TieredModels>>(() => {
+        try { return JSON.parse(localStorage.getItem('fmeca_models_cache') || '{}'); } catch { return {}; }
+    });
+    const [modelsFetching, setModelsFetching] = useState(false);
     const [enableChatbot, setEnableChatbot] = useState(true);
     const [chatbotStyle, setChatbotStyle] = useState<ChatbotResponseStyle>("normal");
     const [globalFileText, setGlobalFileText] = useState('');
@@ -245,6 +250,36 @@ setProjects(
         localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
     }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, enableChatbot, chatbotStyle, globalFileText, globalFileName, systemType, systemModes, systemContextEnabled]);
+
+    const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic'] as const;
+    type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
+
+    const doFetchModels = async (provider: FetchableProvider, key: string) => {
+        if (!key || key.length < 10) return;
+        setModelsFetching(true);
+        try {
+            const tiered = await AIService.fetchModels(provider, key);
+            setLiveModels(prev => {
+                const next = { ...prev, [provider]: tiered };
+                localStorage.setItem('fmeca_models_cache', JSON.stringify(next));
+                return next;
+            });
+        } catch (e) {
+            console.warn('[ModelFetch] Failed:', e);
+        } finally {
+            setModelsFetching(false);
+        }
+    };
+
+    // Auto-fetch when provider or apiKey changes (skip Azure/OpenRouter, respect 24h cache TTL)
+    useEffect(() => {
+        if (!(FETCHABLE_PROVIDERS as readonly string[]).includes(aiProvider)) return;
+        const cached = liveModels[aiProvider];
+        const TTL = 24 * 60 * 60 * 1000;
+        if (cached && Date.now() - cached.fetchedAt < TTL) return;
+        doFetchModels(aiProvider as FetchableProvider, apiKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [aiProvider, apiKey]);
 
     const createProject=()=>{ const now=nowIso(); const p:any={id:generateId(),name:"New Analysis",desc:"",createdAt:now,updatedAt:now,subsystems:[]}; setProjects([p,...projects]); setActiveProject(p); setView('editor'); };
     const closeEditor = () => { if(activeProject) setProjects(projects.map(p => p.id === activeProject.id ? activeProject : p)); setView('dashboard'); setActiveProject(null); };
@@ -504,14 +539,38 @@ setProjects(
                                             </div>
                                         ) : (
                                             <div>
-                                                <label className="block text-xs font-semibold text-slate-500 mb-1">Model</label>
-                                                <select value={PROVIDER_MODELS[aiProvider]?.includes(modelName) ? modelName : '__custom__'} onChange={e => { if (e.target.value !== '__custom__') setModelName(e.target.value); else setModelName(''); }} className="w-full border border-slate-200 rounded px-3 py-2 text-sm outline-none focus:border-brand-500">
-                                                    {(PROVIDER_MODELS[aiProvider] || []).map(m => <option key={m} value={m}>{m === DEFAULT_MODELS[aiProvider] ? `${m} (default)` : m}</option>)}
-                                                    <option value="__custom__">Custom...</option>
-                                                </select>
-                                                {!PROVIDER_MODELS[aiProvider]?.includes(modelName) && (
-                                                    <input type="text" value={modelName} onChange={e => setModelName(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500 mt-2" placeholder="Enter model name..."/>
-                                                )}
+                                                <div className="flex items-center justify-between mb-1">
+                                                    <label className="block text-xs font-semibold text-slate-500">Model</label>
+                                                    {(FETCHABLE_PROVIDERS as readonly string[]).includes(aiProvider) && (
+                                                        <div className="flex items-center gap-2">
+                                                            {liveModels[aiProvider] && (
+                                                                <span className="text-[10px] text-slate-400">
+                                                                    Updated {new Date(liveModels[aiProvider].fetchedAt).toLocaleDateString()}
+                                                                </span>
+                                                            )}
+                                                            <button
+                                                                onClick={() => doFetchModels(aiProvider as FetchableProvider, apiKey)}
+                                                                disabled={modelsFetching || !apiKey}
+                                                                title="Refresh model list from provider"
+                                                                className="flex items-center gap-1 text-xs text-brand-600 hover:text-brand-700 disabled:text-slate-300 disabled:cursor-not-allowed transition"
+                                                            >
+                                                                {modelsFetching ? (
+                                                                    <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><circle cx="12" cy="12" r="10" strokeOpacity=".25"/><path d="M12 2a10 10 0 0 1 10 10" /></svg>
+                                                                ) : (
+                                                                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M4 4v5h5M20 20v-5h-5"/><path d="M4 9a9 9 0 0 1 15-3M20 15a9 9 0 0 1-15 3"/></svg>
+                                                                )}
+                                                                <span>{modelsFetching ? 'Fetching…' : 'Refresh'}</span>
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <ModelSelector
+                                                    value={modelName}
+                                                    onChange={setModelName}
+                                                    liveModels={liveModels[aiProvider] || null}
+                                                    fallbackModels={PROVIDER_MODELS[aiProvider] || []}
+                                                    provider={aiProvider}
+                                                />
                                             </div>
                                         )}
                                     </div>
