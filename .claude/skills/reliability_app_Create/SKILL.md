@@ -53,12 +53,94 @@ type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter';
 async function callAI(provider, messages, tools?, systemPrompt?): Promise<AIResponse>
 ```
 
-**Supported providers and models:**
-- Google Gemini: `gemini-2.0-flash` (default), `gemini-1.5-pro`
-- OpenAI: `gpt-4o-mini` (default), `gpt-4o`, `o3-mini`
-- Anthropic Claude: `claude-sonnet-4-20250514` (default), `claude-haiku`, `claude-opus`
-- Azure OpenAI: Custom endpoint + deployment name
-- OpenRouter: Any model via relay (user specifies model ID)
+**Supported providers:**
+- Google Gemini — `gemini-*` chat models fetched live; default `gemini-2.0-flash`
+- OpenAI — `gpt-*` and `o[N]` reasoning models fetched live; default `gpt-4o-mini`
+- Anthropic Claude — `claude-*` models fetched live; default `claude-sonnet-*`
+- Azure OpenAI — custom endpoint + deployment name (no live fetch; user types deployment)
+- OpenRouter — any model ID (no live fetch; user types the model string)
+
+**Do not hardcode model lists.** Models are fetched live from each provider's `/models` API endpoint using the user's saved API key and cached in `localStorage` with a 24h TTL. Always fall back to a hardcoded default list if the fetch fails.
+
+### Live Model Fetching
+
+Add `fetchModels(provider, apiKey)` to `AIService`. Each provider has its own filter:
+
+```typescript
+export interface TieredModels {
+    pro: string[];        // highest capability (deep-research, o3/o4, pro, opus, plus, ultra)
+    balanced: string[];   // general purpose (gpt-4o class, gemini standard, claude sonnet)
+    efficient: string[];  // fast/cheap (mini, flash, haiku, lite, small, nano)
+    fetchedAt: number;    // Date.now() — used for 24h TTL check
+}
+```
+
+**Provider filter rules:**
+
+| Provider | Keep | Block |
+|----------|------|-------|
+| OpenAI | Allowlist: `gpt-`, `o[0-9]`, `chatgpt-` | Sora, DALL-E, Whisper, TTS, embeddings, moderation, old dated snapshots (`-0314`, `-0613`) |
+| Gemini | Allowlist: `gemini-*` + `supportedGenerationMethods` includes `generateContent` | Imagen, Veo, PaLM/Bison/Gecko, embeddings, aqa, retrieval, legacy |
+| Anthropic | No filter needed — their API only returns chat models | — |
+
+**Priority-based tier classification** (apply in this order, first match wins):
+
+```typescript
+function getTier(id: string): 'pro' | 'balanced' | 'efficient' {
+    const s = id.toLowerCase();
+    // P1: deep-research → always Pro regardless of other keywords (e.g. o4-mini-deep-research)
+    if (s.includes('deep-research')) return 'pro';
+    // P2: efficient — small/fast/cheap indicators
+    if (/\b(mini|flash|haiku|lite|small|nano|micro|basic|instant|speed)\b/.test(s)) return 'efficient';
+    // P3: pro — capability or top-tier markers
+    if (/\b(pro|opus|plus|ultra|large|advanced|max|heavy|premium|turbo)\b/.test(s)) return 'pro';
+    // P4: pure OpenAI o-series reasoning (o3, o4, o5… without mini — caught at P2)
+    if (/^o[3-9](-\d{4}-\d{2}-\d{2})?$/.test(s)) return 'pro';
+    return 'balanced';
+}
+```
+
+**Caching and fetching pattern in App state:**
+
+```typescript
+// Which providers support live model fetching (Azure and OpenRouter do NOT)
+const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic'] as const;
+type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
+
+// State — initialize from localStorage cache so models appear instantly on reload
+const [liveModels, setLiveModels] = useState<Record<string, TieredModels>>(() => {
+    try { return JSON.parse(localStorage.getItem('fmeca_models_cache') || '{}'); } catch { return {}; }
+});
+const [modelsFetching, setModelsFetching] = useState(false);
+
+// Fetch wrapper — guards short keys, shows spinner, writes through to localStorage cache
+const doFetchModels = async (provider: FetchableProvider, key: string) => {
+    if (!key || key.length < 10) return;  // no API key yet, skip silently
+    setModelsFetching(true);
+    try {
+        const tiered = await AIService.fetchModels(provider, key);
+        setLiveModels(prev => {
+            const next = { ...prev, [provider]: tiered };
+            localStorage.setItem('fmeca_models_cache', JSON.stringify(next));
+            return next;
+        });
+    } catch (e) {
+        console.warn('[ModelFetch] Failed:', e);  // silent — UI falls back to hardcoded defaults
+    } finally {
+        setModelsFetching(false);
+    }
+};
+
+// Auto-fetch when provider or apiKey changes — skip non-fetchable providers, respect 24h TTL
+useEffect(() => {
+    if (!(FETCHABLE_PROVIDERS as readonly string[]).includes(aiProvider)) return;
+    const cached = liveModels[aiProvider];
+    const TTL = 24 * 60 * 60 * 1000;
+    if (cached && Date.now() - cached.fetchedAt < TTL) return;
+    doFetchModels(aiProvider as FetchableProvider, apiKey);
+// eslint-disable-next-line react-hooks/exhaustive-deps
+}, [aiProvider, apiKey]);
+```
 
 Always implement a **mock/demo mode** that works without API keys for demos and onboarding.
 

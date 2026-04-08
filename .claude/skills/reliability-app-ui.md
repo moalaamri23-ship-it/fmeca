@@ -337,6 +337,175 @@ Cells: `p-2 border-r`
 absolute top-10 right-0 bg-white border rounded shadow-xl flex flex-col w-40 z-30
 ```
 
+### ModelSelector (Live Model Picker)
+
+Replace native `<select>` for AI model selection with a custom `ModelSelector` component. It renders a trigger button that opens a dropdown panel with search, tiered groups, and per-model favorites.
+
+**Tier color coding:**
+| Tier | Label color | Dot color |
+|------|-------------|-----------|
+| Favorites | `text-amber-600` | `bg-amber-400` |
+| Pro | `text-purple-600` | `bg-purple-400` |
+| Balanced | `text-brand-600` | `bg-brand-400` |
+| Efficient | `text-green-600` | `bg-green-400` |
+
+**Trigger button:**
+```
+w-full border border-slate-200 rounded px-3 py-2 text-sm bg-white text-left flex items-center justify-between hover:border-slate-300 transition
+```
+Selected value displayed as `font-mono text-xs text-slate-800`. Chevron rotates 180° when open.
+
+**Dropdown panel:**
+```
+absolute z-[100] w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-2xl overflow-hidden animate-enter
+```
+
+**Search bar (top of panel):**
+```
+p-2 border-b border-slate-100 bg-slate-50
+```
+Input: `w-full pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-md outline-none focus:border-brand-500 bg-white` with a search icon pinned left. Auto-focuses on open.
+
+**Tier section header:**
+```
+flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 border-b border-slate-100 sticky top-0
+```
+Colored dot + uppercase label + optional count badge (`{n}/{max}` for Favorites).
+
+**Model row:**
+```
+flex items-center gap-2 px-3 py-2 cursor-pointer group transition-colors hover:bg-slate-50
+```
+Selected row: `bg-brand-50`. Left slot: `w-3.5` checkmark (`text-brand-600`) when selected. Model name: `text-xs font-mono truncate`. Right slot: star button.
+
+**Star/favorite button** (right of each row):
+```
+shrink-0 transition-all opacity-0 group-hover:opacity-100
+```
+Filled amber star (`text-amber-400 opacity-100`) when favorited. Grayed + `cursor-not-allowed` when favorites full and model not already favorited. Clicking star stops row click propagation.
+
+**Custom model entry (panel footer):**
+```
+border-t border-slate-100 p-2 bg-slate-50
+```
+Collapsed: small text link `+ Enter custom model ID…`. Expanded: `flex gap-1.5` with `font-mono` input + blue "Use" button. Enter key submits.
+
+**Component props:**
+```typescript
+interface ModelSelectorProps {
+    value: string;                    // currently selected model ID
+    onChange: (model: string) => void;
+    liveModels: TieredModels | null;  // null = use fallback list
+    fallbackModels: string[];         // hardcoded defaults shown when no live data
+    provider: string;                 // used to key per-provider data in localStorage
+    allowCustomList?: boolean;        // enables persistent user-managed model list (used for OpenRouter)
+}
+```
+
+**Tier order in dropdown:**
+1. Favorites (amber) — max 4, across all tiers
+2. My Models (violet) — user-persisted list, only shown when `allowCustomList=true`
+3. Pro (purple) — live fetched
+4. Balanced (blue/brand) — live fetched
+5. Efficient (green) — live fetched
+6. Models (slate) — fallback only, shown when no live data and no user models
+
+**My Models tier** (`allowCustomList=true` only):
+- Label: `text-violet-600`, dot: `bg-violet-400`
+- Each row has a visible-on-hover ✕ button (`text-red-500`) to permanently remove the model
+- Removing also removes from favorites if it was starred
+- localStorage key: `fmeca_user_models_${provider}` — JSON array of model ID strings
+
+**Footer behavior:**
+- `allowCustomList=false` (default): footer link reads `+ Enter custom model ID…`, button reads `Use` — selects for this session only, not persisted
+- `allowCustomList=true`: footer link reads `+ Add model to my list…`, button reads `Add` — saves to `userModels` AND selects; shows a helper hint `"Model will be saved to your list and selected."`
+
+**Empty state** (when `allowCustomList=true` and no models added yet):
+```
+px-3 py-6 text-center text-xs text-slate-400  →  "No models yet — add one below"
+```
+
+**Favorites persistence:** `localStorage.getItem('fmeca_fav_${provider}')` — JSON array of model IDs, max 4. Reload favorites AND userModels on `provider` prop change via `useEffect`. Close dropdown on outside `mousedown` via `useRef` + `document.addEventListener`.
+
+**OpenRouter usage in App.tsx:**
+OpenRouter does not use a plain text input. It uses `ModelSelector` with `allowCustomList={true}` and `liveModels={null}`, `fallbackModels={[]}`:
+```jsx
+<ModelSelector
+    value={modelName}
+    onChange={setModelName}
+    liveModels={null}
+    fallbackModels={[]}
+    provider="openrouter"
+    allowCustomList={true}
+/>
+<p className="text-xs text-slate-400 mt-1">
+    Add any OpenRouter model ID (e.g. anthropic/claude-3-5-sonnet, meta-llama/llama-3-70b-instruct)
+</p>
+```
+
+**Full AI Settings model row (in App.tsx):**
+
+The `ModelSelector` is not used standalone — it sits inside a settings row that includes a label, a live "Updated" timestamp, and a Refresh button. Azure and OpenRouter skip `ModelSelector` entirely and use plain text inputs.
+
+```jsx
+{/* Azure: plain deployment name input */}
+{aiProvider === 'azure' ? (
+    <div>
+        <label className="block text-xs font-semibold text-slate-500 mb-1">Deployment Name</label>
+        <input type="text" value={modelName} onChange={e => setModelName(e.target.value)}
+            className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500"
+            placeholder="your-deployment-name"/>
+    </div>
+) : aiProvider === 'openrouter' ? (
+    /* OpenRouter: ModelSelector with allowCustomList — user builds their own list */
+    <div>
+        <label className="block text-xs font-semibold text-slate-500 mb-1">Model</label>
+        <ModelSelector value={modelName} onChange={setModelName}
+            liveModels={null} fallbackModels={[]} provider="openrouter" allowCustomList={true}/>
+        <p className="text-xs text-slate-400 mt-1">Add any OpenRouter model ID to your list</p>
+    </div>
+) : (
+    /* Gemini / OpenAI / Anthropic: label row + ModelSelector */
+    <div>
+        <div className="flex items-center justify-between mb-1">
+            <label className="block text-xs font-semibold text-slate-500">Model</label>
+            {/* Only shown for fetchable providers */}
+            <div className="flex items-center gap-2">
+                {liveModels[aiProvider] && (
+                    <span className="text-[10px] text-slate-400">
+                        Updated {new Date(liveModels[aiProvider].fetchedAt).toLocaleDateString()}
+                    </span>
+                )}
+                <button
+                    onClick={() => doFetchModels(aiProvider, apiKey)}
+                    disabled={modelsFetching || !apiKey}
+                    className="flex items-center gap-1 text-xs text-brand-600 hover:text-brand-700 disabled:text-slate-300 disabled:cursor-not-allowed transition"
+                >
+                    {/* Spinner while fetching, refresh icon otherwise */}
+                    {modelsFetching
+                        ? <svg className="w-3.5 h-3.5 animate-spin" .../>
+                        : <svg className="w-3.5 h-3.5" {/* circular arrows icon */} .../>}
+                    <span>{modelsFetching ? 'Fetching…' : 'Refresh'}</span>
+                </button>
+            </div>
+        </div>
+        <ModelSelector
+            value={modelName}
+            onChange={setModelName}
+            liveModels={liveModels[aiProvider] || null}
+            fallbackModels={PROVIDER_MODELS[aiProvider] || []}
+            provider={aiProvider}
+        />
+    </div>
+)}
+```
+
+**Refresh button states:**
+- Normal: circular-arrows SVG icon + "Refresh" text, `text-brand-600 hover:text-brand-700`
+- Fetching: spinning circle SVG (`animate-spin`) + "Fetching…" text
+- Disabled (no API key): `text-slate-300 cursor-not-allowed`
+- Timestamp: `text-[10px] text-slate-400`, shown only when `liveModels[provider]` exists
+
 ### Risk/Severity Badge
 ```jsx
 <div className={`text-xs font-bold rounded py-1 border text-center ${getRiskColor(score)}`}>
@@ -583,9 +752,10 @@ project/
 │   ├── Icon.tsx          # SVG icon system
 │   ├── SmartInput.tsx    # AI-augmented input field
 │   ├── TreeNode.tsx      # Tree visualization node
-│   └── Chatbot.tsx       # Floating AI assistant
+│   ├── Chatbot.tsx       # Floating AI assistant
+│   └── ModelSelector.tsx # Live model picker with search, tiers, and favorites
 ├── services/
-│   ├── AIService.ts      # AI integration layer
+│   ├── AIService.ts      # AI integration layer (includes fetchModels)
 │   └── FileSystem.ts     # File system access
 ├── vite.config.ts
 ├── tsconfig.json

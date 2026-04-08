@@ -533,9 +533,16 @@ setProjects(
                                             </div>
                                         ) : aiProvider === 'openrouter' ? (
                                             <div>
-                                                <label className="block text-xs font-semibold text-slate-500 mb-1">Model ID</label>
-                                                <input type="text" value={modelName} onChange={e => setModelName(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="openai/gpt-4o-mini"/>
-                                                <p className="text-xs text-slate-400 mt-1">Any model available on OpenRouter (e.g. anthropic/claude-3-haiku, meta-llama/llama-3-8b-instruct)</p>
+                                                <label className="block text-xs font-semibold text-slate-500 mb-1">Model</label>
+                                                <ModelSelector
+                                                    value={modelName}
+                                                    onChange={setModelName}
+                                                    liveModels={null}
+                                                    fallbackModels={[]}
+                                                    provider="openrouter"
+                                                    allowCustomList={true}
+                                                />
+                                                <p className="text-xs text-slate-400 mt-1">Add any OpenRouter model ID (e.g. anthropic/claude-3-5-sonnet, meta-llama/llama-3-70b-instruct)</p>
                                             </div>
                                         ) : (
                                             <div>
