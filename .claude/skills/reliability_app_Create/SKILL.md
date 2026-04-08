@@ -53,14 +53,48 @@ type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter';
 async function callAI(provider, messages, tools?, systemPrompt?): Promise<AIResponse>
 ```
 
-**Supported providers:**
-- Google Gemini — `gemini-*` chat models fetched live; default `gemini-2.0-flash`
-- OpenAI — `gpt-*` and `o[N]` reasoning models fetched live; default `gpt-4o-mini`
-- Anthropic Claude — `claude-*` models fetched live; default `claude-sonnet-*`
-- Azure OpenAI — custom endpoint + deployment name (no live fetch; user types deployment)
-- OpenRouter — any model ID (no live fetch; user types the model string)
+**Provider constants — define these at module level in App.tsx:**
 
-**Do not hardcode model lists.** Models are fetched live from each provider's `/models` API endpoint using the user's saved API key and cached in `localStorage` with a 24h TTL. Always fall back to a hardcoded default list if the fetch fails.
+```typescript
+type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter';
+
+// Human-readable tab labels
+const PROVIDER_LABELS: Record<AIProvider, string> = {
+    gemini: 'Gemini', openai: 'OpenAI', anthropic: 'Anthropic',
+    azure: 'Azure', openrouter: 'OpenRouter'
+};
+
+// Hardcoded fallback models — shown when live fetch has not run yet or fails
+const PROVIDER_MODELS: Record<string, string[]> = {
+    gemini:    ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
+    openai:    ['gpt-4o-mini', 'gpt-4o', 'o3-mini'],
+    anthropic: ['claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001', 'claude-opus-4-6'],
+    // Azure and OpenRouter have no fallback list — they use text inputs
+};
+
+// Default model selected when switching to a provider
+const DEFAULT_MODELS: Record<AIProvider, string> = {
+    gemini: 'gemini-2.0-flash', openai: 'gpt-4o-mini',
+    anthropic: 'claude-sonnet-4-20250514', azure: '', openrouter: ''
+};
+
+// Placeholder text for API key input per provider
+const API_KEY_PLACEHOLDERS: Record<AIProvider, string> = {
+    gemini: 'AIzaSy...', openai: 'sk-...', anthropic: 'sk-ant-...',
+    azure: 'Azure API key', openrouter: 'sk-or-...'
+};
+```
+
+**Provider switching behavior:** clicking a provider tab calls `setAiProvider(p)` AND `setModelName(DEFAULT_MODELS[p])` — always resets the model to the provider's default.
+
+**Supported providers:**
+- Gemini — live fetch; default `gemini-2.0-flash`; fallback list in `PROVIDER_MODELS`
+- OpenAI — live fetch; default `gpt-4o-mini`; fallback list in `PROVIDER_MODELS`
+- Anthropic — live fetch; default `claude-sonnet-*`; fallback list in `PROVIDER_MODELS`
+- Azure — no live fetch; user types deployment name; no fallback list
+- OpenRouter — no live fetch; user builds own model list via `ModelSelector` with `allowCustomList`
+
+**Do not hardcode model lists as the final truth.** `PROVIDER_MODELS` is only a fallback for when live fetch has not run yet or failed. Models are fetched live and cached in `localStorage` with a 24h TTL.
 
 ### Live Model Fetching
 

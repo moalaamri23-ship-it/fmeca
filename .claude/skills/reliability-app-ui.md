@@ -443,9 +443,52 @@ OpenRouter does not use a plain text input. It uses `ModelSelector` with `allowC
 </p>
 ```
 
-**Full AI Settings model row (in App.tsx):**
+**Full AI Settings panel (in App.tsx):**
 
-The `ModelSelector` is not used standalone — it sits inside a settings row that includes a label, a live "Updated" timestamp, and a Refresh button. Azure and OpenRouter skip `ModelSelector` entirely and use plain text inputs.
+The complete settings card — provider tabs, API key, Azure endpoint, and model row — follows this structure exactly:
+
+```jsx
+<div className="bg-white p-6 rounded border max-w-xl">
+    <h2 className="text-lg font-semibold mb-4">AI Provider</h2>
+
+    {/* Provider tab switcher — clicking resets model to DEFAULT_MODELS[provider] */}
+    <div className="flex flex-wrap gap-1 bg-slate-100 p-1 rounded mb-5">
+        {(Object.keys(PROVIDER_LABELS) as AIProvider[]).map(p => (
+            <button key={p}
+                onClick={() => { setAiProvider(p); setModelName(DEFAULT_MODELS[p]); }}
+                className={`px-3 py-1.5 rounded text-xs font-bold transition
+                    ${aiProvider === p ? 'bg-brand-600 text-white shadow' : 'text-slate-500 hover:text-slate-700 hover:bg-white'}`}>
+                {PROVIDER_LABELS[p]}
+            </button>
+        ))}
+    </div>
+
+    <div className="space-y-3">
+        {/* API Key — always password type, placeholder from API_KEY_PLACEHOLDERS */}
+        <div>
+            <label className="block text-xs font-semibold text-slate-500 mb-1">API Key</label>
+            <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)}
+                className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500"
+                placeholder={API_KEY_PLACEHOLDERS[aiProvider]}/>
+        </div>
+
+        {/* Azure endpoint — only shown for Azure */}
+        {aiProvider === 'azure' && (
+            <div>
+                <label className="block text-xs font-semibold text-slate-500 mb-1">Azure Endpoint</label>
+                <input type="text" value={azureEndpoint} onChange={e => setAzureEndpoint(e.target.value)}
+                    className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500"
+                    placeholder="https://your-resource.openai.azure.com"/>
+            </div>
+        )}
+
+        {/* Model row — three cases */}
+        {/* ... see conditional layout below ... */}
+    </div>
+</div>
+```
+
+**Model row — conditional layout.** Azure → deployment name text input. OpenRouter → `ModelSelector` with `allowCustomList`. Gemini/OpenAI/Anthropic → label + refresh + `ModelSelector`.
 
 ```jsx
 {/* Azure: plain deployment name input */}
