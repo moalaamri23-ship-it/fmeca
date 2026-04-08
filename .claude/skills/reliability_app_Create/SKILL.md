@@ -98,7 +98,32 @@ const API_KEY_PLACEHOLDERS: Record<AIProvider, string> = {
 
 ### Live Model Fetching
 
-Add `fetchModels(provider, apiKey)` to `AIService`. Each provider has its own filter:
+Add `fetchModels(provider, apiKey)` to `AIService`. The API endpoints and required headers for each provider:
+
+```typescript
+// OpenAI
+fetch('https://api.openai.com/v1/models', {
+    headers: { 'Authorization': `Bearer ${apiKey}` }
+})
+// Response: { data: [{ id: string, object: 'model', ... }] }
+
+// Gemini
+fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}&pageSize=100`)
+// Response: { models: [{ name: 'models/gemini-2.0-flash', supportedGenerationMethods: [...], ... }] }
+// Strip 'models/' prefix from name field
+
+// Anthropic
+fetch('https://api.anthropic.com/v1/models', {
+    headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'  // required for browser calls
+    }
+})
+// Response: { data: [{ id: string, display_name: string, ... }] }
+```
+
+Each provider has its own filter:
 
 ```typescript
 export interface TieredModels {

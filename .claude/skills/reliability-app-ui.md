@@ -342,12 +342,14 @@ absolute top-10 right-0 bg-white border rounded shadow-xl flex flex-col w-40 z-3
 Replace native `<select>` for AI model selection with a custom `ModelSelector` component. It renders a trigger button that opens a dropdown panel with search, tiered groups, and per-model favorites.
 
 **Tier color coding:**
-| Tier | Label color | Dot color |
-|------|-------------|-----------|
-| Favorites | `text-amber-600` | `bg-amber-400` |
-| Pro | `text-purple-600` | `bg-purple-400` |
-| Balanced | `text-brand-600` | `bg-brand-400` |
-| Efficient | `text-green-600` | `bg-green-400` |
+| Tier | Label color | Dot color | Notes |
+|------|-------------|-----------|-------|
+| Favorites | `text-amber-600` | `bg-amber-400` | Max 4, star toggle |
+| My Models | `text-violet-600` | `bg-violet-400` | Only when `allowCustomList=true` |
+| Pro | `text-purple-600` | `bg-purple-400` | Live fetched |
+| Balanced | `text-brand-600` | `bg-brand-400` | Live fetched |
+| Efficient | `text-green-600` | `bg-green-400` | Live fetched |
+| Models | `text-slate-500` | `bg-slate-400` | Fallback only, no live data |
 
 **Trigger button:**
 ```
@@ -376,7 +378,11 @@ Colored dot + uppercase label + optional count badge (`{n}/{max}` for Favorites)
 ```
 flex items-center gap-2 px-3 py-2 cursor-pointer group transition-colors hover:bg-slate-50
 ```
-Selected row: `bg-brand-50`. Left slot: `w-3.5` checkmark (`text-brand-600`) when selected. Model name: `text-xs font-mono truncate`. Right slot: star button.
+Selected row: `bg-brand-50`. Slots left to right:
+1. `w-3.5` checkmark (`text-brand-600`) when selected, empty otherwise
+2. Model name: `flex-1 text-xs font-mono truncate`
+3. ✕ remove button — **only on My Models tier** (`text-red-500`, `opacity-0 group-hover:opacity-100`), stops click propagation
+4. Star/favorite button — all tiers (`text-amber-400` filled when favorited, `opacity-0 group-hover:opacity-100` otherwise)
 
 **Star/favorite button** (right of each row):
 ```
