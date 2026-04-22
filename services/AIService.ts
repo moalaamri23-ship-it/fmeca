@@ -248,7 +248,17 @@ export const AIService = {
         const wordCount = currentText ? currentText.trim().split(/\s+/).filter(Boolean).length : 0;
 
         if (currentText && wordCount > 0 && wordCount <= 5) {
-            corePrompt = `Fix only the grammar and spelling of the following text. Return only the corrected text with no explanations or changes to meaning. Original: """${currentText}"""`;
+            return this.chat({
+                feature: 'field-generation',
+                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
+                model: modelName,
+                messages: [{ role: 'user', content: `Fix only the grammar and spelling of the following text. Return only the corrected text with no explanations or changes to meaning. Original: """${currentText}"""` }],
+                mode: 'ai',
+                apiKey: key,
+                responseFormat: 'text'
+            });
         } else if (currentText && wordCount > 5) {
             if (lowerLabel.includes("function")) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
