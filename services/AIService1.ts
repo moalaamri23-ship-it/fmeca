@@ -1,6 +1,6 @@
 import { ContextData } from '../types';
 
-/*
+/* 
   -------------------------------------------------------------------------
   LANGCHAIN HOSTING CONFIGURATION
   -------------------------------------------------------------------------
@@ -9,7 +9,7 @@ import { ContextData } from '../types';
   2. Ensure the backend implements:
      - POST /api/ai        (accepts AIRequestPayload, returns { content: string })
      - POST /api/ai-vision (accepts AIRequestPayload, returns { content: string })
-
+  
   Behavior:
   - If `baseUrl` is set, the app attempts REMOTE mode first.
   - If REMOTE fails (or `baseUrl` is empty), it silently falls back to DIRECT mode (client-side calls).
@@ -54,9 +54,8 @@ export interface ToolChatResult {
 export interface AIRequestPayload {
     sessionId?: string;
     feature: string; // Identifier for the feature calling the service
-    provider: 'openai' | 'gemini' | 'anthropic' | 'azure' | 'openrouter' | 'copilot';
+    provider: 'openai' | 'gemini' | 'anthropic' | 'azure' | 'openrouter';
     azureEndpoint?: string;
-    powerAutomateUrl?: string; // HTTP trigger endpoint for Power Automate (Copilot provider)
     model: string;
     messages: AIMessage[];
     mode: 'ai' | 'file' | 'hybrid';
@@ -75,9 +74,6 @@ export const AIService = {
     // -------------------------------------------------------------------------
 
     async chat(req: AIRequestPayload): Promise<string> {
-        if (req.provider === 'copilot') {
-            return this._powerAutomateRequest(req);
-        }
         if (AI_CONFIG.baseUrl) {
             try {
                 return await this._remoteRequest(AI_CONFIG.endpoints.chat, req);
@@ -238,7 +234,7 @@ export const AIService = {
     // FEATURE IMPLEMENTATIONS (Refactored to use contract)
     // -------------------------------------------------------------------------
 
-    async generate(prompt: string, currentText: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', contextData: ContextData = {}, aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<string> {
+    async generate(prompt: string, currentText: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', contextData: ContextData = {}, aiProvider: string = '', azureEndpoint: string = '', systemContext: string = ''): Promise<string> {
         if (!key || key.length < 10) { await new Promise(r => setTimeout(r, 600)); const wc = currentText ? currentText.trim().split(/\s+/).filter(Boolean).length : 0; return currentText && wc > 5 ? currentText + " [Enhanced]" : currentText && wc > 0 ? currentText + " [Spell-checked]" : "AI Suggested Text"; }
 
         const fieldLabel = prompt || "text";
@@ -314,7 +310,6 @@ export const AIService = {
             feature: 'field-generation',
             provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
             azureEndpoint: azureEndpoint || undefined,
-            powerAutomateUrl: powerAutomateUrl || undefined,
             model: modelName,
             messages: [{ role: 'user', content: content }],
             mode: mode as 'ai'|'file'|'hybrid',
@@ -325,7 +320,7 @@ export const AIService = {
         });
     },
 
-    async generateMasterStructure(sysName: string, sysDesc: string, key: string, modelName: string, mode: string, refText: string, aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<any> {
+    async generateMasterStructure(sysName: string, sysDesc: string, key: string, modelName: string, mode: string, refText: string, aiProvider: string = '', azureEndpoint: string = '', systemContext: string = ''): Promise<any> {
         if(!key || key.length < 10) { await new Promise(r => setTimeout(r, 2000)); return []; }
         const corePrompt = `Act as Senior Reliability Engineer. Analyze System "${sysName}" (${sysDesc}).
         Break into 3-6 critical Subsystems.
@@ -355,7 +350,6 @@ export const AIService = {
                 feature: 'master-structure',
                 provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
                 azureEndpoint: azureEndpoint || undefined,
-                powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
                 messages: [{ role: 'user', content: content }],
                 mode: mode as 'ai'|'file'|'hybrid',
@@ -368,7 +362,7 @@ export const AIService = {
         } catch(e) { return []; }
     },
 
-    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<any> {
+    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = ''): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if(!key || key.length < 10) { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "Inspection", rpn: {s:5,o:5,d:5} }] }] }; }
@@ -386,7 +380,6 @@ export const AIService = {
                 feature: 'subsystem-generation',
                 provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
                 azureEndpoint: azureEndpoint || undefined,
-                powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
                 messages: [{ role: 'user', content: content }],
                 mode: mode as 'ai'|'file'|'hybrid',
@@ -398,7 +391,7 @@ export const AIService = {
         } catch(e) { return null; }
     },
 
-    async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<any[]> {
+    async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = ''): Promise<any[]> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if (!key || key.length < 10) { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Effect", cause: "Cause", mitigation: "Task", rpn: {s:6,o:4,d:3} }]; }
@@ -414,7 +407,6 @@ export const AIService = {
                 feature: 'mode-generation',
                 provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
                 azureEndpoint: azureEndpoint || undefined,
-                powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
                 messages: [{ role: 'user', content: content }],
                 mode: mode as 'ai'|'file'|'hybrid',
@@ -445,14 +437,13 @@ async evaluateRpnFromText(
     aiProvider?: string;
     azureEndpoint?: string;
     systemContext?: string;
-    powerAutomateUrl?: string;
   }
 ): Promise<{ s: number; o: number; d: number; reason?: string }> {
   const {
     project, subName, subSpecs, subFunc, failDesc,
     mode, effect, cause, mitigation,
     key, modelName, modeSource = 'ai', refText = '',
-    aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = ''
+    aiProvider = '', azureEndpoint = '', systemContext = ''
   } = args;
 
   if (!key || key.length < 10) {
@@ -531,7 +522,6 @@ Output format:
     feature: 'rpn-evaluation',
     provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
     azureEndpoint: azureEndpoint || undefined,
-    powerAutomateUrl: powerAutomateUrl || undefined,
     model: modelName,
     messages: [{ role: 'user', content: rpnContent }],
     mode: modeSource,
@@ -556,7 +546,7 @@ Output format:
     async analyzeImageForSubsystem(base64: string, key: string, model: string): Promise<string> {
         if (!key || key.length < 10) { await new Promise(r => setTimeout(r, 700)); return JSON.stringify({ equipment_type: "", equipment_model: "", manufacturer: "", specs: "", observations: [] }, null, 2); }
         const prompt = `Analyze image. Return strictly valid JSON: { "equipment_type": "", "equipment_model": "", "manufacturer": "", "specs": "string (Format: Key: Value Unit, Key: Value Unit)", "observations": ["string"] }`;
-
+        
         try {
             return await this.vision({
                 feature: 'image-analysis',
@@ -592,44 +582,12 @@ Output format:
         return data.content;
     },
 
-    async _powerAutomateRequest(req: AIRequestPayload): Promise<string> {
-        if (!req.powerAutomateUrl) {
-            throw new Error('Power Automate URL is required for Copilot provider.');
-        }
-
-        const lastUserMessage = [...req.messages].reverse().find(m => m.role === 'user');
-        const rawPrompt = typeof lastUserMessage?.content === 'string'
-            ? lastUserMessage.content
-            : '';
-
-        const fullPrompt = this.attachContext(rawPrompt, req.mode, req.refText ?? '');
-
-        const payload = {
-            sessionId: req.sessionId ?? crypto.randomUUID(),
-            prompt: fullPrompt,
-            responseFormat: req.responseFormat ?? 'text',
-        };
-
-        const res = await fetch(req.powerAutomateUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-
-        if (!res.ok) {
-            const errText = await res.text();
-            throw new Error(`Power Automate Error: ${res.statusText}${errText ? ` — ${errText}` : ''}`);
-        }
-
-        return res.text();
-    },
-
     async _directChat(req: AIRequestPayload): Promise<string> {
         // DIRECT mode: Use direct calls to OpenAI/Gemini
         // Apply context attachment locally as backend is not involved
-        const rawContent = typeof req.messages[0].content === 'string' ? req.messages[0].content : "";
+        const rawContent = typeof req.messages[0].content === 'string' ? req.messages[0].content : ""; 
         const fullPrompt = this.attachContext(rawContent, req.mode, req.refText || '');
-
+        
         try {
             if (req.provider === 'anthropic') {
                 const msgs = req.feature === 'chatbot'
@@ -664,9 +622,9 @@ Output format:
                 return data.choices[0].message.content;
             }
             if (req.provider === 'openai') {
-                const body: any = {
-                    model: (req.model && req.model.trim()) || "gpt-4o-mini",
-                    messages: [...req.messages.slice(0, -1), { role: "user", content: fullPrompt }]
+                const body: any = { 
+                    model: (req.model && req.model.trim()) || "gpt-4o-mini", 
+                    messages: [...req.messages.slice(0, -1), { role: "user", content: fullPrompt }] 
                 };
                 // If it's a conversation history (chatbot), fullPrompt might replace just the last message
                 if (req.feature === 'chatbot') {
@@ -679,14 +637,14 @@ Output format:
                 }
 
                 if(req.responseFormat === 'json') body.response_format = { type: "json_object" };
-
-                const res = await fetch('https://api.openai.com/v1/chat/completions', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${req.apiKey}` },
-                    body: JSON.stringify(body)
+                
+                const res = await fetch('https://api.openai.com/v1/chat/completions', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${req.apiKey}` }, 
+                    body: JSON.stringify(body) 
                 });
-                const data = await res.json();
-                if(data.error) throw new Error(data.error.message);
+                const data = await res.json(); 
+                if(data.error) throw new Error(data.error.message); 
                 return data.choices[0].message.content;
             } else {
                 // Gemini
@@ -702,9 +660,9 @@ Output format:
                         parts: [{ text: typeof m.content === 'string' ? m.content : '' }]
                     }));
                     // Gemini REST API expects 'contents' array
-                    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${(req.model && req.model.trim()) || "gemini-1.5-flash"}:generateContent?key=${req.apiKey}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${(req.model && req.model.trim()) || "gemini-1.5-flash"}:generateContent?key=${req.apiKey}`, { 
+                        method: 'POST', 
+                        headers: { 'Content-Type': 'application/json' }, 
                         body: JSON.stringify({ contents, systemInstruction: { parts: [{ text: "You are a helpful RCM consultant." }] } }) // Basic system instruction support
                     });
                     const data = await res.json();
@@ -714,14 +672,14 @@ Output format:
 
                 // Legacy single-turn behavior
                 promptText = fullPrompt + (req.responseFormat === 'json' ? " Return JSON object only." : "");
-                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${(req.model && req.model.trim()) || "gemini-1.5-flash"}:generateContent?key=${req.apiKey}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] })
+                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${(req.model && req.model.trim()) || "gemini-1.5-flash"}:generateContent?key=${req.apiKey}`, { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] }) 
                 });
-                const data = await res.json();
-                if (data.error) throw new Error(data.error.message);
-                if (!data.candidates || !data.candidates.length) throw new Error("No response");
+                const data = await res.json(); 
+                if (data.error) throw new Error(data.error.message); 
+                if (!data.candidates || !data.candidates.length) throw new Error("No response"); 
                 return data.candidates[0].content.parts[0].text;
             }
         } catch (e) { throw e as Error; }
@@ -730,21 +688,21 @@ Output format:
     async _directVision(req: AIRequestPayload): Promise<string> {
         try {
             const userMsg = req.messages[0];
-
+            
             if (req.provider === 'openai') {
-                const body: any = {
-                    model: req.model,
-                    messages: [userMsg]
+                const body: any = { 
+                    model: req.model, 
+                    messages: [userMsg] 
                 };
                 if(req.responseFormat === 'json') body.response_format = { type: "json_object" };
-
-                const res = await fetch('https://api.openai.com/v1/chat/completions', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${req.apiKey}` },
-                    body: JSON.stringify(body)
+                
+                const res = await fetch('https://api.openai.com/v1/chat/completions', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${req.apiKey}` }, 
+                    body: JSON.stringify(body) 
                 });
-                const data = await res.json();
-                if (data.error) throw new Error(data.error.message);
+                const data = await res.json(); 
+                if (data.error) throw new Error(data.error.message); 
                 return data.choices[0].message.content;
             } else {
                 // Convert standardized message content to Gemini format
@@ -760,12 +718,12 @@ Output format:
                     }
                 }
 
-                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${req.model}:generateContent?key=${req.apiKey}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ contents: [{ parts: [{ text }, { inlineData }] }] })
+                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${req.model}:generateContent?key=${req.apiKey}`, { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ contents: [{ parts: [{ text }, { inlineData }] }] }) 
                 });
-                const data = await res.json();
+                const data = await res.json(); 
                 if (data.error) throw new Error(data.error.message);
                 if (!data.candidates || !data.candidates.length) throw new Error("No response");
                 return data.candidates[0].content.parts[0].text;

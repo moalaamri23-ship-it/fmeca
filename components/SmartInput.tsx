@@ -17,14 +17,15 @@ interface SmartInputProps {
     aiProvider?: string;
     azureEndpoint?: string;
     systemContext?: string;
+    powerAutomateUrl?: string;
 }
 
-export const SmartInput: React.FC<SmartInputProps> = ({ label, value, onChange, isTextArea, apiKey, modelName, placeholder, aiSourceMode = 'ai', referenceFileText = '', contextData = {}, aiProvider = '', azureEndpoint = '', systemContext = '' }) => {
+export const SmartInput: React.FC<SmartInputProps> = ({ label, value, onChange, isTextArea, apiKey, modelName, placeholder, aiSourceMode = 'ai', referenceFileText = '', contextData = {}, aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = '' }) => {
     const [loading, setLoading] = useState(false);
     const handleAI = async () => {
         setLoading(true);
         try {
-            const res = await AIService.generate(label || "", value, apiKey, modelName, aiSourceMode, referenceFileText, contextData, aiProvider, azureEndpoint, systemContext);
+            const res = await AIService.generate(label || "", value, apiKey, modelName, aiSourceMode, referenceFileText, contextData, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
             onChange(res);
         } catch(e) {
             console.error(e);

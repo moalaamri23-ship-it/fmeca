@@ -12,6 +12,7 @@ interface ChatbotProps {
   aiProvider?: string;
   azureEndpoint?: string;
   systemContext?: string;
+  powerAutomateUrl?: string;
 }
 
 function styleDirective(style: "normal" | "concise" | "one_sentence") {
@@ -173,7 +174,7 @@ function safeJsonParse(raw: string) {
 }
 
 
-export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelName, responseStyle, aiProvider = '', azureEndpoint = '', systemContext = '' }) => {
+export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelName, responseStyle, aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = '' }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState("");
@@ -325,6 +326,7 @@ ${richIndex}
             feature: 'chatbot-planner',
             provider,
             azureEndpoint: azureEndpoint || undefined,
+            powerAutomateUrl: powerAutomateUrl || undefined,
             model: modelName,
             messages: toolSelectorMessages,
             mode: 'ai',
@@ -355,6 +357,7 @@ ${richIndex}
                 feature: 'chatbot-planner',
                 provider,
                 azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
                 messages: [
                     { role: 'system', content: SYSTEM_RETRIEVAL_PLANNER },
@@ -412,6 +415,7 @@ const apiMessages: AIMessage[] = [
                 feature: 'chatbot',
                 provider,
                 azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
                 messages: apiMessages,
                 mode: 'ai',
