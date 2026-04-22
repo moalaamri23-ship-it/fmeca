@@ -239,7 +239,7 @@ export const AIService = {
     // -------------------------------------------------------------------------
 
     async generate(prompt: string, currentText: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', contextData: ContextData = {}, aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<string> {
-        if (!key || key.length < 10) { await new Promise(r => setTimeout(r, 600)); const wc = currentText ? currentText.trim().split(/\s+/).filter(Boolean).length : 0; return currentText && wc > 5 ? currentText + " [Enhanced]" : currentText && wc > 0 ? currentText + " [Spell-checked]" : "AI Suggested Text"; }
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 600)); const wc = currentText ? currentText.trim().split(/\s+/).filter(Boolean).length : 0; return currentText && wc > 5 ? currentText + " [Enhanced]" : currentText && wc > 0 ? currentText + " [Spell-checked]" : "AI Suggested Text"; }
 
         const fieldLabel = prompt || "text";
         const lowerLabel = fieldLabel.toLowerCase();
@@ -336,7 +336,7 @@ export const AIService = {
     },
 
     async generateMasterStructure(sysName: string, sysDesc: string, key: string, modelName: string, mode: string, refText: string, aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<any> {
-        if(!key || key.length < 10) { await new Promise(r => setTimeout(r, 2000)); return []; }
+        if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 2000)); return []; }
         const corePrompt = `Act as Senior Reliability Engineer. Analyze System "${sysName}" (${sysDesc}).
         Break into 3-6 critical Subsystems.
         Step 1: For each subsystem, generate 'specs' first using format "Key: Value Unit, Key: Value Unit".
@@ -381,7 +381,7 @@ export const AIService = {
     async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-        if(!key || key.length < 10) { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "Inspection", rpn: {s:5,o:5,d:5} }] }] }; }
+        if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "Inspection", rpn: {s:5,o:5,d:5} }] }] }; }
         const corePrompt = `Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".
         Task:
         1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
@@ -411,7 +411,7 @@ export const AIService = {
     async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<any[]> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-        if (!key || key.length < 10) { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Effect", cause: "Cause", mitigation: "Task", rpn: {s:6,o:4,d:3} }]; }
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Effect", cause: "Cause", mitigation: "Task", rpn: {s:6,o:4,d:3} }]; }
         const corePrompt = `Context: System "${project}", Subsystem "${subName}", Specs "${subSpecs}". Function: "${subFunc}". Functional Failure: "${failDesc}".
         Task: Generate 2-3 specific Failure Modes that result in this Functional Failure.
         For each mode, determine Effect, Root Cause, and Mitigation Task.
@@ -465,7 +465,7 @@ async evaluateRpnFromText(
     aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = ''
   } = args;
 
-  if (!key || key.length < 10) {
+  if ((!key || key.length < 10) && aiProvider !== 'copilot') {
     // Safe offline fallback (keeps app usable)
     await new Promise(r => setTimeout(r, 600));
     return { s: 5, o: 5, d: 5, reason: "Simulated scoring (no API key)." };

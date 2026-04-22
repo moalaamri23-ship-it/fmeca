@@ -275,7 +275,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelNa
 
     // Chat Logic
     const handleSend = async () => {
-        if (!input.trim() || !apiKey) return;
+        if (!input.trim() || (!apiKey && aiProvider !== 'copilot')) return;
         if (isRagEnabled && !activeProject) {
     setMessages(prev => [
         ...prev,
