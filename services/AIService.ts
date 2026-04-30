@@ -259,7 +259,47 @@ export const AIService = {
                 apiKey: key,
                 responseFormat: 'text'
             });
-        } else if (currentText && wordCount > 5) {
+        }
+
+        // --- MITIGATION SPECIALIST ---
+        if (lowerLabel.includes("mitigation")) {
+            const d = (contextData.detectionScore as number) ?? 5;
+            const checklistContent = (contextData.checklistText as string) ?? '';
+            const count = d >= 7 ? '4-6' : d >= 4 ? '3-4' : '2-3';
+            const detectionNote = d >= 7
+                ? `Detection score is HIGH (D=${d}/10). Prioritize adding monitoring instruments and detection barriers to reduce this score.`
+                : d <= 3
+                ? `Detection is already good (D=${d}/10). Focus on preventive maintenance actions.`
+                : `Detection score is moderate (D=${d}/10). Balance preventive tasks with detection controls.`;
+            const ownerRules = `Owner assignment (add team in parentheses after each action):\n- Sensor, transmitter, switch, monitor, level/pressure/vibration/flow tag → (Instrument team)\n- Lubrication, alignment, bearing, seal, coupling, mechanical inspection → (Mechanical team)\n- Control system, PLC, SCADA, interlock, delay, communication → (Automation team)\n- Operational round, manual monitoring, log, operator check → (Operation team)`;
+            const formatRule = `Format: "1- Action description [Tag: TAGNO (Hi: X unit, Hi-Hi: Y unit) if applicable] (Owner)"\nWrite each action on its own line. Return ONLY the numbered list, no headers or explanations.`;
+            const existingNote = currentText?.trim() ? `Existing mitigations to enhance and expand:\n"""${currentText}"""\n` : '';
+            let mitigationPrompt: string;
+            if (mode === 'file' || mode === 'hybrid') {
+                const refSection = refText?.trim() ? `REFERENCE DATA (P&IDs, datasheets, safeguarding instruments with tag numbers and alarm limits):\n"""\n${refText.slice(0, 7000)}\n"""\n\n` : '';
+                const checkSection = checklistContent?.trim() ? `PM CHECKLIST KNOWLEDGE (organized by team and PM interval):\n"""\n${checklistContent.slice(0, 6000)}\n"""\n\n` : '';
+                mitigationPrompt = `${refSection}${checkSection}Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".\n${detectionNote}\n${existingNote}\nGenerate ${count} mitigation actions using this priority:\n1. Extract relevant PM tasks from CHECKLIST KNOWLEDGE — use the checklist section name as the team owner.\n2. From REFERENCE DATA, identify safeguarding instruments (tags like VXIT, PT, TT, LE, FIT, etc.) with their alarm limits; suggest utilizing or installing them for detection improvement.\n3. Add reliability-knowledge mitigations to further reduce Detection if D > 6.\n${ownerRules}\n${formatRule}`;
+            } else {
+                mitigationPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".\n${detectionNote}\n${existingNote}\nGenerate ${count} maintenance mitigation actions for this failure.\n${ownerRules}\n${formatRule}`;
+            }
+            const mitigationContent = mitigationPrompt + (systemContext ? '\n\n' + systemContext : '');
+            return this.chat({
+                feature: 'field-generation',
+                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
+                model: modelName,
+                messages: [{ role: 'user', content: mitigationContent }],
+                mode: 'ai',
+                refText: '',
+                contextData,
+                apiKey: key,
+                responseFormat: 'text'
+            });
+        }
+        // --- END MITIGATION SPECIALIST ---
+
+        if (currentText && wordCount > 5) {
             if (lowerLabel.includes("function")) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
                 The user wrote this Function Description: """${currentText}"""
@@ -378,16 +418,19 @@ export const AIService = {
         } catch(e) { return []; }
     },
 
-    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<any> {
+    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = ''): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-        if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "Inspection", rpn: {s:5,o:5,d:5} }] }] }; }
-        const corePrompt = `Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".
+        if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
+        const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
+            ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
+        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
+        const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".
         Task:
         1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
         2. Derive multiple (2-4) distinct Functional Failures strictly from the Function (negation of expectations).
         3. For each failure, generate Failure Modes, Effects, Causes, and Mitigations.
-        Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] } ] }`;
+        Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] } ] }${mitigationInstruction}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 
@@ -408,14 +451,17 @@ export const AIService = {
         } catch(e) { return null; }
     },
 
-    async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<any[]> {
+    async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = ''): Promise<any[]> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-        if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Effect", cause: "Cause", mitigation: "Task", rpn: {s:6,o:4,d:3} }]; }
-        const corePrompt = `Context: System "${project}", Subsystem "${subName}", Specs "${subSpecs}". Function: "${subFunc}". Functional Failure: "${failDesc}".
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Effect", cause: "Cause", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:6,o:4,d:3} }]; }
+        const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
+            ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
+        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
+        const corePrompt = `${checklistBlock}Context: System "${project}", Subsystem "${subName}", Specs "${subSpecs}". Function: "${subFunc}". Functional Failure: "${failDesc}".
         Task: Generate 2-3 specific Failure Modes that result in this Functional Failure.
         For each mode, determine Effect, Root Cause, and Mitigation Task.
-        Return JSON object: { "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] }`;
+        Return JSON object: { "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] }${mitigationInstruction}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 

@@ -70,4 +70,6 @@ export interface ContextData {
   project?: string;
   subsystem?: string;
   specs?: string;
+  checklistText?: string;
+  detectionScore?: number;
 }

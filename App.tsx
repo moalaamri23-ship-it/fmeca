@@ -88,6 +88,8 @@ const App = () => {
     const [chatbotStyle, setChatbotStyle] = useState<ChatbotResponseStyle>("normal");
     const [globalFileText, setGlobalFileText] = useState('');
     const [globalFileName, setGlobalFileName] = useState('');
+    const [checklistText, setChecklistText] = useState('');
+    const [checklistFileName, setChecklistFileName] = useState('');
     const [tab, setTab] = useState<'build' | 'viewTable' | 'map'>('build');
     const [showRPN, setShowRPN] = useState(true);
     const [showLib, setShowLib] = useState(false);
@@ -207,6 +209,8 @@ setProjects(
     setChatbotStyle((localStorage.getItem('rcm_chatbot_style') as ChatbotResponseStyle) || 'normal');
     setGlobalFileText(localStorage.getItem('rcm_global_file_text') || '');
     setGlobalFileName(localStorage.getItem('rcm_global_file_name') || '');
+    setChecklistText(localStorage.getItem('rcm_checklist_text') || '');
+    setChecklistFileName(localStorage.getItem('rcm_checklist_name') || '');
     setSystemType(localStorage.getItem('rcm_system_type') || '');
     setSystemModes(safeGet('rcm_system_modes', []));
     setSystemContextEnabled(localStorage.getItem('rcm_system_context_enabled') !== 'false');
@@ -250,10 +254,12 @@ setProjects(
         localStorage.setItem('rcm_chatbot_style', chatbotStyle);
         localStorage.setItem('rcm_global_file_text', globalFileText);
         localStorage.setItem('rcm_global_file_name', globalFileName);
+        localStorage.setItem('rcm_checklist_text', checklistText);
+        localStorage.setItem('rcm_checklist_name', checklistFileName);
         localStorage.setItem('rcm_system_type', systemType);
         localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
-    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, enableChatbot, chatbotStyle, globalFileText, globalFileName, systemType, systemModes, systemContextEnabled]);
+    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, enableChatbot, chatbotStyle, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
 
     const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic'] as const;
     type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
@@ -673,8 +679,8 @@ render();
 
     const setBusy = (id: string, on: boolean) => setRpnBusy(prev => { const next = new Set(prev); on ? next.add(id) : next.delete(id); return next; });
 
-    const autoGen = async (sId: string, name: string, specs: string, func: string) => { setGenId(sId); if(activeProject) { const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, powerAutomateUrl); if(res && res.failures) { setActiveProject(p => p ? ({ ...p, subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: [...s.failures, ...res.failures.map((f: any) => ({...f, id: generateId(), modes: f.modes.map((m: any) => ({...m, id: generateId()}))}))] }) }) : null); } } setGenId(null); };
-    const genModes = async (sId: string, fId: string, name: string, specs: string, func: string, failDesc: string) => { setModeGenId(fId); if(activeProject) { const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, powerAutomateUrl); if(modes) setActiveProject(p => p ? ({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, ...modes.map(m => ({...m, id: generateId()}))]} : f)} : s)}) : null); } setModeGenId(null); };
+    const autoGen = async (sId: string, name: string, specs: string, func: string) => { setGenId(sId); if(activeProject) { const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl); if(res && res.failures) { setActiveProject(p => p ? ({ ...p, subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: [...s.failures, ...res.failures.map((f: any) => ({...f, id: generateId(), modes: f.modes.map((m: any) => ({...m, id: generateId()}))}))] }) }) : null); } } setGenId(null); };
+    const genModes = async (sId: string, fId: string, name: string, specs: string, func: string, failDesc: string) => { setModeGenId(fId); if(activeProject) { const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl); if(modes) setActiveProject(p => p ? ({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, ...modes.map(m => ({...m, id: generateId()}))]} : f)} : s)}) : null); } setModeGenId(null); };
     const masterGen = async () => {
         if (!apiKey && aiProvider !== 'copilot') return alert("API Key required.");
         if (!activeProject?.name) return alert("Enter System Name.");
@@ -698,13 +704,13 @@ render();
             const enrichedSub = { ...s, func: funcDesc || s.func };
 
             // Step 3: Derive comprehensive functional failures — pass full projectContext.
-            const expanded = await AIService.generateCompleteSubsystem(enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
+            const expanded = await AIService.generateCompleteSubsystem(enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl);
             const failures: any[] = expanded?.failures?.length > 0 ? expanded.failures : (enrichedSub.failures || []);
 
             // Step 4: Derive comprehensive failure modes — pass full projectContext.
             const fullFailures: any[] = [];
             for (const f of failures) {
-                const modes = await AIService.generateModesForFailure(f.desc, enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
+                const modes = await AIService.generateModesForFailure(f.desc, enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl);
                 fullFailures.push({ ...f, modes: modes?.length > 0 ? modes : (f.modes || []) });
             }
             completedSubs.push({ ...enrichedSub, failures: fullFailures });
@@ -933,6 +939,17 @@ render();
                                                 </div>
                                             )}
                                         </div>
+                                        <div className="border-t pt-4 mt-2">
+                                            <label className="block text-xs font-semibold text-slate-500 mb-2">Checklist Knowledge</label>
+                                            <p className="text-[10px] text-slate-400 mb-2">PM checklists by team &amp; interval — used for mitigation in File/Hybrid mode</p>
+                                            <label className="inline-flex items-center gap-2 px-3 py-2 border rounded bg-slate-50 cursor-pointer text-xs"><Icon name="upload" /><span>Upload</span><input type="file" accept=".txt,.md,.csv" className="hidden" onChange={async e => { const file = e.target.files?.[0]; if (!file) return; setChecklistText(await file.text()); setChecklistFileName(file.name); }}/></label>
+                                            {checklistFileName && (
+                                                <div className="mt-2 flex items-center gap-3 bg-slate-50 border rounded p-2">
+                                                    <div className="text-[11px] text-slate-600 flex-1 truncate"><span className="font-bold">Loaded:</span> <span className="font-mono">{checklistFileName}</span></div>
+                                                    <button onClick={() => { setChecklistText(''); setChecklistFileName(''); }} className="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded text-red-500 hover:bg-red-50 hover:border-red-200 font-bold transition">Clear</button>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             
@@ -1059,7 +1076,7 @@ render();
                                                                             <td className="p-2 border-r"><SmartInput label="Failure Mode" value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
                                                                             <td className="p-2 border-r"><SmartInput label="Failure Effect" value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} isTextArea apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
                                                                             <td className="p-2 border-r"><SmartInput label="Failure Cause" value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
-                                                                            <td className="p-2 border-r"><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
+                                                                            <td className="p-2 border-r"><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, checklistText: checklistText, detectionScore: Number(mode.rpn.d) || 5}} /></td>
                                                                             {showRPN && <td className="p-2 text-center"><div className="flex justify-center gap-0.5 mb-1"><input className="w-5 text-center border text-xs" value={mode.rpn.s} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, s:e.target.value})}/><input className="w-5 text-center border text-xs" value={mode.rpn.o} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, o:e.target.value})}/><input className="w-5 text-center border text-xs" value={mode.rpn.d} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, d:e.target.value})}/></div><div className={`text-xs font-bold rounded py-1 border ${getRpnColor((Number(mode.rpn.s)||1)*(Number(mode.rpn.o)||1)*(Number(mode.rpn.d)||1))}`}>{(Number(mode.rpn.s)||1)*(Number(mode.rpn.o)||1)*(Number(mode.rpn.d)||1)}</div></td>}
                                                                             <td className="p-2 text-center opacity-0 group-hover:opacity-100"><div className="flex flex-col items-center gap-1"><button onClick={(e)=>{e.stopPropagation();deleteMode(sub.id,fail.id,mode.id)}} className="text-red-500 mb-2"><Icon name="trash"/></button><button onClick={(e)=>{e.stopPropagation();aiScoreModeRpn(sub.id,fail.id,mode.id)}} className={`text-blue-500 text-sm ${rpnLoadingId===String(mode.id) ? "animate-pulse scale-110 drop-shadow-[0_0_6px_rgba(59,130,246,0.6)]" : ""}`} title="AI score S/O/D">🤖</button></div></td>
                                                                         </tr>
