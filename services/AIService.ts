@@ -280,13 +280,17 @@ Requirements:
 3. Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
             } else {
                 ffPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
-${funcBlock}${existingBlock}Task: Generate ONE new Functional Failure for this subsystem.
-Requirements:
-1. Derive it by negating an aspect of the function not yet covered by any existing failure above.
-2. Express as a negation or loss of function (e.g., "Fails to deliver...", "Unable to maintain...", "Delivers less than required...", "Runs at higher than rated...").
-3. Describe the failure of the function — NOT a physical failure mode or root cause.
-4. If all functional aspects are already covered by the existing failures, return exactly empty string.
-5. Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
+${funcBlock}${existingBlock}STEP 1 — Coverage analysis (do this before writing anything):
+List each distinct functional expectation stated in the Subsystem Function above.
+For each expectation, check whether any existing failure already addresses it.
+
+STEP 2 — Decision:
+IF at least one expectation is not yet addressed by any existing failure:
+  Write ONE new Functional Failure that negates that uncovered expectation.
+  Express it as a loss/negation (e.g., "Fails to deliver...", "Unable to maintain...", "Delivers less than required...").
+  Return ONLY that one-line statement — no prefix, no explanation.
+IF all expectations are already addressed by existing failures:
+  Return only an empty string and nothing else.`;
             }
             return this.chat({
                 feature: 'field-generation',
@@ -513,12 +517,18 @@ Requirements:
             : '';
         const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
         const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".${existingBlock}
-        Task:
-        1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
-        2. Derive NEW Functional Failures strictly from the Function (negation of expectations) that are NOT already covered by the existing failures above.
-        3. For each new failure, generate Failure Modes, Effects, Causes, and Mitigations.
-        4. If all functional aspects are already covered by existing failures, return { "failures": [] }.
-        Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] } ] }${mitigationInstruction}`;
+        STEP 1 — Coverage analysis (required before generating anything):
+        - If "Function Provided" is empty, derive a function first (Action + Specs + Normal Expectations) and use it for the analysis below.
+        - List each distinct functional expectation stated in the function.
+        - For each expectation, check whether any existing failure already covers it (by addressing its negation).
+        STEP 2 — Decision:
+        IF one or more expectations are NOT yet covered:
+          Generate Functional Failures ONLY for the uncovered expectations (1 per uncovered expectation).
+          For each, add 1-2 Failure Modes with Effect, Cause, and Mitigation.
+          Return JSON: { "failures": [ { "desc": "...", "modes": [...] } ] }
+        IF all expectations are already covered by existing failures:
+          Return JSON: { "failures": [] }
+        JSON schema for each failure: { "desc": "string", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] }${mitigationInstruction}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 
