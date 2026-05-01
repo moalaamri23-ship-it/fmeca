@@ -684,11 +684,21 @@ render();
         if (activeProject) {
             const sub = activeProject.subsystems.find(s => s.id === sId);
             const existingFailures = sub?.failures.filter(f => f.desc).map(f => f.desc) ?? [];
-            const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, existingFailures);
-            if (res && res.failures && res.failures.length > 0) {
-                setActiveProject(p => p ? ({ ...p, subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: [...s.failures, ...res.failures.map((f: any) => ({...f, id: generateId(), modes: f.modes.map((m: any) => ({...m, id: generateId()}))}))] }) }) : null);
-            } else {
+
+            // Phase 1: ask AI if function description is already fully covered
+            const covered = await AIService.checkFunctionCoverage(func, existingFailures, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl);
+
+            if (covered) {
+                // All functional aspects satisfied — add one blank row
                 addFail(sId);
+            } else {
+                // Phase 2: generate new failures for uncovered aspects
+                const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, existingFailures);
+                if (res && res.failures && res.failures.length > 0) {
+                    setActiveProject(p => p ? ({ ...p, subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: [...s.failures, ...res.failures.map((f: any) => ({...f, id: generateId(), modes: f.modes.map((m: any) => ({...m, id: generateId()}))}))] }) }) : null);
+                } else {
+                    addFail(sId);
+                }
             }
         }
         setGenId(null);
