@@ -577,21 +577,39 @@ Requirements:
         // Returns false → at least one aspect is not yet addressed
         if (!funcDesc?.trim() || existingFailures.length === 0) return false;
         if ((!key || key.length < 10) && aiProvider !== 'copilot') return false;
-        const prompt = `You are a senior reliability engineer reviewing an FMECA. You are pragmatic and conservative — you do not like to overcomplicate analyses. Your goal is to confirm that the work is done, not to find reasons to add more.
 
-Subsystem Function: "${funcDesc}"
+        const prompt = `You are a reliability engineer doing a strict functional-coverage analysis. You must show your work — do not skip the per-item matching.
 
-Existing Functional Failures:
+Subsystem Function description:
+"""
+${funcDesc}
+"""
+
+Existing Functional Failures (numbered):
 ${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}
 
-Assessment question: As a practical reliability engineer, are you satisfied that the existing functional failures above adequately represent how this subsystem can fail to perform its stated function?
+STEP 1 — Decompose the Function description into a flat list of distinct ITEMS. Each item is one of:
+  • a function the subsystem performs (verb + object, e.g. "delivers cooling water at 400 GPM"),
+  • a specific expectation or operating requirement (e.g. "maintains discharge pressure 100 PSI", "no abnormal vibration", "continuous operation", "no external leakage").
+A single sentence may yield multiple items if it states multiple expectations.
 
-Rules for your decision:
-- Minor variations of the same failure, partial overlaps, or theoretical edge cases do NOT justify adding more.
-- Only answer NO if there is a clearly distinct and significant functional aspect — one that a reasonable engineer would consider important — that is entirely absent from the existing list.
-- When in doubt, answer YES. More is not always better.
+STEP 2 — For each item, find the existing functional failure that represents the FAILURE or LOSS of that item.
+  Examples of valid matches:
+    • Item "delivers 400 GPM" ↔ failure "Fails to deliver required flow"
+    • Item "no abnormal vibration" ↔ failure "Excessive vibration"
+    • Item "no external leakage" ↔ failure "External leakage from casing"
+  If no listed failure matches an item, leave covered_by empty and mark covered=false.
 
-Answer with exactly one word — YES or NO:`;
+STEP 3 — Set "all_covered" to true ONLY if every single item has covered=true. If even one item has covered=false, set "all_covered" to false.
+
+Return ONLY this JSON, no prose, no markdown:
+{
+  "items": [
+    { "item": "<text from function description>", "covered_by": [<failure number>, ...], "covered": true | false }
+  ],
+  "all_covered": true | false
+}`;
+
         try {
             const res = await this.chat({
                 feature: 'coverage-check',
@@ -603,9 +621,10 @@ Answer with exactly one word — YES or NO:`;
                 mode: 'ai',
                 refText: '',
                 apiKey: key,
-                responseFormat: 'text'
+                responseFormat: 'json'
             });
-            return res.trim().toUpperCase().startsWith('YES');
+            const parsed = this.extractJSON(res);
+            return parsed?.all_covered === true;
         } catch { return false; }
     },
 
