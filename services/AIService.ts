@@ -261,6 +261,90 @@ export const AIService = {
             });
         }
 
+        // --- FUNCTIONAL FAILURE SPECIALIST ---
+        if (lowerLabel.includes("functional failure")) {
+            const func = (contextData.funcDescription as string) ?? '';
+            const existing = (contextData.existingFailures as string[]) ?? [];
+            const existingBlock = existing.length > 0
+                ? `Existing Functional Failures already defined (DO NOT repeat or closely resemble any of these):\n${existing.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n`
+                : '';
+            const funcBlock = func?.trim() ? `Subsystem Function: "${func}"\n` : '';
+            let ffPrompt: string;
+            if (currentText && wordCount > 5) {
+                ffPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
+${funcBlock}${existingBlock}The user has typed this Functional Failure: "${currentText}"
+Task: Rewrite and improve this as a proper Functional Failure statement.
+Requirements:
+1. Express as a negation or loss of function (e.g., "Fails to deliver...", "Unable to maintain...", "Delivers less than required...", "Runs at higher than rated...").
+2. Describe the failure of the function — NOT a physical failure mode or root cause.
+3. Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
+            } else {
+                ffPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
+${funcBlock}${existingBlock}Task: Generate ONE new Functional Failure for this subsystem.
+Requirements:
+1. Derive it by negating an aspect of the function not yet covered by any existing failure above.
+2. Express as a negation or loss of function (e.g., "Fails to deliver...", "Unable to maintain...", "Delivers less than required...", "Runs at higher than rated...").
+3. Describe the failure of the function — NOT a physical failure mode or root cause.
+4. If all functional aspects are already covered by the existing failures, return exactly empty string.
+5. Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
+            }
+            return this.chat({
+                feature: 'field-generation',
+                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
+                model: modelName,
+                messages: [{ role: 'user', content: ffPrompt + (systemContext ? '\n\n' + systemContext : '') }],
+                mode: mode as 'ai' | 'file' | 'hybrid',
+                refText,
+                contextData,
+                apiKey: key,
+                responseFormat: 'text'
+            });
+        }
+        // --- END FUNCTIONAL FAILURE SPECIALIST ---
+
+        // --- FAILURE MODE SPECIALIST ---
+        if (lowerLabel.includes("failure mode")) {
+            const failDesc = (contextData.failureDesc as string) ?? '';
+            const existing = (contextData.existingModes as string[]) ?? [];
+            const existingBlock = existing.length > 0
+                ? `Existing Failure Modes already defined (DO NOT repeat or closely resemble):\n${existing.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n`
+                : '';
+            const failBlock = failDesc?.trim() ? `Functional Failure: "${failDesc}"\n` : '';
+            let fmPrompt: string;
+            if (currentText && wordCount > 5) {
+                fmPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
+${failBlock}${existingBlock}The user has typed this Failure Mode: "${currentText}"
+Task: Rewrite and improve this as a proper Failure Mode.
+Requirements:
+1. Describe the physical way the failure occurs (e.g., "Bearing wear", "Seal leakage", "Impeller erosion").
+2. Be specific — describe the physical failure mechanism, NOT the effect or cause.
+3. Return ONLY the Failure Mode — one concise phrase, no prefix, no explanation.`;
+            } else {
+                fmPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
+${failBlock}${existingBlock}Task: Generate ONE new Failure Mode for this Functional Failure.
+Requirements:
+1. Describe the physical way the failure occurs (e.g., "Bearing wear", "Seal leakage", "Impeller erosion", "Shaft misalignment").
+2. Be specific and different from any existing modes listed above.
+3. Return ONLY the Failure Mode — one concise phrase, no prefix, no explanation.`;
+            }
+            return this.chat({
+                feature: 'field-generation',
+                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
+                model: modelName,
+                messages: [{ role: 'user', content: fmPrompt + (systemContext ? '\n\n' + systemContext : '') }],
+                mode: mode as 'ai' | 'file' | 'hybrid',
+                refText,
+                contextData,
+                apiKey: key,
+                responseFormat: 'text'
+            });
+        }
+        // --- END FAILURE MODE SPECIALIST ---
+
         // --- MITIGATION SPECIALIST ---
         if (lowerLabel.includes("mitigation")) {
             const d = (contextData.detectionScore as number) ?? 5;
@@ -418,18 +502,22 @@ export const AIService = {
         } catch(e) { return []; }
     },
 
-    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = ''): Promise<any> {
+    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = []): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
             ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
+        const existingBlock = existingFailures.length > 0
+            ? `\nExisting Functional Failures already defined (DO NOT repeat or closely resemble — generate only NEW ones not yet covered):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n`
+            : '';
         const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
-        const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".
+        const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".${existingBlock}
         Task:
         1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
-        2. Derive multiple (2-4) distinct Functional Failures strictly from the Function (negation of expectations).
-        3. For each failure, generate Failure Modes, Effects, Causes, and Mitigations.
+        2. Derive NEW Functional Failures strictly from the Function (negation of expectations) that are NOT already covered by the existing failures above.
+        3. For each new failure, generate Failure Modes, Effects, Causes, and Mitigations.
+        4. If all functional aspects are already covered by existing failures, return { "failures": [] }.
         Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] } ] }${mitigationInstruction}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');

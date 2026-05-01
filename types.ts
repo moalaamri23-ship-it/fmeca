@@ -72,4 +72,8 @@ export interface ContextData {
   specs?: string;
   checklistText?: string;
   detectionScore?: number;
+  funcDescription?: string;    // subsystem function description (for FF wand)
+  existingFailures?: string[]; // other FF descriptions already defined (for uniqueness)
+  failureDesc?: string;        // parent functional failure (for FM wand context)
+  existingModes?: string[];    // other FM names already defined (for uniqueness)
 }
