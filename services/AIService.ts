@@ -577,18 +577,21 @@ Requirements:
         // Returns false → at least one aspect is not yet addressed
         if (!funcDesc?.trim() || existingFailures.length === 0) return false;
         if ((!key || key.length < 10) && aiProvider !== 'copilot') return false;
-        const prompt = `You are a reliability engineer evaluating functional coverage.
+        const prompt = `You are a senior reliability engineer reviewing an FMECA. You are pragmatic and conservative — you do not like to overcomplicate analyses. Your goal is to confirm that the work is done, not to find reasons to add more.
 
 Subsystem Function: "${funcDesc}"
 
 Existing Functional Failures:
 ${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}
 
-Question: Does the function description above contain any functional expectation (any output, performance level, operating condition, or service it must deliver) that is NOT yet addressed by any of the existing functional failures?
+Assessment question: As a practical reliability engineer, are you satisfied that the existing functional failures above adequately represent how this subsystem can fail to perform its stated function?
 
-Answer with exactly one word:
-- NO  → if at least one functional expectation is missing (more failures still needed)
-- YES → if every functional expectation is already addressed by the existing failures`;
+Rules for your decision:
+- Minor variations of the same failure, partial overlaps, or theoretical edge cases do NOT justify adding more.
+- Only answer NO if there is a clearly distinct and significant functional aspect — one that a reasonable engineer would consider important — that is entirely absent from the existing list.
+- When in doubt, answer YES. More is not always better.
+
+Answer with exactly one word — YES or NO:`;
         try {
             const res = await this.chat({
                 feature: 'coverage-check',
