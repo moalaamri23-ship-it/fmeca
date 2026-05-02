@@ -2,9 +2,11 @@
 <html>
 <head><title>Select Folder</title></head>
 <body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8fafc;color:#334155">
-<p>Select a folder…</p>
+<button id="btn" style="padding:12px 28px;font-size:16px;font-weight:600;background:#4f46e5;color:#fff;border:none;border-radius:8px;cursor:pointer">
+  Select Project Folder
+</button>
 <script>
-(async () => {
+document.getElementById('btn').addEventListener('click', async function () {
   try {
     var handle = await window.showDirectoryPicker({ mode: 'readwrite' });
     window.opener.postMessage({ type: 'fmeca-folder-picked', handle: handle }, window.location.origin);
@@ -12,7 +14,7 @@
     window.opener.postMessage({ type: 'fmeca-folder-cancelled', error: (e && e.message) || 'cancelled' }, window.location.origin);
   }
   window.close();
-})();
+});
 </script>
 </body>
 </html>
