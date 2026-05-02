@@ -47,7 +47,7 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
             setMsg("Folder ready.");
             setMode('view');
             loadFiles();
-        } catch(e: any) { setMsg("Error creating folder: " + e.message); }
+        } catch(e: any) { setMsg("Error creating folder: " + (e?.message || String(e))); }
     };
 
     const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -58,7 +58,7 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
             await provider.uploadFiles(projectId, pathParts, e.target.files);
             setMsg("Upload successful.");
             loadFiles();
-        } catch(e: any) { setMsg("Upload failed: "+e.message); }
+        } catch(e: any) { setMsg("Upload failed: " + (e?.message || String(e))); }
         setLoading(false);
     };
 

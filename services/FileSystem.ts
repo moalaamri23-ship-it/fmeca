@@ -89,32 +89,36 @@ const pickFolderViaPopup = (): Promise<FileSystemDirectoryHandle> => {
 export const sanitizeName = (n: string | undefined): string => (n||'Untitled').replace(/[^a-z0-9 \-_]/gi, '_').trim();
 
 export class LocalFileSystemProvider {
+    // Returns cached handle only — never prompts. Used by read-only operations.
+    private async tryGetRoot(projectId: string): Promise<FileSystemDirectoryHandle | undefined> {
+        const handle = await getProjectHandle(projectId);
+        if (!handle) return undefined;
+        try {
+            const opts: FileSystemHandlePermissionDescriptor = { mode: 'readwrite' };
+            if ((await handle.queryPermission(opts)) === 'granted') return handle;
+            if ((await handle.requestPermission(opts)) === 'granted') return handle;
+        } catch {}
+        return undefined;
+    }
+
+    // Returns cached handle or prompts the user to pick one. Used by write operations.
     async getRoot(projectId: string): Promise<FileSystemDirectoryHandle> {
         if (!('showDirectoryPicker' in window)) {
             throw new Error('Local folder access is not supported in this browser.');
         }
-        // Try cached handle first (works in both iframe and standalone)
-        let handle = await getProjectHandle(projectId);
-        if (handle) {
-            const opts: FileSystemHandlePermissionDescriptor = { mode: 'readwrite' };
-            if ((await handle.queryPermission(opts)) !== 'granted') {
-                if ((await handle.requestPermission(opts)) !== 'granted') {
-                    throw new Error('Permission to access folder was denied.');
-                }
-            }
-            return handle;
-        }
+        const cached = await this.tryGetRoot(projectId);
+        if (cached) return cached;
 
         // No cached handle — prompt user. Use popup when inside an iframe.
         try {
-            handle = isInIframe()
+            const handle = isInIframe()
                 ? await pickFolderViaPopup()
                 : await window.showDirectoryPicker();
             await saveProjectHandle(projectId, handle);
             return handle;
         } catch (err: any) {
             if (err.name === 'AbortError') throw new Error('Folder selection cancelled.');
-            throw err;
+            throw new Error(err?.message || 'Folder selection failed.');
         }
     }
 
@@ -156,10 +160,20 @@ export class LocalFileSystemProvider {
 
     async listFiles(projectId: string, pathParts: string[]): Promise<FileEntry[]> {
         try {
-            const dir = await this.ensureFolderForEntity(projectId, pathParts);
+            const root = await this.tryGetRoot(projectId);
+            if (!root) return [];
+            // Walk path without creating — return [] if any segment is missing
+            let curr = root;
+            for (const part of pathParts) {
+                try {
+                    curr = await curr.getDirectoryHandle(sanitizeName(part), { create: false });
+                } catch {
+                    return [];
+                }
+            }
             const files: FileEntry[] = [];
             // @ts-ignore - Async iterator for FileSystemDirectoryHandle
-            for await (const entry of dir.values()) {
+            for await (const entry of curr.values()) {
                 if (entry.kind === 'file') {
                     files.push({ name: entry.name, handle: entry as FileSystemFileHandle });
                 }
