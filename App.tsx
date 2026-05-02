@@ -11,7 +11,7 @@ import { AttachmentModal } from './components/AttachmentModal';
 import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
-import { LocalFileSystemProvider, sanitizeName } from './services/FileSystem';
+import { LocalFileSystemProvider, sanitizeName, isInIframe } from './services/FileSystem';
 import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem } from './types';
 
@@ -302,14 +302,14 @@ setProjects(
 
     // eslint-disable-next-line
     const pickRootFolder = async () => {
+        if(isInIframe()) return alert("Folder linking is not available inside an embedded frame. Files are stored automatically.");
         if(!storageProvider) return;
         if(!activeProject) return alert("Please open a project first.");
         try {
-            await storageProvider.pickRoot(activeProject.id);
+            const h = await window.showDirectoryPicker();
+            await storageProvider.setRoot(activeProject.id, h);
             alert("Base folder set successfully.");
-        } catch(e: any) {
-            if(e.message && !e.message.toLowerCase().includes('cancel')) console.error(e);
-        }
+        } catch(e) { console.error(e); }
     };
 
     const openAttachments = async (type: 'sub' | 'fail', sub: Subsystem, fail: Failure | null = null) => {
