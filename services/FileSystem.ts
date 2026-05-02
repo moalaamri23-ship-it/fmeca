@@ -13,22 +13,16 @@ declare global {
 
 const IDB_NAME = 'FmecaPro_FS';
 const STORE_NAME = 'project_handles';
-const BLOB_STORE_NAME = 'blob_files';
-const DB_VERSION = 2;
 
 export const isInIframe = (): boolean => {
     try { return window.self !== window.top; } catch { return true; }
 };
 
 const initDB = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, DB_VERSION);
+    const req = indexedDB.open(IDB_NAME, 1);
     req.onupgradeneeded = (e: any) => {
-        const db: IDBDatabase = e.target.result;
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-            db.createObjectStore(STORE_NAME);
-        }
-        if (!db.objectStoreNames.contains(BLOB_STORE_NAME)) {
-            db.createObjectStore(BLOB_STORE_NAME);
+        if (!e.target.result.objectStoreNames.contains(STORE_NAME)) {
+            e.target.result.createObjectStore(STORE_NAME);
         }
     };
     req.onsuccess = (e: any) => resolve(e.target.result);
@@ -55,89 +49,84 @@ const getProjectHandle = async (projectId: string): Promise<FileSystemDirectoryH
     });
 };
 
-// ── Blob storage helpers (used in iframe / no-FS-API mode) ──────────────────
-
-interface BlobRecord { name: string; mimeType: string; data: ArrayBuffer; }
-
-const blobKey = (pid: string, pk: string, fn: string) => `${pid}||${pk}||${fn}`;
-const blobPrefix = (pid: string, pk: string) => `${pid}||${pk}||`;
-
-const saveBlobFile = async (projectId: string, pathKey: string, filename: string, record: BlobRecord): Promise<void> => {
-    const db = await initDB();
+// Opens a small popup that calls showDirectoryPicker() as a top-level frame,
+// then posts the handle back — used when running inside a cross-origin iframe.
+const pickFolderViaPopup = (): Promise<FileSystemDirectoryHandle> => {
     return new Promise((resolve, reject) => {
-        const tx = db.transaction(BLOB_STORE_NAME, 'readwrite');
-        tx.objectStore(BLOB_STORE_NAME).put(record, blobKey(projectId, pathKey, filename));
-        tx.oncomplete = () => resolve();
-        tx.onerror = reject;
-    });
-};
-
-const listBlobFiles = async (projectId: string, pathKey: string): Promise<FileEntry[]> => {
-    const db = await initDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(BLOB_STORE_NAME, 'readonly');
-        const store = tx.objectStore(BLOB_STORE_NAME);
-        const req = store.getAllKeys();
-        req.onsuccess = () => {
-            const prefix = blobPrefix(projectId, pathKey);
-            const keys = (req.result as string[]).filter(k => k.startsWith(prefix));
-            if (!keys.length) { resolve([]); return; }
-            const entries: FileEntry[] = [];
-            let remaining = keys.length;
-            keys.forEach(key => {
-                const gr = store.get(key);
-                gr.onsuccess = () => {
-                    const r: BlobRecord = gr.result;
-                    entries.push({ name: r.name, data: r.data, mimeType: r.mimeType });
-                    if (--remaining === 0) resolve(entries);
-                };
-                gr.onerror = reject;
-            });
+        const url = `/folder-picker.html?origin=${encodeURIComponent(window.location.origin)}`;
+        const popup = window.open(url, 'fmeca-folder-picker', 'width=420,height=160,left=200,top=200');
+        if (!popup) {
+            reject(new Error('Popup was blocked. Please allow popups for this site and try again.'));
+            return;
+        }
+        let settled = false;
+        const handler = (event: MessageEvent) => {
+            if (event.origin !== window.location.origin) return;
+            if (event.data?.type === 'fmeca-folder-picked') {
+                settled = true;
+                window.removeEventListener('message', handler);
+                clearInterval(poll);
+                resolve(event.data.handle as FileSystemDirectoryHandle);
+            } else if (event.data?.type === 'fmeca-folder-cancelled') {
+                settled = true;
+                window.removeEventListener('message', handler);
+                clearInterval(poll);
+                reject(new Error(event.data.error || 'Folder selection cancelled.'));
+            }
         };
-        req.onerror = reject;
+        window.addEventListener('message', handler);
+        // Fallback: if the popup is closed before a message arrives, reject.
+        const poll = setInterval(() => {
+            if (popup.closed && !settled) {
+                clearInterval(poll);
+                window.removeEventListener('message', handler);
+                reject(new Error('Folder selection cancelled.'));
+            }
+        }, 500);
     });
 };
-
-// ────────────────────────────────────────────────────────────────────────────
 
 export const sanitizeName = (n: string | undefined): string => (n||'Untitled').replace(/[^a-z0-9 \-_]/gi, '_').trim();
 
 export class LocalFileSystemProvider {
-    private useBlob: boolean;
-
-    constructor() {
-        this.useBlob = isInIframe() || !('showDirectoryPicker' in window);
-    }
-
-    get isBlob(): boolean { return this.useBlob; }
-
     async getRoot(projectId: string): Promise<FileSystemDirectoryHandle> {
-        if (this.useBlob) {
-            throw new Error("File System API is not available in this context. Blob storage is active.");
-        }
         if (!('showDirectoryPicker' in window)) {
-            throw new Error("Local folder access is not supported in this browser.");
+            throw new Error('Local folder access is not supported in this browser.');
         }
+        // Try cached handle first (works in both iframe and standalone)
         let handle = await getProjectHandle(projectId);
-
         if (handle) {
             const opts: FileSystemHandlePermissionDescriptor = { mode: 'readwrite' };
             if ((await handle.queryPermission(opts)) !== 'granted') {
                 if ((await handle.requestPermission(opts)) !== 'granted') {
-                    throw new Error("Permission to access folder was denied.");
+                    throw new Error('Permission to access folder was denied.');
                 }
             }
             return handle;
         }
 
+        // No cached handle — prompt user. Use popup when inside an iframe.
         try {
-            handle = await window.showDirectoryPicker();
+            handle = isInIframe()
+                ? await pickFolderViaPopup()
+                : await window.showDirectoryPicker();
             await saveProjectHandle(projectId, handle);
             return handle;
         } catch (err: any) {
-            if (err.name === 'AbortError') throw new Error("Folder selection cancelled.");
+            if (err.name === 'AbortError') throw new Error('Folder selection cancelled.');
             throw err;
         }
+    }
+
+    // Explicitly pick (or re-pick) a root folder for the project.
+    async pickRoot(projectId: string): Promise<void> {
+        if (!('showDirectoryPicker' in window)) {
+            throw new Error('Local folder access is not supported in this browser.');
+        }
+        const handle = isInIframe()
+            ? await pickFolderViaPopup()
+            : await window.showDirectoryPicker();
+        await saveProjectHandle(projectId, handle);
     }
 
     async setRoot(projectId: string, handle: FileSystemDirectoryHandle): Promise<void> {
@@ -145,9 +134,6 @@ export class LocalFileSystemProvider {
     }
 
     async ensureFolderForEntity(projectId: string, pathParts: string[]): Promise<FileSystemDirectoryHandle> {
-        if (this.useBlob) {
-            return {} as FileSystemDirectoryHandle;
-        }
         const root = await this.getRoot(projectId);
         let curr = root;
         for (const part of pathParts) {
@@ -158,19 +144,6 @@ export class LocalFileSystemProvider {
     }
 
     async uploadFiles(projectId: string, pathParts: string[], files: FileList): Promise<void> {
-        if (this.useBlob) {
-            const pathKey = pathParts.map(sanitizeName).join('/');
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                const data = await file.arrayBuffer();
-                await saveBlobFile(projectId, pathKey, file.name, {
-                    name: file.name,
-                    mimeType: file.type || 'application/octet-stream',
-                    data,
-                });
-            }
-            return;
-        }
         const dir = await this.ensureFolderForEntity(projectId, pathParts);
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
@@ -182,10 +155,6 @@ export class LocalFileSystemProvider {
     }
 
     async listFiles(projectId: string, pathParts: string[]): Promise<FileEntry[]> {
-        if (this.useBlob) {
-            const pathKey = pathParts.map(sanitizeName).join('/');
-            return listBlobFiles(projectId, pathKey);
-        }
         try {
             const dir = await this.ensureFolderForEntity(projectId, pathParts);
             const files: FileEntry[] = [];
