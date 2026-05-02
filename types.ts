@@ -56,9 +56,7 @@ export interface RichLibrary {
 
 export interface FileEntry {
   name: string;
-  handle?: FileSystemFileHandle;   // standalone FS mode
-  data?: ArrayBuffer;              // iframe/blob mode
-  mimeType?: string;               // iframe/blob mode
+  handle: FileSystemFileHandle;
 }
 
 // Minimal types for File System Access API if not present in environment
