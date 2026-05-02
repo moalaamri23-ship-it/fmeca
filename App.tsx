@@ -11,7 +11,7 @@ import { AttachmentModal } from './components/AttachmentModal';
 import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
-import { LocalFileSystemProvider, sanitizeName } from './services/FileSystem';
+import { LocalFileSystemProvider, sanitizeName, isInIframe } from './services/FileSystem';
 import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem } from './types';
 
@@ -302,6 +302,10 @@ setProjects(
 
     // eslint-disable-next-line
     const pickRootFolder = async () => {
+        if (isInIframe()) {
+            alert("Folder linking is not available inside an embedded frame. Files are stored automatically.");
+            return;
+        }
         if(!storageProvider) return;
         if(!activeProject) return alert("Please open a project first.");
         try {
@@ -1245,6 +1249,7 @@ render();
                         provider={storageProvider}
                         projectId={activeProject && activeProject.id}
                         pathParts={getAttachmentPath()}
+                        isBlob={storageProvider?.isBlob ?? false}
                     />
                 </div>
             )}

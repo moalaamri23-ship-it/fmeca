@@ -10,9 +10,10 @@ interface AttachmentModalProps {
     provider: LocalFileSystemProvider | null;
     pathParts: string[];
     projectId: string | null;
+    isBlob?: boolean;
 }
 
-export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClose, entityName, provider, pathParts, projectId }) => {
+export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClose, entityName, provider, pathParts, projectId, isBlob }) => {
     if(!isOpen) return null;
     const [files, setFiles] = useState<FileEntry[]>([]);
     const [loading, setLoading] = useState(false);
@@ -64,7 +65,16 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
 
     const DL_EXT=new Set(["doc","docx","dot","dotx","xls","xlsx","xlsm","xltx","ppt","pptx","pptm","pps","ppsx","odt","ods","odp","rtf","zip","rar","7z","tar","gz","bz2","xz","iso","img","exe","msi","dll","bat","cmd","ps1","apk","dmg","pkg"]);
     const dlName=(s:string)=>String(s||"file").replace(/[\\/:*?"<>|]+/g,"_");
-    const openFile=async(f:FileEntry)=>{ if(!f.handle) return alert("No file handle."); const file=await f.handle.getFile(); const n=(file.name||f.name||"file"); const ext=(n.toLowerCase().split(".").pop()||""); const url=URL.createObjectURL(file);
+    const openFile=async(f:FileEntry)=>{
+        let blob: Blob; let n: string;
+        if (f.handle) {
+            const file = await f.handle.getFile();
+            n = file.name || f.name || "file"; blob = file;
+        } else if (f.data !== undefined) {
+            n = f.name;
+            blob = new Blob([f.data], { type: f.mimeType || 'application/octet-stream' });
+        } else { alert("File data unavailable."); return; }
+        const ext=(n.toLowerCase().split(".").pop()||""); const url=URL.createObjectURL(blob);
         if(ext&&DL_EXT.has(ext)){ const a=document.createElement("a"); a.href=url; a.download=dlName(n); document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),3000); return; }
         const w=window.open("","_blank"); if(!w){ window.open(url,"_blank"); setTimeout(()=>URL.revokeObjectURL(url),60000); return; }
         w.document.title=n; w.document.body.style.margin="0"; w.document.body.innerHTML=`<iframe src="${url}" style="border:0;width:100vw;height:100vh"></iframe>`; setTimeout(()=>URL.revokeObjectURL(url),60000);
@@ -81,7 +91,7 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                 
                 <div className="flex gap-2 mb-4">
                         <button onClick={()=>setMode('view')} className={`px-3 py-1 rounded text-sm font-bold ${mode==='view'?'bg-brand-600 text-white':'bg-slate-100'}`}>View</button>
-                        <button onClick={()=>setMode('create')} className={`px-3 py-1 rounded text-sm font-bold ${mode==='create'?'bg-brand-600 text-white':'bg-slate-100'}`}>Create Folder</button>
+                        {!isBlob && <button onClick={()=>setMode('create')} className={`px-3 py-1 rounded text-sm font-bold ${mode==='create'?'bg-brand-600 text-white':'bg-slate-100'}`}>Create Folder</button>}
                         <label className="px-3 py-1 rounded text-sm font-bold bg-slate-100 cursor-pointer hover:bg-brand-50">Upload <input type="file" multiple className="hidden" onChange={handleUpload}/></label>
                 </div>
 
