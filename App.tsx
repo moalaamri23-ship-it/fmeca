@@ -19,6 +19,18 @@ import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem } from './t
 const safeGet = (k: string, f: any) => { try { const i = localStorage.getItem(k); return i ? JSON.parse(i) : f; } catch (e) { return f; } };
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
 
+const simpleHash = (s: string): string => {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    return h.toString(36);
+};
+
+const isSubExhausted = (sub: Subsystem): boolean => {
+    const st = sub.exhaustionState;
+    if (!st || !st.isExhausted) return false;
+    return st.funcHash === simpleHash(sub.func || '') && st.failureCount === sub.failures.length;
+};
+
 const nowIso = () => new Date().toISOString();
 
 const fmtDate = (iso?: string) => {
@@ -681,25 +693,60 @@ render();
 
     const autoGen = async (sId: string, name: string, specs: string, func: string) => {
         setGenId(sId);
-        if (activeProject) {
-            const sub = activeProject.subsystems.find(s => s.id === sId);
-            const existingFailures = sub?.failures.filter(f => f.desc).map(f => f.desc) ?? [];
+        if (!activeProject) { setGenId(null); return; }
+        const sub = activeProject.subsystems.find(s => s.id === sId);
+        if (!sub) { setGenId(null); return; }
+        if (isSubExhausted(sub)) { setGenId(null); return; }  // defense-in-depth
 
-            // Phase 1: ask AI if function description is already fully covered
-            const covered = await AIService.checkFunctionCoverage(func, existingFailures, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl);
+        const existingFailures = sub.failures.filter(f => f.desc).map(f => f.desc);
 
-            if (covered) {
-                // All functional aspects satisfied — add one blank row
-                addFail(sId);
-            } else {
-                // Phase 2: generate new failures for uncovered aspects
-                const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, existingFailures);
-                if (res && res.failures && res.failures.length > 0) {
-                    setActiveProject(p => p ? ({ ...p, subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: [...s.failures, ...res.failures.map((f: any) => ({...f, id: generateId(), modes: f.modes.map((m: any) => ({...m, id: generateId()}))}))] }) }) : null);
-                } else {
-                    addFail(sId);
-                }
-            }
+        // Step 1 — Decompose, invert, match. Result tells us if more work is needed and what's missing.
+        const analysis = await AIService.analyzeFunctionCoverage(func, existingFailures, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl);
+
+        if (analysis.is_exhausted) {
+            // Persist the exhaustion flag and append one blank row for manual entry.
+            setActiveProject(p => p ? ({
+                ...p,
+                subsystems: p.subsystems.map(s => {
+                    if (s.id !== sId) return s;
+                    const newFailures = [...s.failures, { id: generateId(), desc: '', modes: [] }];
+                    return {
+                        ...s,
+                        failures: newFailures,
+                        exhaustionState: {
+                            funcHash: simpleHash(s.func || ''),
+                            failureCount: newFailures.length,
+                            isExhausted: true,
+                        },
+                    };
+                }),
+            }) : null);
+            setGenId(null);
+            return;
+        }
+
+        // Step 2 — Bounded generation: produce failures only for the missing pairs.
+        const res = await AIService.generateCompleteSubsystem(
+            name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode,
+            globalFileText, aiProvider, azureEndpoint, systemContext, checklistText,
+            powerAutomateUrl, existingFailures, analysis.missing_pairs
+        );
+
+        if (res && res.failures && res.failures.length > 0) {
+            setActiveProject(p => p ? ({
+                ...p,
+                subsystems: p.subsystems.map(s => s.id !== sId ? s : {
+                    ...s,
+                    failures: [...s.failures, ...res.failures.map((f: any) => ({
+                        ...f,
+                        id: generateId(),
+                        modes: (f.modes || []).map((m: any) => ({ ...m, id: generateId() })),
+                    }))],
+                    exhaustionState: undefined,
+                }),
+            }) : null);
+        } else {
+            addFail(sId);
         }
         setGenId(null);
     };
@@ -1071,7 +1118,20 @@ render();
                                         </div>
                                         {!sub.collapsed && (
                                             <div className="animate-enter">
-                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2">{genId===sub.id ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
+                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4">
+                                                    <div className="flex-1"><SmartInput label="Function" value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs}} /></div>
+                                                    {isSubExhausted(sub) && (
+                                                        <span className="text-[10px] font-bold uppercase tracking-wide bg-slate-200 text-slate-600 px-2 py-1 rounded self-center">Function fully covered ✓</span>
+                                                    )}
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func); }}
+                                                        disabled={isSubExhausted(sub) || genId === sub.id}
+                                                        title={isSubExhausted(sub) ? "All functional standards in the description are already covered. Edit the Function Description or remove a Functional Failure to re-enable." : undefined}
+                                                        className={`h-9 px-3 border rounded text-xs font-bold flex items-center gap-2 transition ${isSubExhausted(sub) ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed" : "bg-white text-brand-600 hover:bg-brand-50 border-brand-200"}`}
+                                                    >
+                                                        {genId===sub.id ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}
+                                                    </button>
+                                                </div>
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full text-left text-sm border-collapse">
                                                         <thead className="bg-slate-50 text-slate-500 text-xs font-bold uppercase"><tr><th className="p-2 border-r w-1/5">Functional Failure</th><th className="p-2 border-r w-1/6">Mode</th><th className="p-2 border-r w-1/6">Effect</th><th className="p-2 border-r w-1/6">Cause</th><th className="p-2 border-r w-1/5">Mitigation</th>{showRPN && <th className="p-2 text-center">RPN</th>}<th className="p-2 text-center">Edit</th></tr></thead>
@@ -1109,7 +1169,12 @@ render();
                                                             ))}
                                                         </tbody>
                                                     </table>
-                                                    <button onClick={(e)=>{e.stopPropagation(); addFail(sub.id)}} className="w-full py-2 text-xs font-bold text-slate-400 hover:text-brand-600 border-t">+ Add Failure</button>
+                                                    <div className="border-t flex items-center justify-center gap-2">
+                                                        <button onClick={(e)=>{e.stopPropagation(); addFail(sub.id)}} className="flex-1 py-2 text-xs font-bold text-slate-400 hover:text-brand-600">+ Add Failure</button>
+                                                        {isSubExhausted(sub) && (
+                                                            <span className="text-[10px] font-bold uppercase tracking-wide bg-slate-200 text-slate-600 px-2 py-1 rounded mr-2">Function fully covered ✓</span>
+                                                        )}
+                                                    </div>
                                                 </div>
                                             </div>
                                         )}

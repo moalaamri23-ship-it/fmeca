@@ -51,6 +51,21 @@ export interface ToolChatResult {
     calls?: ToolCall[];
 }
 
+export interface CoverageAnalysis {
+    decomposition: Array<{
+        function: string;
+        standard: string;
+        matched_failure_index: number | null; // 1-based
+        covered: boolean;
+    }>;
+    missing_pairs: Array<{
+        function: string;
+        standard: string;
+        suggested_failure: string;
+    }>;
+    is_exhausted: boolean;
+}
+
 export interface AIRequestPayload {
     sessionId?: string;
     feature: string; // Identifier for the feature calling the service
@@ -279,12 +294,16 @@ Requirements:
 2. Describe the failure of the function — NOT a physical failure mode or root cause.
 3. Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
             } else {
-                // Phase 1: check coverage — if all aspects satisfied, return empty
+                // Phase 1: deterministic mapping & exhaustion analysis
                 if (func?.trim() && existing.length > 0) {
-                    const covered = await this.checkFunctionCoverage(func, existing, key, modelName, aiProvider, azureEndpoint, powerAutomateUrl);
-                    if (covered) return '';
+                    const analysis = await this.analyzeFunctionCoverage(func, existing, key, modelName, aiProvider, azureEndpoint, powerAutomateUrl);
+                    if (analysis.is_exhausted) return '';
+                    if (analysis.missing_pairs.length > 0) {
+                        // We already have the canonical negation — skip the second AI round trip.
+                        return analysis.missing_pairs[0].suggested_failure;
+                    }
                 }
-                // Phase 2: coverage has a gap — generate one new functional failure
+                // Phase 2 fallback (no coverage analysis available, e.g. first failure on a fresh subsystem)
                 ffPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
 ${funcBlock}${existingBlock}Task: Generate ONE new Functional Failure that addresses a functional aspect of the above function NOT yet covered by any existing failure.
 Express it as a negation or loss of function (e.g., "Fails to deliver...", "Unable to maintain...", "Delivers less than required...", "Runs at higher than rated...").
@@ -504,7 +523,7 @@ Requirements:
         } catch(e) { return []; }
     },
 
-    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = []): Promise<any> {
+    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = [], missingPairs: Array<{function: string, standard: string, suggested_failure: string}> = []): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
@@ -514,11 +533,23 @@ Requirements:
             ? `\nExisting Functional Failures already defined (DO NOT repeat or closely resemble — generate only NEW ones not yet covered):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n`
             : '';
         const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
-        const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".${existingBlock}
-        Task:
+
+        const missingBlock = missingPairs.length > 0
+            ? `\nBOUNDED GENERATION — produce failures for ONLY the following uncovered [function, standard] pairs. Do not invent additional failures beyond this list. Produce exactly one failure per pair, with desc set to the canonical negation (use "suggested" as the starting point but you may polish phrasing):\n${missingPairs.map((p, i) => `${i + 1}. function: "${p.function}" | standard: "${p.standard}" | suggested: "${p.suggested_failure}"`).join('\n')}\n`
+            : '';
+
+        const taskBlock = missingPairs.length > 0
+            ? `Task:
+        1. For EACH numbered pair above, output one Functional Failure entry whose "desc" expresses the loss/violation of that pair's standard.
+        2. For each failure, generate Failure Modes, Effects, Causes, and Mitigations.
+        3. Do NOT generate any failures outside the listed pairs.`
+            : `Task:
         1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
         2. Derive 1-2 NEW Functional Failures from the Function (negation of expectations) that are NOT already covered by any existing failure above.
-        3. For each new failure, generate Failure Modes, Effects, Causes, and Mitigations.
+        3. For each new failure, generate Failure Modes, Effects, Causes, and Mitigations.`;
+
+        const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".${existingBlock}${missingBlock}
+        ${taskBlock}
         Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] } ] }${mitigationInstruction}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
@@ -572,47 +603,58 @@ Requirements:
         } catch(e) { return []; }
     },
 
-    async checkFunctionCoverage(funcDesc: string, existingFailures: string[], key: string, modelName: string, aiProvider: string = '', azureEndpoint: string = '', powerAutomateUrl: string = ''): Promise<boolean> {
-        // Returns true  → all functional aspects covered (no more failures needed)
-        // Returns false → at least one aspect is not yet addressed
-        if (!funcDesc?.trim() || existingFailures.length === 0) return false;
-        if ((!key || key.length < 10) && aiProvider !== 'copilot') return false;
+    async analyzeFunctionCoverage(funcDesc: string, existingFailures: string[], key: string, modelName: string, aiProvider: string = '', azureEndpoint: string = '', powerAutomateUrl: string = ''): Promise<CoverageAnalysis> {
+        const SAFE_DEFAULT: CoverageAnalysis = { decomposition: [], missing_pairs: [], is_exhausted: false };
 
-        const prompt = `You are a reliability engineer doing a strict functional-coverage analysis. You must show your work — do not skip the per-item matching.
+        if (!funcDesc?.trim()) return SAFE_DEFAULT;
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') return SAFE_DEFAULT;
+
+        const existingBlock = existingFailures.length > 0
+            ? existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')
+            : '(none yet)';
+
+        const prompt = `You are a reliability engineer doing a strict mapping-and-exhaustion analysis. Show your work — every standard in the function description gets its own row, even if covered.
 
 Subsystem Function description:
 """
 ${funcDesc}
 """
 
-Existing Functional Failures (numbered):
-${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}
+Existing Functional Failures (numbered, 1-based):
+${existingBlock}
 
-STEP 1 — Decompose the Function description into a flat list of distinct ITEMS. Each item is one of:
-  • a function the subsystem performs (verb + object, e.g. "delivers cooling water at 400 GPM"),
-  • a specific expectation or operating requirement (e.g. "maintains discharge pressure 100 PSI", "no abnormal vibration", "continuous operation", "no external leakage").
-A single sentence may yield multiple items if it states multiple expectations.
+STEP 1 — DECOMPOSE the Function description into [function, standard] pairs.
+  • function = the verb + object (e.g. "delivers cooling water", "maintains discharge pressure", "operates").
+  • standard = the operating value, threshold, rate, or expectation (e.g. "400 GPM at 100 PSI", "continuous 24/7", "no abnormal vibration", "no external leakage").
+  • Every distinct standard listed in the description gets its OWN row. Do not merge multiple standards into one row.
+  • Even simple no-X expectations (no leakage, no vibration, no overspeed) are standards and get their own rows.
 
-STEP 2 — For each item, find the existing functional failure that represents the FAILURE or LOSS of that item.
-  Examples of valid matches:
-    • Item "delivers 400 GPM" ↔ failure "Fails to deliver required flow"
-    • Item "no abnormal vibration" ↔ failure "Excessive vibration"
-    • Item "no external leakage" ↔ failure "External leakage from casing"
-  If no listed failure matches an item, leave covered_by empty and mark covered=false.
+STEP 2 — INVERT & MATCH. For each [function, standard] pair, find the existing failure that represents its loss/violation.
+  • Examples:
+    – function "delivers cooling water" / standard "400 GPM" ↔ "Fails to deliver required flow"
+    – function "operates" / standard "no abnormal vibration" ↔ "Excessive vibration"
+    – function "contains fluid" / standard "no external leakage" ↔ "External leakage from casing"
+  • If a listed failure matches, set matched_failure_index to its 1-based number and covered=true.
+  • If nothing matches, set matched_failure_index=null and covered=false.
 
-STEP 3 — Set "all_covered" to true ONLY if every single item has covered=true. If even one item has covered=false, set "all_covered" to false.
+STEP 3 — MISSING PAIRS. For every uncovered row, write a canonical-negation suggested_failure (e.g. "Fails to deliver cooling water at 400 GPM", "Operates with abnormal vibration", "Loss of containment — external leakage").
+
+STEP 4 — EXHAUSTION FLAG. Set is_exhausted = true if and only if EVERY row in decomposition has covered=true. If even one row is uncovered, is_exhausted MUST be false.
 
 Return ONLY this JSON, no prose, no markdown:
 {
-  "items": [
-    { "item": "<text from function description>", "covered_by": [<failure number>, ...], "covered": true | false }
+  "decomposition": [
+    { "function": "<verb + object>", "standard": "<value/expectation>", "matched_failure_index": <number|null>, "covered": <true|false> }
   ],
-  "all_covered": true | false
+  "missing_pairs": [
+    { "function": "<verb + object>", "standard": "<value/expectation>", "suggested_failure": "<canonical negation>" }
+  ],
+  "is_exhausted": <true|false>
 }`;
 
         try {
             const res = await this.chat({
-                feature: 'coverage-check',
+                feature: 'coverage-analysis',
                 provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 powerAutomateUrl: powerAutomateUrl || undefined,
@@ -624,8 +666,29 @@ Return ONLY this JSON, no prose, no markdown:
                 responseFormat: 'json'
             });
             const parsed = this.extractJSON(res);
-            return parsed?.all_covered === true;
-        } catch { return false; }
+            if (!parsed || !Array.isArray(parsed.decomposition)) return SAFE_DEFAULT;
+
+            const decomposition = parsed.decomposition.map((d: any) => ({
+                function: String(d?.function ?? ''),
+                standard: String(d?.standard ?? ''),
+                matched_failure_index: typeof d?.matched_failure_index === 'number' ? d.matched_failure_index : null,
+                covered: d?.covered === true,
+            }));
+            const missing_pairs = Array.isArray(parsed.missing_pairs)
+                ? parsed.missing_pairs.map((m: any) => ({
+                    function: String(m?.function ?? ''),
+                    standard: String(m?.standard ?? ''),
+                    suggested_failure: String(m?.suggested_failure ?? ''),
+                })).filter((m: any) => m.suggested_failure.trim().length > 0)
+                : [];
+
+            // Recompute is_exhausted from decomposition for safety — don't trust the AI's own flag.
+            const is_exhausted = decomposition.length > 0 && decomposition.every((d: any) => d.covered === true);
+
+            return { decomposition, missing_pairs, is_exhausted };
+        } catch {
+            return SAFE_DEFAULT;
+        }
     },
 
 async evaluateRpnFromText(

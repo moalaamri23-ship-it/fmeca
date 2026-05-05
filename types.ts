@@ -31,6 +31,11 @@ export interface Subsystem {
   showImageJson: boolean;
   failures: Failure[];
   collapsed?: boolean;
+  exhaustionState?: {
+    funcHash: string;
+    failureCount: number;
+    isExhausted: boolean;
+  };
 }
 
 export interface Project {
