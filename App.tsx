@@ -13,7 +13,7 @@ import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
 import { LocalFileSystemProvider, sanitizeName, pickFolder } from './services/FileSystem';
 import { RICH_LIBRARY } from './constants';
-import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem } from './types';
+import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, FailureCategory } from './types';
 
 // Utility functions
 const safeGet = (k: string, f: any) => { try { const i = localStorage.getItem(k); return i ? JSON.parse(i) : f; } catch (e) { return f; } };
@@ -737,11 +737,23 @@ render();
                 ...p,
                 subsystems: p.subsystems.map(s => s.id !== sId ? s : {
                     ...s,
-                    failures: [...s.failures, ...res.failures.map((f: any) => ({
-                        ...f,
-                        id: generateId(),
-                        modes: (f.modes || []).map((m: any) => ({ ...m, id: generateId() })),
-                    }))],
+                    failures: [...s.failures, ...res.failures.map((f: any, i: number): Failure => {
+                        // Prefer the AI's emitted sourcePair (bounded prompt fired),
+                        // fall back to positional mapping against missing_pairs[i].
+                        const aiSrc = f?.sourcePair;
+                        const pair = analysis.missing_pairs[i];
+                        const sourcePair: Failure['sourcePair'] = (aiSrc && typeof aiSrc.function === 'string' && typeof aiSrc.standard === 'string')
+                            ? { function: String(aiSrc.function), standard: String(aiSrc.standard), category: (aiSrc.category as FailureCategory) || pair?.category || 'Total Failure' }
+                            : pair
+                                ? { function: pair.function, standard: pair.standard, category: pair.category as FailureCategory }
+                                : undefined;
+                        return {
+                            id: generateId(),
+                            desc: f.desc,
+                            modes: (f.modes || []).map((m: any) => ({ ...m, id: generateId() })),
+                            ...(sourcePair ? { sourcePair } : {}),
+                        };
+                    })],
                     exhaustionState: undefined,
                 }),
             }) : null);
@@ -1143,10 +1155,18 @@ render();
                                                                             <div className="flex items-start p-2 gap-2 group">
                                                                                 <button onClick={(e)=>{e.stopPropagation(); toggleFail(sub.id, fail.id)}} className="mt-1 text-slate-400"><Icon name={fail.collapsed?"chevronDown":"chevronUp"}/></button>
                                                                                 <div className="flex-1">
-                                                                                    <SmartInput label="Functional Failure" value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, funcDescription: sub.func, existingFailures: sub.failures.filter(f => f.id !== fail.id && f.desc).map(f => f.desc)}} />
-                                                                                    <div className="flex gap-4 mt-1">
+                                                                                    <SmartInput label="Functional Failure" value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, funcDescription: sub.func, existingFailures: sub.failures.filter(f => f.id !== fail.id && f.desc).map(f => f.desc), subsystemExhausted: isSubExhausted(sub)}} />
+                                                                                    <div className="flex gap-4 mt-1 items-center">
                                                                                         <button onClick={(e)=>{e.stopPropagation(); genModes(sub.id, fail.id, sub.name, sub.specs, sub.func, fail.desc)}} disabled={modeGenId === fail.id} className="text-xs text-brand-600 font-bold flex gap-1 items-center hover:underline">{modeGenId === fail.id ? "..." : <span><Icon name="bolt"/> Generate Modes</span>}</button>
                                                                                         <button onClick={(e)=>{e.stopPropagation(); openAttachments('fail', sub, fail)}} className="text-xs text-slate-500 font-bold flex gap-1 items-center hover:text-brand-600"><Icon name="clip" className="w-3 h-3"/> References</button>
+                                                                                        {fail.sourcePair && (
+                                                                                            <span className="relative group/srcpair inline-block">
+                                                                                                <span className="text-[10px] font-bold uppercase tracking-wide bg-slate-100 text-slate-500 border border-slate-300 px-2 py-0.5 rounded cursor-help select-none">i source</span>
+                                                                                                <span className="pointer-events-none absolute left-0 bottom-full mb-1 hidden group-hover/srcpair:block z-20 bg-slate-800 text-white text-xs px-2 py-1 rounded shadow-lg whitespace-normal max-w-xs">
+                                                                                                    {fail.sourcePair.category}: "{fail.sourcePair.standard ? `${fail.sourcePair.function} (${fail.sourcePair.standard})` : fail.sourcePair.function}"
+                                                                                                </span>
+                                                                                            </span>
+                                                                                        )}
                                                                                     </div>
                                                                                 </div>
                                                                                 <button onClick={(e)=>{e.stopPropagation(); deleteFail(sub.id, fail.id)}} className="text-red-400 opacity-0 group-hover:opacity-100"><Icon name="trash"/></button>

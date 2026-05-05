@@ -51,16 +51,39 @@ export interface ToolChatResult {
     calls?: ToolCall[];
 }
 
+export type FailureCategory =
+    | 'Total Failure'
+    | 'Partial/Degraded Failure'
+    | 'Erratic Failure'
+    | 'Secondary/Conditional Failure';
+
+const FAILURE_CATEGORIES: FailureCategory[] = [
+    'Total Failure',
+    'Partial/Degraded Failure',
+    'Erratic Failure',
+    'Secondary/Conditional Failure',
+];
+
+const normalizeCategory = (raw: any): FailureCategory => {
+    const s = String(raw ?? '').toLowerCase();
+    if (s.includes('partial') || s.includes('degrad')) return 'Partial/Degraded Failure';
+    if (s.includes('erratic') || s.includes('fluctuat')) return 'Erratic Failure';
+    if (s.includes('secondary') || s.includes('conditional') || s.includes('qualitative')) return 'Secondary/Conditional Failure';
+    return 'Total Failure';
+};
+
 export interface CoverageAnalysis {
     decomposition: Array<{
         function: string;
         standard: string;
+        category: FailureCategory;
         matched_failure_index: number | null; // 1-based
         covered: boolean;
     }>;
     missing_pairs: Array<{
         function: string;
         standard: string;
+        category: FailureCategory;
         suggested_failure: string;
     }>;
     is_exhausted: boolean;
@@ -278,6 +301,11 @@ export const AIService = {
 
         // --- FUNCTIONAL FAILURE SPECIALIST ---
         if (lowerLabel.includes("functional failure")) {
+            // Hard gate: if the parent subsystem is flagged exhausted, the wand never calls the AI.
+            // The flag is owned by App.tsx (funcHash + failureCount) and passed through contextData,
+            // so the wand respects the persisted state and cannot bypass it.
+            if (!currentText && (contextData as any)?.subsystemExhausted === true) return '';
+
             const func = (contextData.funcDescription as string) ?? '';
             const existing = (contextData.existingFailures as string[]) ?? [];
             const existingBlock = existing.length > 0
@@ -523,7 +551,7 @@ Requirements:
         } catch(e) { return []; }
     },
 
-    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = [], missingPairs: Array<{function: string, standard: string, suggested_failure: string}> = []): Promise<any> {
+    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = [], missingPairs: Array<{function: string, standard: string, category: FailureCategory, suggested_failure: string}> = []): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
@@ -535,22 +563,26 @@ Requirements:
         const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
 
         const missingBlock = missingPairs.length > 0
-            ? `\nBOUNDED GENERATION — produce failures for ONLY the following uncovered [function, standard] pairs. Do not invent additional failures beyond this list. Produce exactly one failure per pair, with desc set to the canonical negation (use "suggested" as the starting point but you may polish phrasing):\n${missingPairs.map((p, i) => `${i + 1}. function: "${p.function}" | standard: "${p.standard}" | suggested: "${p.suggested_failure}"`).join('\n')}\n`
+            ? `\nBOUNDED GENERATION — produce failures for ONLY the following uncovered [function, standard, category] triples. Do not invent additional failures beyond this list. Produce EXACTLY ONE Functional Failure per numbered triple. Output them in the SAME ORDER as listed below so each output entry maps 1:1 to its triple by index:\n${missingPairs.map((p, i) => `${i + 1}. function: "${p.function}" | standard: "${p.standard}" | category: "${p.category}" | suggested: "${p.suggested_failure}"`).join('\n')}\n\nFor each triple, set the output failure's:\n  • desc          = canonical negation matching the category (you may polish "suggested" wording).\n  • sourcePair    = exactly { function, standard, category } copied from the triple.\n  • modes         = 2 to 3 distinct Failure Modes per failure (DO NOT return only one).\n`
             : '';
 
         const taskBlock = missingPairs.length > 0
             ? `Task:
-        1. For EACH numbered pair above, output one Functional Failure entry whose "desc" expresses the loss/violation of that pair's standard.
-        2. For each failure, generate Failure Modes, Effects, Causes, and Mitigations.
-        3. Do NOT generate any failures outside the listed pairs.`
+        1. For EACH numbered triple above, output one Functional Failure entry as specified.
+        2. Each failure MUST include 2-3 Failure Modes (mode/effect/cause/mitigation/rpn) — never fewer than 2.
+        3. Do NOT generate any failures outside the listed triples.`
             : `Task:
         1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
         2. Derive 1-2 NEW Functional Failures from the Function (negation of expectations) that are NOT already covered by any existing failure above.
-        3. For each new failure, generate Failure Modes, Effects, Causes, and Mitigations.`;
+        3. For each new failure, generate 2-3 Failure Modes, Effects, Causes, and Mitigations.`;
+
+        const schemaBlock = missingPairs.length > 0
+            ? `Return JSON object: { "failures": [ { "desc": "string", "sourcePair": { "function": "string", "standard": "string", "category": "Total Failure" | "Partial/Degraded Failure" | "Erratic Failure" | "Secondary/Conditional Failure" }, "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} }, ... at least 2 entries ] } ] }`
+            : `Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} }, ... at least 2 entries ] } ] }`;
 
         const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".${existingBlock}${missingBlock}
         ${taskBlock}
-        Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] } ] }${mitigationInstruction}`;
+        ${schemaBlock}${mitigationInstruction}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 
@@ -613,7 +645,7 @@ Requirements:
             ? existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')
             : '(none yet)';
 
-        const prompt = `You are a reliability engineer doing a strict mapping-and-exhaustion analysis. Show your work — every standard in the function description gets its own row, even if covered.
+        const prompt = `You are a reliability engineer doing a strict mapping-and-exhaustion analysis using a fixed 4-category failure taxonomy. Be exhaustive and deterministic — given the same Function description and same Existing Failures, you must always produce the same decomposition.
 
 Subsystem Function description:
 """
@@ -624,30 +656,49 @@ Existing Functional Failures (numbered, 1-based):
 ${existingBlock}
 
 STEP 1 — DECOMPOSE the Function description into [function, standard] pairs.
-  • function = the verb + object (e.g. "delivers cooling water", "maintains discharge pressure", "operates").
-  • standard = the operating value, threshold, rate, or expectation (e.g. "400 GPM at 100 PSI", "continuous 24/7", "no abnormal vibration", "no external leakage").
-  • Every distinct standard listed in the description gets its OWN row. Do not merge multiple standards into one row.
-  • Even simple no-X expectations (no leakage, no vibration, no overspeed) are standards and get their own rows.
+  • function  = verb + object (e.g. "delivers cooling water", "maintains discharge pressure", "rotates shaft", "contains fluid").
+  • standard  = the operating value or qualitative expectation (e.g. "400 GPM at 100 PSI", "continuous 24/7", "no abnormal vibration", "no external leakage").
+  • Every distinct standard mentioned in the description (numerical, temporal, qualitative, "no X") gets its OWN row.
+  • If the description is bare (e.g. just "Provides rotational energy"), the function still has implicit standards — at minimum produce rows for the four taxonomy categories below where applicable.
 
-STEP 2 — INVERT & MATCH. For each [function, standard] pair, find the existing failure that represents its loss/violation.
-  • Examples:
-    – function "delivers cooling water" / standard "400 GPM" ↔ "Fails to deliver required flow"
-    – function "operates" / standard "no abnormal vibration" ↔ "Excessive vibration"
-    – function "contains fluid" / standard "no external leakage" ↔ "External leakage from casing"
-  • If a listed failure matches, set matched_failure_index to its 1-based number and covered=true.
-  • If nothing matches, set matched_failure_index=null and covered=false.
+STEP 2 — APPLY THE 4-CATEGORY TAXONOMY. For each [function, standard] pair, expand into one row per APPLICABLE category. Most pairs apply to 2-4 categories — never zero.
 
-STEP 3 — MISSING PAIRS. For every uncovered row, write a canonical-negation suggested_failure (e.g. "Fails to deliver cooling water at 400 GPM", "Operates with abnormal vibration", "Loss of containment — external leakage").
+  Categories (use these strings VERBATIM in the "category" field):
+  1. "Total Failure"               — completely stops doing the function (e.g. "Fails to deliver any flow", "Motor fails to rotate").
+  2. "Partial/Degraded Failure"    — does the function but falls short of a NUMERICAL target (e.g. "Delivers less than 400 GPM", "Output below rated speed"). Only applies when the standard has a numerical value.
+  3. "Erratic Failure"             — does the function but output FLUCTUATES unacceptably (e.g. "Flow oscillates", "Speed surges"). Applies to most active functions.
+  4. "Secondary/Conditional Failure" — does the function but violates a QUALITATIVE side-condition (e.g. "Operates with vibration", "Operates while leaking", "Runs above rated temperature"). Applies to "no X" expectations and qualitative constraints.
 
-STEP 4 — EXHAUSTION FLAG. Set is_exhausted = true if and only if EVERY row in decomposition has covered=true. If even one row is uncovered, is_exhausted MUST be false.
+  Applicability rules:
+  • A numerical/rate standard ("400 GPM") → produce Total + Partial/Degraded + Erratic rows (3 rows).
+  • A qualitative "no X" standard ("no leakage", "no vibration") → produce Secondary/Conditional row (1 row, the standard IS the side-condition).
+  • A binary on/off function with no numerical target → produce Total + Erratic rows (2 rows).
+  • Continuous-operation standards ("24/7") → produce Total (loss of operation) + Erratic (intermittent) rows.
+
+STEP 3 — INVERT & MATCH (1-to-1, NO REUSE). For each decomposition row, find the existing failure that represents its loss/violation.
+  • CRITICAL: Each existing failure number may match AT MOST ONE decomposition row. Do not let one failure cover two rows.
+  • If a row has a clear 1-to-1 match → set matched_failure_index to that 1-based number and covered=true.
+  • Otherwise → matched_failure_index=null, covered=false.
+  • Match by semantic equivalence with the SAME category. A "partial/degraded" row is NOT covered by a "total failure" failure description, and vice versa.
+    – Row: function "delivers cooling water" / standard "400 GPM" / category "Total Failure"     ↔ "Fails to deliver any cooling water"
+    – Row: function "delivers cooling water" / standard "400 GPM" / category "Partial/Degraded"  ↔ "Delivers less than 400 GPM"
+    – Row: function "operates" / standard "no abnormal vibration" / category "Secondary"         ↔ "Operates with excessive vibration"
+
+STEP 4 — MISSING PAIRS. For every uncovered row, write a canonical-negation suggested_failure that matches its category:
+  • Total Failure              → "Fails to <verb> <object>" or "<Verb-noun> not performed"
+  • Partial/Degraded Failure   → "Delivers less than <numerical target>" or "<Output> below rated <unit>"
+  • Erratic Failure            → "Erratic <output>" or "<Output> fluctuates beyond acceptable range"
+  • Secondary/Conditional      → "Operates with <violation>" or "<Function> performed but <side-condition violated>"
+
+STEP 5 — EXHAUSTION FLAG. Set is_exhausted = true ONLY if EVERY row in decomposition has covered=true.
 
 Return ONLY this JSON, no prose, no markdown:
 {
   "decomposition": [
-    { "function": "<verb + object>", "standard": "<value/expectation>", "matched_failure_index": <number|null>, "covered": <true|false> }
+    { "function": "<verb + object>", "standard": "<value/expectation>", "category": "<one of the 4 strings above>", "matched_failure_index": <number|null>, "covered": <true|false> }
   ],
   "missing_pairs": [
-    { "function": "<verb + object>", "standard": "<value/expectation>", "suggested_failure": "<canonical negation>" }
+    { "function": "<verb + object>", "standard": "<value/expectation>", "category": "<one of the 4 strings above>", "suggested_failure": "<canonical negation>" }
   ],
   "is_exhausted": <true|false>
 }`;
@@ -668,21 +719,55 @@ Return ONLY this JSON, no prose, no markdown:
             const parsed = this.extractJSON(res);
             if (!parsed || !Array.isArray(parsed.decomposition)) return SAFE_DEFAULT;
 
-            const decomposition = parsed.decomposition.map((d: any) => ({
-                function: String(d?.function ?? ''),
-                standard: String(d?.standard ?? ''),
-                matched_failure_index: typeof d?.matched_failure_index === 'number' ? d.matched_failure_index : null,
-                covered: d?.covered === true,
-            }));
-            const missing_pairs = Array.isArray(parsed.missing_pairs)
+            // Enforce 1-to-1 matching client-side as well — if the AI reuses an index across rows,
+            // keep only the first row that claimed it; mark subsequent claims as uncovered.
+            const claimed = new Set<number>();
+            const decomposition = parsed.decomposition.map((d: any) => {
+                let idx: number | null = typeof d?.matched_failure_index === 'number' ? d.matched_failure_index : null;
+                let covered = d?.covered === true && idx !== null;
+                if (idx !== null) {
+                    if (claimed.has(idx)) { idx = null; covered = false; }
+                    else claimed.add(idx);
+                }
+                return {
+                    function: String(d?.function ?? ''),
+                    standard: String(d?.standard ?? ''),
+                    category: normalizeCategory(d?.category),
+                    matched_failure_index: idx,
+                    covered,
+                };
+            });
+
+            // Synthesize missing_pairs from any decomposition row marked uncovered (covers AI omissions).
+            const synthesizedMissing = decomposition
+                .filter((d: any) => !d.covered)
+                .map((d: any) => ({
+                    function: d.function,
+                    standard: d.standard,
+                    category: d.category as FailureCategory,
+                    suggested_failure: '',
+                }));
+
+            // Merge AI-supplied missing_pairs (better wording) on top of synthesized, keyed by function+standard+category.
+            const aiMissing = Array.isArray(parsed.missing_pairs)
                 ? parsed.missing_pairs.map((m: any) => ({
                     function: String(m?.function ?? ''),
                     standard: String(m?.standard ?? ''),
-                    suggested_failure: String(m?.suggested_failure ?? ''),
-                })).filter((m: any) => m.suggested_failure.trim().length > 0)
+                    category: normalizeCategory(m?.category),
+                    suggested_failure: String(m?.suggested_failure ?? '').trim(),
+                }))
                 : [];
 
-            // Recompute is_exhausted from decomposition for safety — don't trust the AI's own flag.
+            const keyOf = (p: { function: string; standard: string; category: FailureCategory }) =>
+                `${p.function}||${p.standard}||${p.category}`;
+            const wordedByKey = new Map<string, string>();
+            aiMissing.forEach((m: any) => { if (m.suggested_failure) wordedByKey.set(keyOf(m), m.suggested_failure); });
+
+            const missing_pairs = synthesizedMissing.map((p: any) => ({
+                ...p,
+                suggested_failure: wordedByKey.get(keyOf(p)) || `Fails to ${p.function}${p.standard ? ` (${p.standard})` : ''}`,
+            }));
+
             const is_exhausted = decomposition.length > 0 && decomposition.every((d: any) => d.covered === true);
 
             return { decomposition, missing_pairs, is_exhausted };

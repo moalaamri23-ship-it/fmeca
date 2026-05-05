@@ -13,11 +13,22 @@ export interface Mode {
   rpn: RPN;
 }
 
+export type FailureCategory =
+  | 'Total Failure'
+  | 'Partial/Degraded Failure'
+  | 'Erratic Failure'
+  | 'Secondary/Conditional Failure';
+
 export interface Failure {
   id: string;
   desc: string;
   modes: Mode[];
   collapsed?: boolean;
+  sourcePair?: {
+    function: string;
+    standard: string;
+    category: FailureCategory;
+  };
 }
 
 export interface Subsystem {
@@ -77,8 +88,9 @@ export interface ContextData {
   specs?: string;
   checklistText?: string;
   detectionScore?: number;
-  funcDescription?: string;    // subsystem function description (for FF wand)
-  existingFailures?: string[]; // other FF descriptions already defined (for uniqueness)
-  failureDesc?: string;        // parent functional failure (for FM wand context)
-  existingModes?: string[];    // other FM names already defined (for uniqueness)
+  funcDescription?: string;       // subsystem function description (for FF wand)
+  existingFailures?: string[];    // other FF descriptions already defined (for uniqueness)
+  failureDesc?: string;           // parent functional failure (for FM wand context)
+  existingModes?: string[];       // other FM names already defined (for uniqueness)
+  subsystemExhausted?: boolean;   // when true, FF wand short-circuits to '' (no AI call)
 }
