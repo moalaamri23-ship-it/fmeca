@@ -11,6 +11,8 @@ export interface Mode {
   cause: string;
   mitigation: string;
   rpn: RPN;
+  systemModeId?: string;       // matched System Mode key (slug of mode name)
+  systemModeCount?: number;    // historical count at time of generation (drives O score)
 }
 
 export type FailureCategory =
@@ -19,12 +21,22 @@ export type FailureCategory =
   | 'Erratic Failure'
   | 'Secondary/Conditional Failure';
 
+export interface BreakdownRow {
+  id: string;                  // stable id, referenced by Failure.sourcePair.breakdownId
+  function: string;            // verb + object
+  standard: string;            // value/expectation
+  category: FailureCategory;
+  snippet: string;             // verbatim slice from the original function description
+  canonical_failure: string;   // pre-computed FF text — wand returns this verbatim
+}
+
 export interface Failure {
   id: string;
   desc: string;
   modes: Mode[];
   collapsed?: boolean;
   sourcePair?: {
+    breakdownId?: string;            // hard link to Subsystem.functionBreakdown row (preferred)
     function: string;
     standard: string;
     category: FailureCategory;
@@ -43,10 +55,13 @@ export interface Subsystem {
   failures: Failure[];
   collapsed?: boolean;
   exhaustionState?: {
+    // Legacy: kept readable for backward compat. New code derives exhaustion from functionBreakdown.
     funcHash: string;
     failureCount: number;
     isExhausted: boolean;
   };
+  functionBreakdown?: BreakdownRow[];  // canonical decomposition; null until first run
+  funcHashAtBreakdown?: string;        // hash of sub.func when breakdown was last generated
 }
 
 export interface Project {
@@ -93,4 +108,9 @@ export interface ContextData {
   failureDesc?: string;           // parent functional failure (for FM wand context)
   existingModes?: string[];       // other FM names already defined (for uniqueness)
   subsystemExhausted?: boolean;   // when true, FF wand short-circuits to '' (no AI call)
+  // Persistent-breakdown wiring (Phase 1):
+  breakdownRows?: BreakdownRow[];      // current subsystem's full breakdown (for FF wand short-circuit)
+  filledBreakdownIds?: string[];       // breakdownId values that already have a linked FF
+  // RPN-aware mitigation (Phase 5):
+  rpnTotal?: number;              // S * O * D for the parent mode (drives mitigation count)
 }

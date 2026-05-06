@@ -1,4 +1,5 @@
-import { ContextData } from '../types';
+import { ContextData, FailureCategory, BreakdownRow } from '../types';
+export type { FailureCategory } from '../types';
 
 /*
   -------------------------------------------------------------------------
@@ -50,12 +51,6 @@ export interface ToolChatResult {
     content?: string;
     calls?: ToolCall[];
 }
-
-export type FailureCategory =
-    | 'Total Failure'
-    | 'Partial/Degraded Failure'
-    | 'Erratic Failure'
-    | 'Secondary/Conditional Failure';
 
 const FAILURE_CATEGORIES: FailureCategory[] = [
     'Total Failure',
@@ -301,13 +296,10 @@ export const AIService = {
 
         // --- FUNCTIONAL FAILURE SPECIALIST ---
         if (lowerLabel.includes("functional failure")) {
-            // Hard gate: if the parent subsystem is flagged exhausted, the wand never calls the AI.
-            // The flag is owned by App.tsx (funcHash + failureCount) and passed through contextData,
-            // so the wand respects the persisted state and cannot bypass it.
-            if (!currentText && (contextData as any)?.subsystemExhausted === true) return '';
-
             const func = (contextData.funcDescription as string) ?? '';
             const existing = (contextData.existingFailures as string[]) ?? [];
+            const breakdownRowsCtx = ((contextData as any)?.breakdownRows as BreakdownRow[] | undefined) ?? [];
+            const filledIds = new Set<string>(((contextData as any)?.filledBreakdownIds as string[] | undefined) ?? []);
             const existingBlock = existing.length > 0
                 ? `Existing Functional Failures already defined (DO NOT repeat or closely resemble any of these):\n${existing.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n`
                 : '';
@@ -322,16 +314,15 @@ Requirements:
 2. Describe the failure of the function — NOT a physical failure mode or root cause.
 3. Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
             } else {
-                // Phase 1: deterministic mapping & exhaustion analysis
-                if (func?.trim() && existing.length > 0) {
-                    const analysis = await this.analyzeFunctionCoverage(func, existing, key, modelName, aiProvider, azureEndpoint, powerAutomateUrl);
-                    if (analysis.is_exhausted) return '';
-                    if (analysis.missing_pairs.length > 0) {
-                        // We already have the canonical negation — skip the second AI round trip.
-                        return analysis.missing_pairs[0].suggested_failure;
-                    }
+                // Phase 1: deterministic exhaustion via persisted breakdown rows (no AI call here).
+                if (breakdownRowsCtx.length > 0) {
+                    const firstUnfilled = breakdownRowsCtx.find(r => !filledIds.has(r.id));
+                    if (!firstUnfilled) return ''; // exhausted: every row already linked
+                    return firstUnfilled.canonical_failure || '';
                 }
-                // Phase 2 fallback (no coverage analysis available, e.g. first failure on a fresh subsystem)
+                // Backward compat: subsystemExhausted flag (legacy, still respected).
+                if ((contextData as any)?.subsystemExhausted === true) return '';
+                // Fallback (no breakdown stored — e.g. imported project on its very first wand click)
                 ffPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
 ${funcBlock}${existingBlock}Task: Generate ONE new Functional Failure that addresses a functional aspect of the above function NOT yet covered by any existing failure.
 Express it as a negation or loss of function (e.g., "Fails to deliver...", "Unable to maintain...", "Delivers less than required...", "Runs at higher than rated...").
@@ -551,7 +542,7 @@ Requirements:
         } catch(e) { return []; }
     },
 
-    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = [], missingPairs: Array<{function: string, standard: string, category: FailureCategory, suggested_failure: string}> = []): Promise<any> {
+    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = [], breakdownRows: BreakdownRow[] = []): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
@@ -562,25 +553,27 @@ Requirements:
             : '';
         const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
 
-        const missingBlock = missingPairs.length > 0
-            ? `\nBOUNDED GENERATION — produce failures for ONLY the following uncovered [function, standard, category] triples. Do not invent additional failures beyond this list. Produce EXACTLY ONE Functional Failure per numbered triple. Output them in the SAME ORDER as listed below so each output entry maps 1:1 to its triple by index:\n${missingPairs.map((p, i) => `${i + 1}. function: "${p.function}" | standard: "${p.standard}" | category: "${p.category}" | suggested: "${p.suggested_failure}"`).join('\n')}\n\nFor each triple, set the output failure's:\n  • desc          = canonical negation matching the category (you may polish "suggested" wording).\n  • sourcePair    = exactly { function, standard, category } copied from the triple.\n  • modes         = 2 to 3 distinct Failure Modes per failure (DO NOT return only one).\n`
+        const bounded = breakdownRows.length > 0;
+
+        const breakdownBlock = bounded
+            ? `\nBOUNDED GENERATION — produce failures for ONLY the following [function, standard, category] breakdown rows. Each row has a stable breakdownId you MUST echo back so we can link the generated FF to the right row. Do not invent additional failures beyond this list. Produce EXACTLY ONE Functional Failure per row, in the SAME ORDER as listed:\n${breakdownRows.map((r, i) => `${i + 1}. breakdownId: "${r.id}" | function: "${r.function}" | standard: "${r.standard}" | category: "${r.category}" | canonical_failure: "${r.canonical_failure}"`).join('\n')}\n\nFor each row, set the output failure's:\n  • desc                       = the canonical_failure text (you may lightly polish wording but stay faithful to the category).\n  • sourcePair.breakdownId     = the row's breakdownId verbatim.\n  • sourcePair.function        = the row's function.\n  • sourcePair.standard        = the row's standard.\n  • sourcePair.category        = the row's category.\n  • modes                      = 2 to 3 distinct Failure Modes per failure (DO NOT return only one).\n`
             : '';
 
-        const taskBlock = missingPairs.length > 0
+        const taskBlock = bounded
             ? `Task:
-        1. For EACH numbered triple above, output one Functional Failure entry as specified.
+        1. For EACH numbered row above, output one Functional Failure entry as specified.
         2. Each failure MUST include 2-3 Failure Modes (mode/effect/cause/mitigation/rpn) — never fewer than 2.
-        3. Do NOT generate any failures outside the listed triples.`
+        3. Do NOT generate any failures outside the listed rows.`
             : `Task:
         1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
         2. Derive 1-2 NEW Functional Failures from the Function (negation of expectations) that are NOT already covered by any existing failure above.
         3. For each new failure, generate 2-3 Failure Modes, Effects, Causes, and Mitigations.`;
 
-        const schemaBlock = missingPairs.length > 0
-            ? `Return JSON object: { "failures": [ { "desc": "string", "sourcePair": { "function": "string", "standard": "string", "category": "Total Failure" | "Partial/Degraded Failure" | "Erratic Failure" | "Secondary/Conditional Failure" }, "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} }, ... at least 2 entries ] } ] }`
+        const schemaBlock = bounded
+            ? `Return JSON object: { "failures": [ { "desc": "string", "sourcePair": { "breakdownId": "string", "function": "string", "standard": "string", "category": "Total Failure" | "Partial/Degraded Failure" | "Erratic Failure" | "Secondary/Conditional Failure" }, "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} }, ... at least 2 entries ] } ] }`
             : `Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} }, ... at least 2 entries ] } ] }`;
 
-        const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".${existingBlock}${missingBlock}
+        const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".${existingBlock}${breakdownBlock}
         ${taskBlock}
         ${schemaBlock}${mitigationInstruction}`;
 
@@ -773,6 +766,100 @@ Return ONLY this JSON, no prose, no markdown:
             return { decomposition, missing_pairs, is_exhausted };
         } catch {
             return SAFE_DEFAULT;
+        }
+    },
+
+    /**
+     * Phase 1 — Persistent Function Breakdown.
+     * Decomposes a Function description into [function, standard, category, snippet, canonical_failure]
+     * rows using the 4-category taxonomy. The result is meant to be PERSISTED on the Subsystem
+     * (Subsystem.functionBreakdown) so exhaustion checks become a pure function of stored data
+     * (no more AI run-to-run variance).
+     *
+     * On any parse / network failure → returns []. Caller treats empty as "no breakdown available;
+     * do NOT change exhaustion state".
+     */
+    async decomposeFunction(
+        funcDesc: string,
+        key: string,
+        modelName: string,
+        aiProvider: string = '',
+        azureEndpoint: string = '',
+        powerAutomateUrl: string = '',
+        systemContext: string = ''
+    ): Promise<Omit<BreakdownRow, 'id'>[]> {
+        if (!funcDesc?.trim()) return [];
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') return [];
+
+        const prompt = `You are a reliability engineer decomposing a subsystem Function description into a strict, exhaustive set of [function, standard, category] rows using a fixed 4-category failure taxonomy. Be deterministic — given the same input, always produce the same rows.
+
+Subsystem Function description:
+"""
+${funcDesc}
+"""
+
+STEP 1 — DECOMPOSE the description into [function, standard] pairs.
+  • function = verb + object (e.g. "delivers cooling water", "rotates shaft", "contains fluid").
+  • standard = the operating value or qualitative expectation (e.g. "400 GPM at 100 PSI", "continuous 24/7", "no abnormal vibration", "no external leakage").
+  • Every distinct standard mentioned (numerical, temporal, qualitative, "no X") gets its OWN row.
+
+STEP 2 — APPLY THE 4-CATEGORY TAXONOMY. For each [function, standard] pair, expand into one row per APPLICABLE category. Most pairs apply to 2-4 categories — never zero.
+
+  Categories (use these strings VERBATIM in "category"):
+  1. "Total Failure"               — completely stops doing the function.
+  2. "Partial/Degraded Failure"    — does the function but falls short of a NUMERICAL target. Only applies when the standard has a numerical value.
+  3. "Erratic Failure"             — does the function but output FLUCTUATES unacceptably. Applies to most active functions.
+  4. "Secondary/Conditional Failure" — does the function but violates a QUALITATIVE side-condition (vibration, leakage, temperature, noise).
+
+  Applicability rules:
+  • A numerical/rate standard ("400 GPM") → produce Total + Partial/Degraded + Erratic rows (3 rows).
+  • A qualitative "no X" standard ("no leakage") → produce Secondary/Conditional row (1 row, the standard IS the side-condition).
+  • A binary on/off function with no numerical target → produce Total + Erratic rows (2 rows).
+  • Continuous-operation standards ("24/7") → produce Total + Erratic rows.
+
+STEP 3 — For each row, write:
+  • snippet           = the verbatim slice from the original Function description that the pair came from (15-80 chars).
+  • canonical_failure = the canonical-negation Functional Failure text matching the category:
+      Total Failure              → "Fails to <verb> <object>" or "<Verb-noun> not performed".
+      Partial/Degraded Failure   → "Delivers less than <numerical target>" or "<Output> below rated <unit>".
+      Erratic Failure            → "Erratic <output>" or "<Output> fluctuates beyond acceptable range".
+      Secondary/Conditional      → "Operates with <violation>" or "<Function> performed but <side-condition violated>".
+
+Return ONLY this JSON, no prose, no markdown:
+{
+  "rows": [
+    { "function": "<verb + object>", "standard": "<value/expectation>", "category": "<one of the 4 strings>", "snippet": "<verbatim slice from description>", "canonical_failure": "<canonical negation>" }
+  ]
+}`;
+
+        const content = prompt + (systemContext ? '\n\n' + systemContext : '');
+
+        try {
+            const res = await this.chat({
+                feature: 'function-decomposition',
+                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
+                model: modelName,
+                messages: [{ role: 'user', content }],
+                mode: 'ai',
+                refText: '',
+                apiKey: key,
+                responseFormat: 'json'
+            });
+            const parsed = this.extractJSON(res);
+            if (!parsed || !Array.isArray(parsed.rows)) return [];
+            return parsed.rows
+                .map((r: any) => ({
+                    function: String(r?.function ?? '').trim(),
+                    standard: String(r?.standard ?? '').trim(),
+                    category: normalizeCategory(r?.category),
+                    snippet: String(r?.snippet ?? '').trim(),
+                    canonical_failure: String(r?.canonical_failure ?? '').trim(),
+                }))
+                .filter((r: any) => r.function && r.canonical_failure);
+        } catch {
+            return [];
         }
     },
 
