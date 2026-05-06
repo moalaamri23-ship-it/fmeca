@@ -107,9 +107,10 @@ export interface ContextData {
   existingFailures?: string[];    // other FF descriptions already defined (for uniqueness)
   failureDesc?: string;           // parent functional failure (for FM wand context)
   existingModes?: string[];       // other FM names already defined (for uniqueness)
-  subsystemExhausted?: boolean;   // when true, FF wand short-circuits to '' (no AI call)
-  // Persistent-breakdown wiring (Phase 1):
-  breakdownRows?: BreakdownRow[];      // current subsystem's full breakdown (for FF wand short-circuit)
+  // Persistent-breakdown wiring (Phase 1) — supersedes the legacy subsystemExhausted flag.
+  // The wand consumes these to compute exhaustion deterministically without an AI call:
+  //   exhausted iff breakdownRows is non-empty AND every row's id is in filledBreakdownIds.
+  breakdownRows?: BreakdownRow[];      // current subsystem's full breakdown
   filledBreakdownIds?: string[];       // breakdownId values that already have a linked FF
   // System Modes wiring (Phase 4):
   systemModes?: Array<{ mode: string; count: number }>;  // relevant historical modes for FM wand preference
