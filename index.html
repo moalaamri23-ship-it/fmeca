@@ -37,51 +37,92 @@
       .animate-enter{animation:fadeIn 0.3s ease-out forwards}
       @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
       
-      /* Tree styles that are difficult to replicate with pure utility classes due to complex pseudo-selectors on children */
-      .tf-tree ul { display: flex; flex-direction: column; padding-left: 40px; margin: 0; position: relative }
-      .tf-tree li { list-style-type: none; position: relative; padding: 10px 0; display: flex; flex-direction: row; align-items: center }
-      .tf-tree li::before { content:''; position: absolute; left: 0; top: 0; bottom: 0; border-left: 2px solid #cbd5e1; z-index: 0 }
-      .tf-tree li::after { content:''; position: absolute; left: 0; top: 50%; width: 40px; border-top: 2px solid #cbd5e1; z-index: 0 }
-      .tf-tree li:first-child::before { top: 50%; height: 50% }
-      .tf-tree li:last-child::before { bottom: 50%; height: 50% }
-      .tf-tree li:only-child::before { display: none }
-      .tf-tree > ul { padding-left: 0 }
-      .tf-tree > ul > li { padding-left: 0 }
-      .tf-tree > ul > li > .node-wrapper::before { display: none }
-      .tf-tree > ul > li::before { display: none }
-      .tf-tree > ul > li::after { display: none }
-      
-/* Hide ONLY child-branching lines when node is collapsed */
+      /* ── Tree viewport ── */
+      .tree-viewport { width: 100%; min-height: 300px; padding-bottom: 60px; overflow: auto; }
 
-/* 1) Hide horizontal branch to children */
-.tf-tree li.is-collapsed::after {
-  content: none !important;
-  display: none !important;
-}
+      /* ══════════════════════════════════════════════════════════════
+         TOP-DOWN TREE  —  root at top, siblings spread horizontally.
+         Vertical depth is fixed at 4 levels; width scales with count.
+         ══════════════════════════════════════════════════════════════ */
 
-/* 2) Hide stub exiting the card */
-.tf-tree li.is-collapsed > .node-wrapper.has-children::after {
-  content: none !important;
-  display: none !important;
-}
+      /* Tree container: expands to natural content size */
+      .tf-tree { display: inline-block; min-width: 100%; }
 
+      /* Siblings spread in a row, centred under their parent */
+      .tf-tree ul {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: nowrap;
+        align-items: flex-start;
+        justify-content: center;
+        padding: 0;
+        margin: 0;
+        position: relative;
+      }
 
-/* Hide the "branch stub" that comes out of the card when it has children */
-.tf-tree li.is-collapsed > .node-wrapper.has-children::after {
-  content: none !important;
-  display: none !important;
-}
+      /* Each node: card on top, children ul below */
+      .tf-tree li {
+        list-style-type: none;
+        position: relative;
+        padding: 40px 8px 0;   /* 40 px top = space for incoming connector */
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
 
-/* (Optional safety) if a UL ever exists under collapsed, hide it */
-.tf-tree li.is-collapsed > ul {
-  display: none !important;
-}
+      /* Horizontal bus connecting siblings at the very top of each li */
+      .tf-tree li::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 2px;
+        background: #cbd5e1;
+        z-index: 0;
+      }
+      /* First child: bus runs only from its own centre rightward */
+      .tf-tree li:first-child::before  { left: 50%; }
+      /* Last child: bus runs only from left to its own centre */
+      .tf-tree li:last-child::before   { right: 50%; }
+      /* Only child: no sibling bus needed */
+      .tf-tree li:only-child::before   { display: none; }
 
+      /* Vertical drop from bus level (top: 0) down to the card */
+      .tf-tree li::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: calc(50% - 1px);   /* centres the 2 px line */
+        width: 2px;
+        height: 40px;
+        background: #cbd5e1;
+        z-index: 0;
+      }
 
+      /* Root node has no incoming connectors */
+      .tf-tree > ul > li           { padding-top: 0; }
+      .tf-tree > ul > li::before   { display: none; }
+      .tf-tree > ul > li::after    { display: none; }
 
-      
-      .node-wrapper { margin-right: 0; position: relative; z-index: 10 }
-      .node-wrapper.has-children::after { content:''; position: absolute; top: 50%; right: -40px; width: 40px; height: 2px; background: #cbd5e1; z-index: -1 }
+      /* Card wrapper */
+      .node-wrapper { position: relative; z-index: 10; }
+
+      /* Vertical stub going DOWN from card to the children's bus */
+      .node-wrapper.has-children::after {
+        content: '';
+        position: absolute;
+        left: calc(50% - 1px);
+        bottom: -40px;
+        top: auto; right: auto;
+        width: 2px;
+        height: 40px;
+        background: #cbd5e1;
+        border: none;
+        z-index: 0;
+      }
+
+      /* ── Collapsed state: hide outgoing stub + children list ── */
+      .tf-tree li.is-collapsed > .node-wrapper.has-children::after { display: none !important; }
+      .tf-tree li.is-collapsed > ul                                 { display: none !important; }
 
       /* Merged table print styles */
       .merged-table th { background-color: #f1f5f9; position: sticky; top: 0; z-index: 10; border: 1px solid #cbd5e1; padding: 8px; font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; }

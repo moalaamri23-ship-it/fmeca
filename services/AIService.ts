@@ -1,5 +1,4 @@
-import { ContextData, FailureCategory, BreakdownRow } from '../types';
-export type { FailureCategory } from '../types';
+import { ContextData } from '../types';
 
 /*
   -------------------------------------------------------------------------
@@ -51,30 +50,6 @@ export interface ToolChatResult {
     content?: string;
     calls?: ToolCall[];
 }
-
-const FAILURE_CATEGORIES: FailureCategory[] = [
-    'Total Failure',
-    'Partial/Degraded Failure',
-    'Erratic Failure',
-    'Secondary/Conditional Failure',
-];
-
-// Phase 5 — Mitigation count scales with the mode's RPN total (S × O × D, range 1-1000).
-// Higher RPN warrants layered defenses; low RPN doesn't need busywork.
-export const mitigationCountForRpn = (rpn: number): string => {
-    if (rpn >= 200) return '4-6';
-    if (rpn >= 100) return '3-4';
-    if (rpn >= 50)  return '2-3';
-    return '1-2';
-};
-
-const normalizeCategory = (raw: any): FailureCategory => {
-    const s = String(raw ?? '').toLowerCase();
-    if (s.includes('partial') || s.includes('degrad')) return 'Partial/Degraded Failure';
-    if (s.includes('erratic') || s.includes('fluctuat')) return 'Erratic Failure';
-    if (s.includes('secondary') || s.includes('conditional') || s.includes('qualitative')) return 'Secondary/Conditional Failure';
-    return 'Total Failure';
-};
 
 export interface AIRequestPayload {
     sessionId?: string;
@@ -286,127 +261,11 @@ export const AIService = {
             });
         }
 
-        // --- FUNCTIONAL FAILURE SPECIALIST ---
-        if (lowerLabel.includes("functional failure")) {
-            const func = (contextData.funcDescription as string) ?? '';
-            const existing = (contextData.existingFailures as string[]) ?? [];
-            const breakdownRowsCtx = ((contextData as any)?.breakdownRows as BreakdownRow[] | undefined) ?? [];
-            const filledIds = new Set<string>(((contextData as any)?.filledBreakdownIds as string[] | undefined) ?? []);
-            const existingBlock = existing.length > 0
-                ? `Existing Functional Failures already defined (DO NOT repeat or closely resemble any of these):\n${existing.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n`
-                : '';
-            const funcBlock = func?.trim() ? `Subsystem Function: "${func}"\n` : '';
-            let ffPrompt: string;
-            if (currentText && wordCount > 5) {
-                ffPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
-${funcBlock}${existingBlock}The user has typed this Functional Failure: "${currentText}"
-Task: Rewrite and improve this as a proper Functional Failure statement.
-Requirements:
-1. Express as a negation or loss of function (e.g., "Fails to deliver...", "Unable to maintain...", "Delivers less than required...", "Runs at higher than rated...").
-2. Describe the failure of the function — NOT a physical failure mode or root cause.
-3. Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
-            } else {
-                // Phase 1: deterministic exhaustion via persisted breakdown rows (no AI call here).
-                if (breakdownRowsCtx.length > 0) {
-                    const firstUnfilled = breakdownRowsCtx.find(r => !filledIds.has(r.id));
-                    if (!firstUnfilled) return ''; // exhausted: every row already linked
-                    return firstUnfilled.canonical_failure || '';
-                }
-                // Fallback (no breakdown stored — e.g. imported project on its very first wand click)
-                ffPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
-${funcBlock}${existingBlock}Task: Generate ONE new Functional Failure that addresses a functional aspect of the above function NOT yet covered by any existing failure.
-Express it as a negation or loss of function (e.g., "Fails to deliver...", "Unable to maintain...", "Delivers less than required...", "Runs at higher than rated...").
-Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
-            }
-            return this.chat({
-                feature: 'field-generation',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
-                azureEndpoint: azureEndpoint || undefined,
-                powerAutomateUrl: powerAutomateUrl || undefined,
-                model: modelName,
-                messages: [{ role: 'user', content: ffPrompt + (systemContext ? '\n\n' + systemContext : '') }],
-                mode: mode as 'ai' | 'file' | 'hybrid',
-                refText,
-                contextData,
-                apiKey: key,
-                responseFormat: 'text'
-            });
-        }
-        // --- END FUNCTIONAL FAILURE SPECIALIST ---
-
-        // --- FAILURE MODE SPECIALIST ---
-        if (lowerLabel.includes("failure mode")) {
-            const failDesc = (contextData.failureDesc as string) ?? '';
-            const existing = (contextData.existingModes as string[]) ?? [];
-            const sysModes = (contextData.systemModes as Array<{ mode: string; count: number }> | undefined) ?? [];
-
-            // Phase 4 — wand on a blank FM cell prefers historical System Modes when relevance is
-            // strong. Returns the verbatim mode name (no AI call). App.tsx's updateMode auto-links
-            // the systemModeId/count and overwrites O on next render.
-            if (!currentText && sysModes.length > 0) {
-                const haystack = `${failDesc} ${(contextData.subsystem as string) || ''}`.toLowerCase();
-                const existingNorm = new Set(existing.map(e => e.toLowerCase().trim()));
-                const scored = sysModes
-                    .filter(m => !existingNorm.has(m.mode.toLowerCase().trim())) // skip already-used
-                    .map(m => {
-                        const words = m.mode.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-                        const overlap = words.filter(w => haystack.includes(w)).length;
-                        return { mode: m, overlap };
-                    })
-                    .sort((a, b) => b.overlap - a.overlap || b.mode.count - a.mode.count);
-                if (scored.length > 0 && scored[0].overlap > 0) {
-                    return scored[0].mode.mode;
-                }
-            }
-
-            const existingBlock = existing.length > 0
-                ? `Existing Failure Modes already defined (DO NOT repeat or closely resemble):\n${existing.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n`
-                : '';
-            const sysModesBlock = (!currentText && sysModes.length > 0)
-                ? `Historical Failure Modes (operational data — prefer matching one of these if it fits):\n${sysModes.slice(0, 8).map((m, i) => `${i + 1}. ${m.mode} — ${m.count} occurrences`).join('\n')}\n\n`
-                : '';
-            const failBlock = failDesc?.trim() ? `Functional Failure: "${failDesc}"\n` : '';
-            let fmPrompt: string;
-            if (currentText && wordCount > 5) {
-                fmPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
-${failBlock}${existingBlock}The user has typed this Failure Mode: "${currentText}"
-Task: Rewrite and improve this as a proper Failure Mode.
-Requirements:
-1. Describe the physical way the failure occurs (e.g., "Bearing wear", "Seal leakage", "Impeller erosion").
-2. Be specific — describe the physical failure mechanism, NOT the effect or cause.
-3. Return ONLY the Failure Mode — one concise phrase, no prefix, no explanation.`;
-            } else {
-                fmPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
-${failBlock}${existingBlock}${sysModesBlock}Task: Generate ONE new Failure Mode for this Functional Failure.
-Requirements:
-1. Describe the physical way the failure occurs (e.g., "Bearing wear", "Seal leakage", "Impeller erosion", "Shaft misalignment").
-2. Be specific and different from any existing modes listed above.
-3. Return ONLY the Failure Mode — one concise phrase, no prefix, no explanation.`;
-            }
-            return this.chat({
-                feature: 'field-generation',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
-                azureEndpoint: azureEndpoint || undefined,
-                powerAutomateUrl: powerAutomateUrl || undefined,
-                model: modelName,
-                messages: [{ role: 'user', content: fmPrompt + (systemContext ? '\n\n' + systemContext : '') }],
-                mode: mode as 'ai' | 'file' | 'hybrid',
-                refText,
-                contextData,
-                apiKey: key,
-                responseFormat: 'text'
-            });
-        }
-        // --- END FAILURE MODE SPECIALIST ---
-
         // --- MITIGATION SPECIALIST ---
         if (lowerLabel.includes("mitigation")) {
             const d = (contextData.detectionScore as number) ?? 5;
             const checklistContent = (contextData.checklistText as string) ?? '';
-            // Phase 5 — count scales with the FULL RPN total (S × O × D), not just D.
-            // Falls back to a D-derived estimate when only D is available (legacy callers).
-            const rpnTotal = (contextData.rpnTotal as number) ?? (d * 25);
-            const count = mitigationCountForRpn(rpnTotal);
+            const count = d >= 7 ? '4-6' : d >= 4 ? '3-4' : '2-3';
             const detectionNote = d >= 7
                 ? `Detection score is HIGH (D=${d}/10). Prioritize adding monitoring instruments and detection barriers to reduce this score.`
                 : d <= 3
@@ -559,111 +418,19 @@ Requirements:
         } catch(e) { return []; }
     },
 
-    /**
-     * Phase 3 — slim front-end of masterGen. Returns ONLY [{name, specs, brief}] per subsystem
-     * so each subsystem can then run its own isolated pipeline (function → decompose → bounded
-     * generation). Lessens cross-subsystem hallucination compared to the legacy
-     * generateMasterStructure that asks for the full FF/FM hierarchy in one giant call.
-     */
-    async generateSubsystemSkeleton(
-        sysName: string, sysDesc: string,
-        key: string, modelName: string,
-        mode: string = 'ai', refText: string = '',
-        aiProvider: string = '', azureEndpoint: string = '',
-        systemContext: string = '', powerAutomateUrl: string = ''
-    ): Promise<Array<{ name: string; specs: string; brief: string }>> {
-        if ((!key || key.length < 10) && aiProvider !== 'copilot') {
-            await new Promise(r => setTimeout(r, 1500));
-            return [];
-        }
-        const corePrompt = `Act as a Senior Reliability Engineer. Analyze System "${sysName}" (${sysDesc || 'no description provided'}).
-
-Task: Break the system into 3-6 critical SUBSYSTEMS. For each subsystem produce:
-  • name  — short subsystem name (e.g. "Drive Motor", "Cooling System").
-  • specs — comma-separated technical specs in the format "Key: Value Unit" (e.g. "Power: 110 kW, Speed: 2960 rpm").
-  • brief — one sentence stating the subsystem's role in the system (used downstream to build the full Function description).
-
-Do NOT generate Functions, Functional Failures, Failure Modes, or Mitigations here — those are produced in later steps to keep this call focused.
-
-Return strictly valid JSON:
-{ "subsystems": [ { "name": "string", "specs": "string (Key: Value Unit, ...)", "brief": "string (one sentence)" } ] }`;
-
-        const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
-
-        try {
-            const res = await this.chat({
-                feature: 'subsystem-skeleton',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
-                azureEndpoint: azureEndpoint || undefined,
-                powerAutomateUrl: powerAutomateUrl || undefined,
-                model: modelName,
-                messages: [{ role: 'user', content }],
-                mode: mode as 'ai' | 'file' | 'hybrid',
-                refText,
-                apiKey: key,
-                responseFormat: 'json'
-            });
-            const parsed = this.extractJSON(res);
-            if (!parsed?.subsystems || !Array.isArray(parsed.subsystems)) return [];
-            return parsed.subsystems
-                .map((s: any) => ({
-                    name: String(s?.name ?? '').trim(),
-                    specs: String(s?.specs ?? '').trim(),
-                    brief: String(s?.brief ?? '').trim(),
-                }))
-                .filter((s: any) => s.name);
-        } catch {
-            return [];
-        }
-    },
-
-    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = [], breakdownRows: BreakdownRow[] = [], relevantSystemModes: Array<{ mode: string; count: number }> = []): Promise<any> {
+    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = ''): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
             ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
-        const existingBlock = existingFailures.length > 0
-            ? `\nExisting Functional Failures already defined (DO NOT repeat or closely resemble — generate only NEW ones not yet covered):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n`
-            : '';
-        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.\n\nMitigation COUNT (per mode) scales with that mode's RPN total = S × O × D:\n  • RPN ≥ 200 → 4-6 actions\n  • RPN 100-199 → 3-4 actions\n  • RPN 50-99 → 2-3 actions\n  • RPN < 50 → 1-2 actions\nCompute each mode's RPN from the S/O/D you assign, then size its mitigation list to match.`;
-
-        // Phase 4 — historical modes block (System Modes). When the AI generates a Failure Mode
-        // that semantically matches one of the listed historical modes, it MUST emit that mode's
-        // name verbatim and tag the output with systemModeId so the client can attach the
-        // historical count and overwrite the Occurrence (O) score deterministically.
-        const slugForPrompt = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-        const systemModesBlock = relevantSystemModes.length > 0
-            ? `\nHISTORICAL FAILURE MODES (operational data — match these FIRST before inventing new modes):\n${relevantSystemModes.map((m, i) => `${i + 1}. "${m.mode}" — ${m.count} occurrences (systemModeId: "${slugForPrompt(m.mode)}")`).join('\n')}\n\nMATCHING RULE: For each Failure Mode you generate, FIRST check whether one of the listed historical modes describes the SAME physical failure mechanism (same component, same failure type). If yes, use the listed mode name VERBATIM as the "mode" field AND set "systemModeId" to its slug shown above. Only invent a new mode (with no systemModeId) when no listed mode applies. Do NOT force a match — leave systemModeId omitted when there is no genuine semantic overlap.\n`
-            : '';
-
-        const bounded = breakdownRows.length > 0;
-
-        const breakdownBlock = bounded
-            ? `\nBOUNDED GENERATION — produce failures for ONLY the following [function, standard, category] breakdown rows. Each row has a stable breakdownId you MUST echo back so we can link the generated FF to the right row. Do not invent additional failures beyond this list. Produce EXACTLY ONE Functional Failure per row, in the SAME ORDER as listed:\n${breakdownRows.map((r, i) => `${i + 1}. breakdownId: "${r.id}" | function: "${r.function}" | standard: "${r.standard}" | category: "${r.category}" | canonical_failure: "${r.canonical_failure}"`).join('\n')}\n\nFor each row, set the output failure's:\n  • desc                       = the canonical_failure text (you may lightly polish wording but stay faithful to the category).\n  • sourcePair.breakdownId     = the row's breakdownId verbatim.\n  • sourcePair.function        = the row's function.\n  • sourcePair.standard        = the row's standard.\n  • sourcePair.category        = the row's category.\n  • modes                      = 2 to 3 distinct Failure Modes per failure (DO NOT return only one).\n`
-            : '';
-
-        const taskBlock = bounded
-            ? `Task:
-        1. For EACH numbered row above, output one Functional Failure entry as specified.
-        2. Each failure MUST include 2-3 Failure Modes (mode/effect/cause/mitigation/rpn) — never fewer than 2.
-        3. Do NOT generate any failures outside the listed rows.`
-            : `Task:
+        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
+        const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".
+        Task:
         1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
-        2. Derive 1-2 NEW Functional Failures from the Function (negation of expectations) that are NOT already covered by any existing failure above.
-        3. For each new failure, generate 2-3 Failure Modes, Effects, Causes, and Mitigations.`;
-
-        const modeFields = relevantSystemModes.length > 0
-            ? `{ "mode": "string", "systemModeId": "<slug from list above, OR omit if no match>", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} }`
-            : `{ "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} }`;
-
-        const schemaBlock = bounded
-            ? `Return JSON object: { "failures": [ { "desc": "string", "sourcePair": { "breakdownId": "string", "function": "string", "standard": "string", "category": "Total Failure" | "Partial/Degraded Failure" | "Erratic Failure" | "Secondary/Conditional Failure" }, "modes": [ ${modeFields}, ... at least 2 entries ] } ] }`
-            : `Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ ${modeFields}, ... at least 2 entries ] } ] }`;
-
-        const corePrompt = `${checklistBlock}${systemModesBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".${existingBlock}${breakdownBlock}
-        ${taskBlock}
-        ${schemaBlock}${mitigationInstruction}`;
+        2. Derive multiple (2-4) distinct Functional Failures strictly from the Function (negation of expectations).
+        3. For each failure, generate Failure Modes, Effects, Causes, and Mitigations.
+        Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] } ] }${mitigationInstruction}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 
@@ -690,7 +457,7 @@ Return strictly valid JSON:
         if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Effect", cause: "Cause", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:6,o:4,d:3} }]; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
             ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
-        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.\n\nMitigation COUNT (per mode) scales with that mode's RPN total = S × O × D:\n  • RPN ≥ 200 → 4-6 actions\n  • RPN 100-199 → 3-4 actions\n  • RPN 50-99 → 2-3 actions\n  • RPN < 50 → 1-2 actions\nCompute each mode's RPN from the S/O/D you assign, then size its mitigation list to match.`;
+        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
         const corePrompt = `${checklistBlock}Context: System "${project}", Subsystem "${subName}", Specs "${subSpecs}". Function: "${subFunc}". Functional Failure: "${failDesc}".
         Task: Generate 2-3 specific Failure Modes that result in this Functional Failure.
         For each mode, determine Effect, Root Cause, and Mitigation Task.
@@ -714,101 +481,6 @@ Return strictly valid JSON:
             const parsed = this.extractJSON(res);
             return parsed.modes || [];
         } catch(e) { return []; }
-    },
-
-
-    /**
-     * Phase 1 — Persistent Function Breakdown.
-     * Decomposes a Function description into [function, standard, category, snippet, canonical_failure]
-     * rows using the 4-category taxonomy. The result is meant to be PERSISTED on the Subsystem
-     * (Subsystem.functionBreakdown) so exhaustion checks become a pure function of stored data
-     * (no more AI run-to-run variance).
-     *
-     * On any parse / network failure → returns []. Caller treats empty as "no breakdown available;
-     * do NOT change exhaustion state".
-     */
-    async decomposeFunction(
-        funcDesc: string,
-        key: string,
-        modelName: string,
-        aiProvider: string = '',
-        azureEndpoint: string = '',
-        powerAutomateUrl: string = '',
-        systemContext: string = ''
-    ): Promise<Omit<BreakdownRow, 'id'>[]> {
-        if (!funcDesc?.trim()) return [];
-        if ((!key || key.length < 10) && aiProvider !== 'copilot') return [];
-
-        const prompt = `You are a reliability engineer decomposing a subsystem Function description into a strict, exhaustive set of [function, standard, category] rows using a fixed 4-category failure taxonomy. Be deterministic — given the same input, always produce the same rows.
-
-Subsystem Function description:
-"""
-${funcDesc}
-"""
-
-STEP 1 — DECOMPOSE the description into [function, standard] pairs.
-  • function = verb + object (e.g. "delivers cooling water", "rotates shaft", "contains fluid").
-  • standard = the operating value or qualitative expectation (e.g. "400 GPM at 100 PSI", "continuous 24/7", "no abnormal vibration", "no external leakage").
-  • Every distinct standard mentioned (numerical, temporal, qualitative, "no X") gets its OWN row.
-
-STEP 2 — APPLY THE 4-CATEGORY TAXONOMY. For each [function, standard] pair, expand into one row per APPLICABLE category. Most pairs apply to 2-4 categories — never zero.
-
-  Categories (use these strings VERBATIM in "category"):
-  1. "Total Failure"               — completely stops doing the function.
-  2. "Partial/Degraded Failure"    — does the function but falls short of a NUMERICAL target. Only applies when the standard has a numerical value.
-  3. "Erratic Failure"             — does the function but output FLUCTUATES unacceptably. Applies to most active functions.
-  4. "Secondary/Conditional Failure" — does the function but violates a QUALITATIVE side-condition (vibration, leakage, temperature, noise).
-
-  Applicability rules:
-  • A numerical/rate standard ("400 GPM") → produce Total + Partial/Degraded + Erratic rows (3 rows).
-  • A qualitative "no X" standard ("no leakage") → produce Secondary/Conditional row (1 row, the standard IS the side-condition).
-  • A binary on/off function with no numerical target → produce Total + Erratic rows (2 rows).
-  • Continuous-operation standards ("24/7") → produce Total + Erratic rows.
-
-STEP 3 — For each row, write:
-  • snippet           = the verbatim slice from the original Function description that the pair came from (15-80 chars).
-  • canonical_failure = the canonical-negation Functional Failure text matching the category:
-      Total Failure              → "Fails to <verb> <object>" or "<Verb-noun> not performed".
-      Partial/Degraded Failure   → "Delivers less than <numerical target>" or "<Output> below rated <unit>".
-      Erratic Failure            → "Erratic <output>" or "<Output> fluctuates beyond acceptable range".
-      Secondary/Conditional      → "Operates with <violation>" or "<Function> performed but <side-condition violated>".
-
-Return ONLY this JSON, no prose, no markdown:
-{
-  "rows": [
-    { "function": "<verb + object>", "standard": "<value/expectation>", "category": "<one of the 4 strings>", "snippet": "<verbatim slice from description>", "canonical_failure": "<canonical negation>" }
-  ]
-}`;
-
-        const content = prompt + (systemContext ? '\n\n' + systemContext : '');
-
-        try {
-            const res = await this.chat({
-                feature: 'function-decomposition',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
-                azureEndpoint: azureEndpoint || undefined,
-                powerAutomateUrl: powerAutomateUrl || undefined,
-                model: modelName,
-                messages: [{ role: 'user', content }],
-                mode: 'ai',
-                refText: '',
-                apiKey: key,
-                responseFormat: 'json'
-            });
-            const parsed = this.extractJSON(res);
-            if (!parsed || !Array.isArray(parsed.rows)) return [];
-            return parsed.rows
-                .map((r: any) => ({
-                    function: String(r?.function ?? '').trim(),
-                    standard: String(r?.standard ?? '').trim(),
-                    category: normalizeCategory(r?.category),
-                    snippet: String(r?.snippet ?? '').trim(),
-                    canonical_failure: String(r?.canonical_failure ?? '').trim(),
-                }))
-                .filter((r: any) => r.function && r.canonical_failure);
-        } catch {
-            return [];
-        }
     },
 
 async evaluateRpnFromText(
@@ -1204,7 +876,188 @@ Output format:
         }
 
         return _classifyModels(all);
-    }
+    },
+
+    // -------------------------------------------------------------------------
+    // Function Breakdown — view-only structural decomposition
+    // -------------------------------------------------------------------------
+
+    async generateFFForRow(
+        systemName: string,
+        subsystemName: string,
+        funcDesc: string,
+        breakdownSnippet: string,
+        breakdownStandard: string,
+        existingFailures: string[],
+        key: string,
+        modelName: string,
+        aiProvider: string = '',
+        azureEndpoint: string = '',
+        powerAutomateUrl: string = '',
+        systemContext: string = ''
+    ): Promise<string> {
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') return '';
+        const existingBlock = existingFailures.length > 0
+            ? `Existing Functional Failures already defined (DO NOT repeat or closely resemble):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n`
+            : '';
+        const standardNote = breakdownStandard ? ` (standard: "${breakdownStandard}")` : '';
+        const prompt = `Context: System "${systemName}", Subsystem "${subsystemName}".
+Subsystem Function: "${funcDesc}"
+Specific functional aspect to address: "${breakdownSnippet}"${standardNote}
+
+${existingBlock}Task: Generate ONE Functional Failure that specifically addresses the loss or degradation of this functional aspect.
+Express it naturally as a reliability engineer would — a negation or reduction of that specific aspect.
+Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
+
+        const content = prompt + (systemContext ? '\n\n' + systemContext : '');
+        try {
+            return await this.chat({
+                feature: 'ff-for-row',
+                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
+                model: modelName,
+                messages: [{ role: 'user', content }],
+                mode: 'ai',
+                refText: '',
+                apiKey: key,
+                responseFormat: 'text'
+            });
+        } catch {
+            return '';
+        }
+    },
+
+    async decomposeFunction(
+        funcDesc: string,
+        subsystemName: string,
+        projectName: string,
+        key: string,
+        modelName: string,
+        aiProvider: string = '',
+        azureEndpoint: string = '',
+        powerAutomateUrl: string = '',
+        systemContext: string = ''
+    ): Promise<Array<{ function: string; standard: string; snippet: string }>> {
+        if (!funcDesc?.trim()) return [];
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') return [];
+
+        const contextLine = (subsystemName || projectName)
+            ? `Subsystem: "${subsystemName}"${projectName ? ` within System: "${projectName}"` : ''}\n\n`
+            : '';
+
+        const prompt = `You are a reliability engineer decomposing a subsystem Function description into a structured set of [function, standard, snippet] rows. Be deterministic — given the same input, always produce the same rows.
+
+${contextLine}Function description:
+"""
+${funcDesc}
+"""
+
+DECOMPOSITION RULES:
+1. function = verb + object (e.g. "delivers cooling water", "rotates shaft", "contains fluid")
+2. standard = one SINGLE specific operating value or qualitative condition (e.g. "400 GPM at 100 PSI", "no abnormal vibration", "no leakage", "no excessive temperature")
+3. snippet = the verbatim slice from the original description this row came from (15–80 chars)
+4. SPLIT COMPOUND CONDITIONS: if the source text says "without vibration, leakage, or excessive temperature" — create THREE separate rows, one per condition:
+   • { function: "operates without fault", standard: "no abnormal vibration", snippet: "without abnormal vibration" }
+   • { function: "operates without fault", standard: "no leakage", snippet: "leakage" }
+   • { function: "operates without fault", standard: "no excessive temperature", snippet: "excessive temperature" }
+5. NO DUPLICATES: every [function, standard] pair must be unique. If you would repeat a pair, merge or skip.
+6. Each row must represent exactly ONE condition — never combine "no vibration AND no leakage" into a single standard.
+
+Return ONLY this JSON, no prose, no markdown:
+{ "rows": [ { "function": "...", "standard": "...", "snippet": "..." } ] }`;
+
+        const content = prompt + (systemContext ? '\n\n' + systemContext : '');
+        try {
+            const res = await this.chat({
+                feature: 'function-decomposition',
+                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
+                model: modelName,
+                messages: [{ role: 'user', content }],
+                mode: 'ai',
+                refText: '',
+                apiKey: key,
+                responseFormat: 'json'
+            });
+            const parsed = this.extractJSON(res);
+            if (!parsed || !Array.isArray(parsed.rows)) return [];
+            return parsed.rows
+                .map((r: any) => ({
+                    function: String(r?.function ?? '').trim(),
+                    standard: String(r?.standard ?? '').trim(),
+                    snippet: String(r?.snippet ?? '').trim(),
+                }))
+                .filter((r: any) => r.function);
+        } catch {
+            return [];
+        }
+    },
+
+    async matchFFsToBreakdown(
+        funcDesc: string,
+        subsystemName: string,
+        projectName: string,
+        rows: Array<{ id: string; function: string; standard: string; snippet: string }>,
+        failures: Array<{ id: string; desc: string }>,
+        key: string,
+        modelName: string,
+        aiProvider: string = '',
+        azureEndpoint: string = '',
+        powerAutomateUrl: string = '',
+        systemContext: string = ''
+    ): Promise<Array<{ rowId: string; failureIds: string[] }>> {
+        if (!rows.length || !failures.length) return [];
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') return [];
+
+        const rowList = rows.map((r, i) => `${i + 1}. rowId: "${r.id}" | function: "${r.function}" | standard: "${r.standard}"`).join('\n');
+        const failList = failures.map((f, i) => `${i + 1}. failureId: "${f.id}" | desc: "${f.desc}"`).join('\n');
+
+        const prompt = `You are a reliability engineer. Match each Functional Failure to the breakdown row it best covers.
+
+Subsystem: "${subsystemName}" within System: "${projectName}"
+Function description: "${funcDesc}"
+
+BREAKDOWN ROWS:
+${rowList}
+
+FUNCTIONAL FAILURES:
+${failList}
+
+Rules:
+- Each failure should be matched to AT MOST ONE row (the one it best covers).
+- A row may have zero, one, or multiple failures matched to it.
+- A failure that doesn't clearly cover any row should be left unmatched (omit its failureId from all rows).
+
+Return ONLY this JSON, no prose, no markdown:
+{ "matches": [ { "rowId": "<rowId>", "failureIds": ["<failureId>", ...] } ] }
+Include an entry for every row, even if failureIds is empty.`;
+
+        const content = prompt + (systemContext ? '\n\n' + systemContext : '');
+        try {
+            const res = await this.chat({
+                feature: 'breakdown-matching',
+                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
+                model: modelName,
+                messages: [{ role: 'user', content }],
+                mode: 'ai',
+                refText: '',
+                apiKey: key,
+                responseFormat: 'json'
+            });
+            const parsed = this.extractJSON(res);
+            if (!parsed || !Array.isArray(parsed.matches)) return [];
+            return parsed.matches.map((m: any) => ({
+                rowId: String(m?.rowId ?? ''),
+                failureIds: Array.isArray(m?.failureIds) ? m.failureIds.map(String) : [],
+            })).filter((m: any) => m.rowId);
+        } catch {
+            return [];
+        }
+    },
 };
 
 export interface TieredModels {

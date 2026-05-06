@@ -5,62 +5,20 @@ import { Icon } from './components/Icon';
 import { SmartInput } from './components/SmartInput';
 import { MitigationBuilder } from './components/MitigationBuilder';
 import { SystemModesModal, SystemMode } from './components/SystemModesModal';
-import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
 import { TreeNode } from './components/TreeNode';
 import { HybridMapView } from './components/HybridMapView';
 import { AttachmentModal } from './components/AttachmentModal';
 import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
-import { LocalFileSystemProvider, sanitizeName, pickFolder } from './services/FileSystem';
+import { LocalFileSystemProvider, sanitizeName } from './services/FileSystem';
 import { RICH_LIBRARY } from './constants';
-import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, FailureCategory, BreakdownRow } from './types';
+import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch } from './types';
+import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
 
 // Utility functions
 const safeGet = (k: string, f: any) => { try { const i = localStorage.getItem(k); return i ? JSON.parse(i) : f; } catch (e) { return f; } };
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-
-const simpleHash = (s: string): string => {
-    let h = 5381;
-    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-    return h.toString(36);
-};
-
-// Phase 1 — deterministic exhaustion derived from the persisted breakdown.
-// A row is "filled" iff at least one Failure in the subsystem links to it via sourcePair.breakdownId.
-// Exhausted iff the breakdown is non-empty AND every row is filled.
-const isRowFilled = (row: BreakdownRow, failures: Failure[]): boolean =>
-    failures.some(f => f.sourcePair?.breakdownId === row.id);
-
-const isSubExhausted = (sub: Subsystem): boolean => {
-    const rows = sub.functionBreakdown;
-    if (!rows || rows.length === 0) return false;
-    return rows.every(r => isRowFilled(r, sub.failures));
-};
-
-const findFirstUnfilledRow = (sub: Subsystem): BreakdownRow | undefined =>
-    sub.functionBreakdown?.find(r => !isRowFilled(r, sub.failures));
-
-// Auto-link orphan FFs (no sourcePair.breakdownId) by exact-text match against canonical_failure.
-// Returns updated failures array; does not mutate.
-const autoLinkExistingFFs = (failures: Failure[], rows: BreakdownRow[]): Failure[] => {
-    if (!rows.length) return failures;
-    const byText = new Map(rows.map(r => [r.canonical_failure.trim().toLowerCase(), r]));
-    return failures.map(f => {
-        if (f.sourcePair?.breakdownId) return f;
-        const hit = byText.get((f.desc || '').trim().toLowerCase());
-        if (!hit) return f;
-        return {
-            ...f,
-            sourcePair: {
-                breakdownId: hit.id,
-                function: hit.function,
-                standard: hit.standard,
-                category: hit.category,
-            },
-        };
-    });
-};
 
 const nowIso = () => new Date().toISOString();
 
@@ -154,6 +112,9 @@ const App = () => {
     // Map-tree state + handlers
     const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
     const [treeSelected, setTreeSelected] = useState<string | null>(null);
+    const [mapZoom, setMapZoom] = useState(1.0);
+    const [mapHiddenSubs, setMapHiddenSubs] = useState<Set<string>>(new Set());
+    const [showSubFilter, setShowSubFilter] = useState(false);
 
     const [rpnBusy, setRpnBusy] = useState<Set<string>>(new Set());
 
@@ -164,8 +125,13 @@ const App = () => {
     const [systemModes, setSystemModes] = useState<SystemMode[]>([]);
     const [systemContextEnabled, setSystemContextEnabled] = useState(true);
     const [showSystemModes, setShowSystemModes] = useState(false);
-    const [breakdownModalSubId, setBreakdownModalSubId] = useState<string | null>(null);
+
+    // Function Breakdown modal state
+    const [breakdownSubId, setBreakdownSubId] = useState<string | null>(null);
     const [redecomposingId, setRedecomposingId] = useState<string | null>(null);
+    const [matchingId, setMatchingId] = useState<string | null>(null);
+    const [breakdownMatches, setBreakdownMatches] = useState<BreakdownMatch[] | null>(null);
+    const [generatingRowId, setGeneratingRowId] = useState<string | null>(null);
 
 
     const toggleTree = (id: string) => setTreeExpanded(prev => {
@@ -217,58 +183,12 @@ const collapseAllTree = () => {
     // Derived: non-empty only when data is present AND enabled
     const systemContext = (systemContextEnabled && systemModes.length > 0) ? buildSystemContext(systemType, systemModes) : '';
 
-    // ---- Phase 4: System Modes helpers ----
+    const filteredProject = activeProject && mapHiddenSubs.size > 0
+        ? { ...activeProject, subsystems: activeProject.subsystems.filter(s => !mapHiddenSubs.has(s.id)) }
+        : activeProject;
 
-    // Slug a System Mode name into a stable id used to match AI-emitted systemModeId back to count.
-    const slugMode = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-
-    // Filter+rank System Modes for relevance to a subsystem context (name + specs + func).
-    // Word-overlap scoring (RAGService.findBestSubsystem pattern). Returns at most 12 entries.
-    const relevantSystemModes = (ctx: { name?: string; specs?: string; func?: string }): SystemMode[] => {
-        if (!systemContextEnabled || systemModes.length === 0) return [];
-        const haystack = `${ctx.name || ''} ${ctx.specs || ''} ${ctx.func || ''}`.toLowerCase();
-        if (!haystack.trim()) return systemModes.slice(0, 12);
-        const scored = systemModes.map(m => {
-            const mWords = m.mode.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-            const overlap = mWords.filter(w => haystack.includes(w)).length;
-            return { mode: m, score: overlap, count: m.count };
-        });
-        const filtered = scored.filter(x => x.score > 0 || x.count >= 5);
-        // If filtering left nothing, fall back to top-by-count (still useful as historical signal).
-        const pool = filtered.length > 0 ? filtered : scored;
-        return pool.sort((a, b) => b.score - a.score || b.count - a.count)
-                   .slice(0, 12)
-                   .map(x => x.mode);
-    };
-
-    // Map historical occurrence count → Occurrence (O) score on the 1-10 RPN scale.
-    const countToOccurrence = (count: number): number => {
-        if (count >= 10) return 9;
-        if (count >= 5) return 7;
-        if (count >= 2) return 5;
-        if (count >= 1) return 3;
-        return 1;
-    };
-
-    // After AI generation, walk every Mode that emitted a systemModeId and overwrite its O score
-    // from the historical count. S and D stay AI-generated. Stamps systemModeCount for traceability.
-    const applySystemModeOOverride = (failures: Failure[], modes: SystemMode[]): Failure[] => {
-        if (modes.length === 0) return failures;
-        const bySlug = new Map(modes.map(m => [slugMode(m.mode), m]));
-        return failures.map(f => ({
-            ...f,
-            modes: f.modes.map(m => {
-                if (!m.systemModeId) return m;
-                const sm = bySlug.get(m.systemModeId);
-                if (!sm) return m;
-                return {
-                    ...m,
-                    systemModeCount: sm.count,
-                    rpn: { ...m.rpn, o: countToOccurrence(sm.count) },
-                };
-            }),
-        }));
-    };
+    const toggleSubVisibility = (id: string) =>
+        setMapHiddenSubs(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
 const tryIso=(x:any)=>{ try{ if(!x) return null; const d=new Date(x); return Number.isNaN(d.getTime())?null:d.toISOString(); }catch(e){ return null; } };
 const normalizeProjectDates=(sp:any)=>{ const now=nowIso(); const createdAt=sp.createdAt||sp.updatedAt||tryIso(sp.created)||tryIso(sp.updated)||now; const updatedAt=sp.updatedAt||tryIso(sp.updated)||createdAt; return { ...sp, createdAt, updatedAt }; };
@@ -403,7 +323,7 @@ setProjects(
         if(!storageProvider) return;
         if(!activeProject) return alert("Please open a project first.");
         try {
-            const h = await pickFolder();
+            const h = await window.showDirectoryPicker();
             await storageProvider.setRoot(activeProject.id, h);
             alert("Base folder set successfully.");
         } catch(e) { console.error(e); }
@@ -512,7 +432,10 @@ setProjects(
         if (!activeProject) return;
         setShowDownloadOptions(false);
         const expandedIds = JSON.stringify([...treeExpanded]);
-        const projectJson = JSON.stringify(activeProject);
+        const projectForExport = mapHiddenSubs.size > 0
+            ? { ...activeProject, subsystems: activeProject.subsystems.filter(s => !mapHiddenSubs.has(s.id)) }
+            : activeProject;
+        const projectJson = JSON.stringify(projectForExport);
         const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -541,6 +464,11 @@ body{margin:0;padding:0;background:#f8fafc;font-family:Inter,system-ui,sans-seri
   <span class="text-sm font-bold text-slate-700 mr-2">${activeProject.name}</span>
   <button onclick="expandAll()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm">Expand All</button>
   <button onclick="collapseAll()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm">Collapse All</button>
+  <div class="flex items-center gap-1 bg-white border border-slate-200 rounded shadow-sm px-1 py-1 ml-2">
+    <button onclick="zoomOut()" class="w-6 h-6 flex items-center justify-center text-slate-600 hover:bg-slate-100 rounded font-bold text-base leading-none" title="Zoom out">−</button>
+    <span id="zoom-label" class="text-xs font-bold text-slate-600 w-10 text-center select-none">100%</span>
+    <button onclick="zoomIn()" class="w-6 h-6 flex items-center justify-center text-slate-600 hover:bg-slate-100 rounded font-bold text-base leading-none" title="Zoom in">+</button>
+  </div>
 </div>
 <div id="wrap"><div id="map"></div></div>
 <div id="tip"></div>
@@ -551,6 +479,10 @@ const SYS_W=320,SYS_H=72,SUB_W=200,SUB_H=90,FF_W=190,FF_H=62,FM_W=215,FM_H=136;
 const H_GAP=32,V_GAP=24,FM_V_GAP=16,COL_GAP=40;
 const SYS_BOTTOM_TO_BUS=28,BUS_TO_SUB=28,PADDING=56,CONN_W=2;
 let expanded=new Set(INIT_EXP);
+let mapZoom=1.0;
+function zoomIn(){mapZoom=+Math.min(2,mapZoom+0.1).toFixed(2);applyZoom();}
+function zoomOut(){mapZoom=+Math.max(0.25,mapZoom-0.1).toFixed(2);applyZoom();}
+function applyZoom(){document.getElementById('map').style.zoom=mapZoom;document.getElementById('zoom-label').textContent=Math.round(mapZoom*100)+'%';}
 function colW(sub){return expanded.has(sub.id)?SUB_W+H_GAP+FF_W+H_GAP+FM_W:SUB_W;}
 function ffRowH(fail){if(!expanded.has(fail.id)||!fail.modes.length)return FF_H;return Math.max(FF_H,fail.modes.length*FM_H+(fail.modes.length-1)*FM_V_GAP);}
 function groupH(sub){if(!expanded.has(sub.id)||!sub.failures.length)return SUB_H;let t=0;sub.failures.forEach((f,i)=>{t+=ffRowH(f);if(i<sub.failures.length-1)t+=V_GAP;});return Math.max(SUB_H,t);}
@@ -748,79 +680,11 @@ render();
     const analyzeSubImage = async (subId: string) => { if(!activeProject) return; const sub = activeProject.subsystems.find(s => s.id === subId); if (!sub || !sub.imageData) { alert("Upload image."); return; } if (!apiKey) { alert("API Key required."); return; } try { const raw = await AIService.analyzeImageForSubsystem(sub.imageData, apiKey, modelName); let clean = (raw || "").trim(); if (clean.startsWith("```")) clean = clean.replace(/^```[a-zA-Z]*\s*/m, "").replace(/```$/m, "").trim(); let specs = ""; try { const parsed = JSON.parse(clean); if (parsed && parsed.specs) specs = parsed.specs.trim(); } catch (e) {} setActiveProject(p => p ? touchProject({ ...p, subsystems: p.subsystems.map(s => s.id === subId ? { ...s, imageJson: clean, showImageJson: true, specs: specs || s.specs } : s) }) : null); } catch (e) { alert("Error: " + e); } };
     const toggleImageJson = (subId: string) => { if(activeProject) setActiveProject(p => p ? touchProject({ ...p, subsystems: p.subsystems.map(s => s.id === subId ? { ...s, showImageJson: !s.showImageJson } : s) }) : null); };
     const addFail = (sId: string) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: [...s.failures, {id: generateId(), desc: "", modes: []}]} : s)}) : null); };
-    const updateFail = (sId: string, fId: string, v: string) => {
-        if (!activeProject) return;
-        setActiveProject(p => p ? touchProject({
-            ...p,
-            subsystems: p.subsystems.map(s => {
-                if (s.id !== sId) return s;
-                const trimmed = (v || '').trim().toLowerCase();
-                const rows = s.functionBreakdown ?? [];
-                // If the new text matches a breakdown row's canonical_failure, auto-link the FF.
-                const matchedRow = trimmed ? rows.find(r => r.canonical_failure.trim().toLowerCase() === trimmed) : undefined;
-                return {
-                    ...s,
-                    failures: s.failures.map(f => {
-                        if (f.id !== fId) return f;
-                        const next: Failure = { ...f, desc: v };
-                        if (matchedRow) {
-                            next.sourcePair = {
-                                breakdownId: matchedRow.id,
-                                function: matchedRow.function,
-                                standard: matchedRow.standard,
-                                category: matchedRow.category,
-                            };
-                        }
-                        return next;
-                    }),
-                };
-            }),
-        }) : null);
-    };
+    const updateFail = (sId: string, fId: string, v: string) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, desc: v} : f)} : s)}) : null); };
     const deleteFail = (sId: string, fId: string) => {if (!activeProject) return; ask("Delete Failure?", () => {setActiveProject(p => p? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? { ...s, failures: s.failures.filter(f => f.id !== fId) } : s )}) : p ); }); };
     const toggleFail = (sId: string, fId: string) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: !f.collapsed} : f)} : s)}) : null); };
     const addMode = (sId: string, fId: string, data?: Mode) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, data || {id: generateId(), mode:"", effect:"", cause:"", mitigation:"", rpn:{s:5,o:5,d:5}}]} : f)} : s)}) : null); };
-    const updateMode = (sId: string, fId: string, mId: string, k: keyof Mode, v: any) => {
-        if (!activeProject) return;
-        setActiveProject(p => p ? touchProject({
-            ...p,
-            subsystems: p.subsystems.map(s => {
-                if (s.id !== sId) return s;
-                // Phase 4 — when the FM 'mode' field is updated, try to auto-link to a System Mode
-                // by exact-name match. Sets systemModeId + systemModeCount and overwrites O.
-                let matchedSysMode: SystemMode | undefined;
-                if (k === 'mode' && typeof v === 'string' && v.trim()) {
-                    const relevant = relevantSystemModes({ name: s.name, specs: s.specs, func: s.func });
-                    matchedSysMode = relevant.find(m => m.mode.trim().toLowerCase() === v.trim().toLowerCase());
-                }
-                return {
-                    ...s,
-                    failures: s.failures.map(f => {
-                        if (f.id !== fId) return f;
-                        return {
-                            ...f,
-                            modes: f.modes.map(m => {
-                                if (m.id !== mId) return m;
-                                const next: Mode = { ...m, [k]: v };
-                                if (k === 'mode') {
-                                    if (matchedSysMode) {
-                                        next.systemModeId = slugMode(matchedSysMode.mode);
-                                        next.systemModeCount = matchedSysMode.count;
-                                        next.rpn = { ...next.rpn, o: countToOccurrence(matchedSysMode.count) };
-                                    } else if ((!v || !String(v).trim()) && m.systemModeId) {
-                                        // Clearing the FM text drops the historical link.
-                                        next.systemModeId = undefined;
-                                        next.systemModeCount = undefined;
-                                    }
-                                }
-                                return next;
-                            }),
-                        };
-                    }),
-                };
-            }),
-        }) : null);
-    };
+    const updateMode = (sId: string, fId: string, mId: string, k: keyof Mode, v: any) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, modes: f.modes.map(m => m.id === mId ? {...m, [k]: v} : m)} : f)} : s)}) : null); };
     const deleteMode = (sId: string, fId: string, mId: string) => {if (!activeProject) return; ask("Delete Mode?", () => {setActiveProject(p => p? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId? {...s, failures: s.failures.map(f => f.id === fId ? { ...f, modes: f.modes.filter(m => m.id !== mId) } : f ) }: s )}) : p ); }); };
     // const handleDragOver = (e: React.DragEvent) => e.preventDefault();
     const handleDrop=(e:React.DragEvent,dropIndex:number)=>{ e.preventDefault(); setDragId(null); setDragAllowed(null); };
@@ -845,298 +709,119 @@ render();
 
     const setBusy = (id: string, on: boolean) => setRpnBusy(prev => { const next = new Set(prev); on ? next.add(id) : next.delete(id); return next; });
 
-    // ---- Function Breakdown Modal handlers (Phase 2) ----
-
-    // Re-decompose the function description for a subsystem. Wipes existing breakdownId links
-    // (FF text stays); user re-links via the modal's "Match to row" dropdown or the auto-link
-    // useEffect kicks in if the new canonical_failure happens to match an existing FF's text.
-    const redecomposeSub = async (sId: string) => {
-        if (!activeProject) return;
-        const sub = activeProject.subsystems.find(s => s.id === sId);
-        if (!sub) return;
-        if (!apiKey && aiProvider !== 'copilot') { alert("API Key required."); return; }
+    const redecomposeFunction = async (sId: string) => {
+        const sub = activeProject?.subsystems.find(s => s.id === sId);
+        if (!sub?.func?.trim() || (!apiKey && aiProvider !== 'copilot')) return;
         setRedecomposingId(sId);
-        try {
-            const decomposed = await AIService.decomposeFunction(
-                sub.func, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext
-            );
-            if (decomposed.length === 0) {
-                alert("Decomposition failed — check the function description and try again.");
-                return;
-            }
-            const newRows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
-            // Re-link any existing FF whose desc exactly matches a new canonical_failure.
-            setActiveProject(p => p ? ({
-                ...p,
-                subsystems: p.subsystems.map(s => {
-                    if (s.id !== sId) return s;
-                    const wiped = s.failures.map(f => f.sourcePair?.breakdownId
-                        ? { ...f, sourcePair: { ...f.sourcePair, breakdownId: undefined } }
-                        : f);
-                    const relinked = autoLinkExistingFFs(wiped, newRows);
-                    return {
-                        ...s,
-                        functionBreakdown: newRows,
-                        funcHashAtBreakdown: simpleHash(s.func || ''),
-                        failures: relinked,
-                    };
-                }),
-            }) : null);
-        } finally {
-            setRedecomposingId(null);
-        }
-    };
-
-    // Link an orphan FF (no sourcePair.breakdownId) to a chosen breakdown row.
-    const linkOrphanFailure = (failureId: string, breakdownId: string) => {
-        if (!activeProject) return;
-        setActiveProject(p => p ? ({
-            ...p,
-            subsystems: p.subsystems.map(s => {
-                const row = s.functionBreakdown?.find(r => r.id === breakdownId);
-                if (!row) return s;
-                if (!s.failures.some(f => f.id === failureId)) return s;
-                return {
-                    ...s,
-                    failures: s.failures.map(f => f.id !== failureId ? f : ({
-                        ...f,
-                        sourcePair: {
-                            breakdownId: row.id,
-                            function: row.function,
-                            standard: row.standard,
-                            category: row.category,
-                        },
-                    })),
-                };
-            }),
-        }) : null);
-    };
-
-    // Drop the breakdownId from an FF's sourcePair (keeps category metadata).
-    const unlinkFailure = (failureId: string) => {
-        if (!activeProject) return;
-        setActiveProject(p => p ? ({
-            ...p,
-            subsystems: p.subsystems.map(s => ({
-                ...s,
-                failures: s.failures.map(f => {
-                    if (f.id !== failureId || !f.sourcePair) return f;
-                    return { ...f, sourcePair: { ...f.sourcePair, breakdownId: undefined } };
-                }),
-            })),
-        }) : null);
-    };
-
-    const autoGen = async (sId: string, name: string, specs: string, func: string) => {
-        setGenId(sId);
-        if (!activeProject) { setGenId(null); return; }
-        const sub = activeProject.subsystems.find(s => s.id === sId);
-        if (!sub) { setGenId(null); return; }
-
-        // ---- Step 1: ensure a fresh persistent breakdown for the current function text ----
-        const currentFuncHash = simpleHash(func || '');
-        let rows: BreakdownRow[] = sub.functionBreakdown ?? [];
-        const breakdownStale = !rows.length || sub.funcHashAtBreakdown !== currentFuncHash;
-
-        if (breakdownStale) {
-            const decomposed = await AIService.decomposeFunction(
-                func, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext
-            );
-            if (decomposed.length === 0) {
-                // Decomposition unavailable (parse/network error) — bail; do not change exhaustion.
-                setGenId(null);
-                return;
-            }
-            rows = decomposed.map(r => ({ ...r, id: generateId() }));
-
-            // Persist the new breakdown immediately, before any FF generation.
+        const decomposed = await AIService.decomposeFunction(
+            sub.func, sub.name, activeProject!.name,
+            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext
+        );
+        const rows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
+        if (rows.length > 0) {
             setActiveProject(p => p ? ({
                 ...p,
                 subsystems: p.subsystems.map(s => s.id !== sId ? s : {
                     ...s,
                     functionBreakdown: rows,
-                    funcHashAtBreakdown: currentFuncHash,
-                    // Decomposition changed: invalidate every existing FF's link (text stays).
-                    failures: s.failures.map(f => f.sourcePair?.breakdownId
-                        ? { ...f, sourcePair: { ...f.sourcePair, breakdownId: undefined } }
-                        : f),
+                    funcHashAtBreakdown: String(sub.func || '').split('').reduce((h, c) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0).toString(36),
                 }),
             }) : null);
+            setBreakdownMatches(null); // rows changed — old match rowIds are stale
         }
+        setRedecomposingId(null);
+    };
 
-        // ---- Step 2: re-link orphan FFs by canonical_failure exact-text match ----
-        const linkedFailures = autoLinkExistingFFs(sub.failures, rows);
-        if (linkedFailures !== sub.failures) {
-            setActiveProject(p => p ? ({
-                ...p,
-                subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: linkedFailures }),
-            }) : null);
-        }
-
-        // ---- Step 3: gate exhaustion BEFORE any FF generation ----
-        const unfilled = rows.filter(r => !isRowFilled(r, linkedFailures));
-        if (unfilled.length === 0) {
-            // Exhausted. Append one blank FF row for manual entry. No AI call.
-            addFail(sId);
-            setGenId(null);
-            return;
-        }
-
-        // ---- Step 4: bounded generation for unfilled rows only ----
-        const existingFailures = linkedFailures.filter(f => f.desc).map(f => f.desc);
-        const relevant = relevantSystemModes({ name, specs, func });
-        const res = await AIService.generateCompleteSubsystem(
-            name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode,
-            globalFileText, aiProvider, azureEndpoint, systemContext, checklistText,
-            powerAutomateUrl, existingFailures, unfilled, relevant
+    const runBreakdownMatch = async (sId: string) => {
+        const sub = activeProject?.subsystems.find(s => s.id === sId);
+        if (!sub?.functionBreakdown?.length || (!apiKey && aiProvider !== 'copilot')) return;
+        setMatchingId(sId);
+        const matches = await AIService.matchFFsToBreakdown(
+            sub.func, sub.name, activeProject!.name,
+            sub.functionBreakdown,
+            sub.failures.filter(f => f.desc).map(f => ({ id: f.id, desc: f.desc })),
+            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext
         );
+        setBreakdownMatches(matches);
+        setMatchingId(null);
+    };
 
-        if (res && res.failures && res.failures.length > 0) {
-            // Append, preferring the AI-emitted breakdownId then falling back to positional mapping
-            // against unfilled[i]. Tag every new failure with the row's source metadata.
-            const rowsById = new Map(rows.map(r => [r.id, r]));
-            const builtFailures: Failure[] = res.failures.map((f: any, i: number) => {
-                const emittedId = f?.sourcePair?.breakdownId;
-                const row = (emittedId && rowsById.get(emittedId)) || unfilled[i];
-                const sourcePair: Failure['sourcePair'] = row ? {
-                    breakdownId: row.id,
-                    function: row.function,
-                    standard: row.standard,
-                    category: row.category,
-                } : undefined;
-                return {
-                    id: generateId(),
-                    desc: String(f.desc || row?.canonical_failure || '').trim(),
-                    modes: (f.modes || []).map((m: any) => ({
-                        id: generateId(),
-                        mode: m.mode || '',
-                        effect: m.effect || '',
-                        cause: m.cause || '',
-                        mitigation: m.mitigation || '',
-                        rpn: m.rpn || { s: 5, o: 5, d: 5 },
-                        ...(m.systemModeId ? { systemModeId: String(m.systemModeId) } : {}),
-                    })),
-                    ...(sourcePair ? { sourcePair } : {}),
-                };
-            });
-            // Phase 4 — overwrite Occurrence (O) on FMs that matched a System Mode
-            const newFailures = applySystemModeOOverride(builtFailures, relevant);
+    const generateFFForRow = async (sId: string, row: BreakdownRow) => {
+        const sub = activeProject?.subsystems.find(s => s.id === sId);
+        if (!sub || (!apiKey && aiProvider !== 'copilot')) return;
+        setGeneratingRowId(row.id);
+        const desc = await AIService.generateFFForRow(
+            activeProject!.name, sub.name, sub.func,
+            row.snippet || row.function, row.standard,
+            sub.failures.filter(f => f.desc).map(f => f.desc),
+            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext
+        );
+        if (desc?.trim()) {
+            const newId = generateId();
             setActiveProject(p => p ? ({
                 ...p,
                 subsystems: p.subsystems.map(s => s.id !== sId ? s : {
                     ...s,
-                    failures: [...linkedFailures, ...newFailures],
-                    // Drop legacy exhaustionState — exhaustion is now derived.
-                    exhaustionState: undefined,
+                    failures: [...s.failures, { id: newId, desc: desc.trim(), modes: [], collapsed: false }],
                 }),
             }) : null);
-        } else {
-            addFail(sId);
+            setBreakdownMatches(prev => {
+                if (!prev) return [{ rowId: row.id, failureIds: [newId] }];
+                const hit = prev.find(m => m.rowId === row.id);
+                if (hit) return prev.map(m => m.rowId === row.id ? { ...m, failureIds: [...m.failureIds, newId] } : m);
+                return [...prev, { rowId: row.id, failureIds: [newId] }];
+            });
         }
-        setGenId(null);
+        setGeneratingRowId(null);
     };
+
+    const autoGen = async (sId: string, name: string, specs: string, func: string) => { setGenId(sId); if(activeProject) { const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl); if(res && res.failures) { setActiveProject(p => p ? ({ ...p, subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: [...s.failures, ...res.failures.map((f: any) => ({...f, id: generateId(), modes: f.modes.map((m: any) => ({...m, id: generateId()}))}))] }) }) : null); } } setGenId(null); };
     const genModes = async (sId: string, fId: string, name: string, specs: string, func: string, failDesc: string) => { setModeGenId(fId); if(activeProject) { const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl); if(modes) setActiveProject(p => p ? ({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, ...modes.map(m => ({...m, id: generateId()}))]} : f)} : s)}) : null); } setModeGenId(null); };
-    // Phase 3 — masterGen unified pipeline. For each subsystem, run an isolated pipeline:
-    //   skeleton (slim) → function description → decompose → bounded full generation
-    // Each subsystem's calls are independent (no shared call covering multiple subsystems),
-    // which reduces cross-subsystem hallucination. NO final exhaustion check — when the user
-    // later clicks Auto-Fill on a generated subsystem, exhaustion is detected immediately
-    // because every breakdown row already has a linked FF.
     const masterGen = async () => {
         if (!apiKey && aiProvider !== 'copilot') return alert("API Key required.");
         if (!activeProject?.name) return alert("Enter System Name.");
         setLoadingMaster(true);
 
-        try {
-            // ---- Phase A: skeleton (one slim AI call) ----
-            const skeleton = await AIService.generateSubsystemSkeleton(
-                activeProject.name, activeProject.desc, apiKey, modelName,
-                aiSourceMode, globalFileText, aiProvider, azureEndpoint,
-                systemContext, powerAutomateUrl
-            );
-            if (!skeleton || skeleton.length === 0) {
-                alert("Master generation failed at the skeleton step.");
-                return;
+        // Step 1: Generate subsystem skeletons (name, specs, func, initial failures)
+        const rawSubs = await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
+        if (!rawSubs || !Array.isArray(rawSubs) || rawSubs.length === 0) { alert("Generation failed."); setLoadingMaster(false); return; }
+
+        // Build a rich project context so all downstream steps see the full system description,
+        // not just the name — this is what generateMasterStructure already receives via sysDesc.
+        const projectContext = activeProject.desc
+            ? `${activeProject.name}: ${activeProject.desc.substring(0, 800)}`
+            : activeProject.name;
+
+        const completedSubs: any[] = [];
+        for (const s of rawSubs) {
+            // Step 2: Regenerate func using the same mechanism as the Function field magic wand
+            // Pass projectContext so the function description is aware of the full system config.
+            const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: projectContext, subsystem: s.name, specs: s.specs }, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
+            const enrichedSub = { ...s, func: funcDesc || s.func };
+
+            // Step 3: Derive comprehensive functional failures — pass full projectContext.
+            const expanded = await AIService.generateCompleteSubsystem(enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl);
+            const failures: any[] = expanded?.failures?.length > 0 ? expanded.failures : (enrichedSub.failures || []);
+
+            // Step 4: Derive comprehensive failure modes — pass full projectContext.
+            const fullFailures: any[] = [];
+            for (const f of failures) {
+                const modes = await AIService.generateModesForFailure(f.desc, enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl);
+                fullFailures.push({ ...f, modes: modes?.length > 0 ? modes : (f.modes || []) });
             }
-
-            const projectContext = activeProject.desc
-                ? `${activeProject.name}: ${activeProject.desc.substring(0, 800)}`
-                : activeProject.name;
-
-            // ---- Phase B: per-subsystem isolated pipeline ----
-            const completedSubs: Subsystem[] = [];
-            for (const sk of skeleton) {
-                // S2 — function description (one focused AI call). Pass `brief` as a starting
-                // hint via specs context so the function is aware of the subsystem's role.
-                const funcDesc = await AIService.generate(
-                    "Function", "", apiKey, modelName, aiSourceMode, globalFileText,
-                    { project: projectContext, subsystem: sk.name, specs: sk.specs || sk.brief },
-                    aiProvider, azureEndpoint, systemContext, powerAutomateUrl
-                );
-                const finalFunc = (funcDesc || sk.brief || '').trim();
-
-                // S3 — decompose into breakdown rows.
-                const decomposed = await AIService.decomposeFunction(
-                    finalFunc, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext
-                );
-                const rows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
-
-                // S5 — bounded full generation: one FF per row (with breakdownId), 2-3 modes each.
-                let newFailures: Failure[] = [];
-                if (rows.length > 0) {
-                    const relevant = relevantSystemModes({ name: sk.name, specs: sk.specs, func: finalFunc });
-                    const generated = await AIService.generateCompleteSubsystem(
-                        sk.name, sk.specs, finalFunc, projectContext, apiKey, modelName,
-                        aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext,
-                        checklistText, powerAutomateUrl, /* existingFailures */ [], /* breakdownRows */ rows, /* systemModes */ relevant
-                    );
-                    if (generated && Array.isArray(generated.failures)) {
-                        const rowsById = new Map(rows.map(r => [r.id, r]));
-                        const builtFailures: Failure[] = generated.failures.map((f: any, i: number) => {
-                            const emittedId = f?.sourcePair?.breakdownId;
-                            const row = (emittedId && rowsById.get(emittedId)) || rows[i];
-                            const sourcePair: Failure['sourcePair'] = row ? {
-                                breakdownId: row.id,
-                                function: row.function,
-                                standard: row.standard,
-                                category: row.category,
-                            } : undefined;
-                            return {
-                                id: generateId(),
-                                desc: String(f.desc || row?.canonical_failure || '').trim(),
-                                modes: (f.modes || []).map((m: any) => ({
-                                    id: generateId(),
-                                    mode: m.mode || '',
-                                    effect: m.effect || '',
-                                    cause: m.cause || '',
-                                    mitigation: m.mitigation || '',
-                                    rpn: m.rpn || { s: 5, o: 5, d: 5 },
-                                    ...(m.systemModeId ? { systemModeId: String(m.systemModeId) } : {}),
-                                })),
-                                ...(sourcePair ? { sourcePair } : {}),
-                            };
-                        });
-                        // Apply count → O override deterministically (S/D stay AI-generated).
-                        newFailures = applySystemModeOOverride(builtFailures, relevant);
-                    }
-                }
-
-                completedSubs.push({
-                    id: generateId(),
-                    name: sk.name,
-                    specs: sk.specs,
-                    func: finalFunc,
-                    imageData: '', imageName: '', imageJson: '', showImageJson: false,
-                    failures: newFailures,
-                    functionBreakdown: rows,
-                    funcHashAtBreakdown: simpleHash(finalFunc),
-                });
-            }
-
-            setActiveProject(p => p ? ({ ...p, subsystems: [...p.subsystems, ...completedSubs] }) : null);
-        } finally {
-            setLoadingMaster(false);
+            completedSubs.push({ ...enrichedSub, failures: fullFailures });
         }
+
+        const newSubs = completedSubs.map(s => ({
+            id: generateId(), name: s.name, specs: s.specs, func: s.func,
+            imageData: "", imageName: "", imageJson: "", showImageJson: false,
+            failures: (s.failures || []).map((f: any) => ({
+                id: generateId(), desc: f.desc,
+                modes: (f.modes || []).map((m: any) => ({ id: generateId(), mode: m.mode, effect: m.effect, cause: m.cause, mitigation: m.mitigation, rpn: m.rpn || { s: 5, o: 5, d: 5 } }))
+            }))
+        }));
+        setActiveProject(p => p ? ({ ...p, subsystems: [...p.subsystems, ...newSubs] }) : null);
+        setLoadingMaster(false);
     };
     const injectLib = (item: LibraryItem) => { if(!activeProject) return; if(activeProject.subsystems.length === 0) return alert("Add Subsystem"); let targetSubId = activeSubId || activeProject.subsystems[0].id; const targetIndex = activeProject.subsystems.findIndex(s => s.id === targetSubId); if(targetIndex === -1) return; const nm: Mode = {id: generateId(), mode: item.mode, effect: item.effect || "", cause: item.cause, mitigation: item.task, rpn:{s:5,o:5,d:5}}; const nf: Failure = {id: generateId(), desc: item.fail || `Failure`, modes: [nm]}; const newSubs = [...activeProject.subsystems]; newSubs[targetIndex] = {...newSubs[targetIndex], failures: [...newSubs[targetIndex].failures, nf]}; setActiveProject({...activeProject, subsystems: newSubs}); };
     const getRpnColor = (r: number) => r >= 100 ? "bg-red-100 text-red-800" : r >= 40 ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800";
@@ -1459,29 +1144,7 @@ render();
                                         </div>
                                         {!sub.collapsed && (
                                             <div className="animate-enter">
-                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4">
-                                                    <div className="flex-1 relative">
-                                                        <SmartInput label="Function" value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs}} />
-                                                        <button
-                                                            onClick={(e) => { e.stopPropagation(); setBreakdownModalSubId(sub.id); }}
-                                                            title="View function breakdown — see how the function description is decomposed into [function, expectation, category] rows mapped to your Functional Failures"
-                                                            className="absolute top-[-2px] left-[78px] text-slate-400 hover:text-brand-600 transition"
-                                                        >
-                                                            <Icon name="table" className="w-3.5 h-3.5"/>
-                                                        </button>
-                                                    </div>
-                                                    {isSubExhausted(sub) && (
-                                                        <span className="text-[10px] font-bold uppercase tracking-wide bg-slate-200 text-slate-600 px-2 py-1 rounded self-center">Function fully covered ✓</span>
-                                                    )}
-                                                    <button
-                                                        onClick={(e) => { e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func); }}
-                                                        disabled={isSubExhausted(sub) || genId === sub.id}
-                                                        title={isSubExhausted(sub) ? "All functional standards in the description are already covered. Edit the Function Description or remove a Functional Failure to re-enable." : undefined}
-                                                        className={`h-9 px-3 border rounded text-xs font-bold flex items-center gap-2 transition ${isSubExhausted(sub) ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed" : "bg-white text-brand-600 hover:bg-brand-50 border-brand-200"}`}
-                                                    >
-                                                        {genId===sub.id ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}
-                                                    </button>
-                                                </div>
+                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" labelAddon={<button onClick={(e) => { e.stopPropagation(); setBreakdownSubId(sub.id); }} title="View Function Breakdown" className="text-slate-400 hover:text-brand-600 transition text-[11px] leading-none">⊞</button>} value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2">{genId===sub.id ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full text-left text-sm border-collapse">
                                                         <thead className="bg-slate-50 text-slate-500 text-xs font-bold uppercase"><tr><th className="p-2 border-r w-1/5">Functional Failure</th><th className="p-2 border-r w-1/6">Mode</th><th className="p-2 border-r w-1/6">Effect</th><th className="p-2 border-r w-1/6">Cause</th><th className="p-2 border-r w-1/5">Mitigation</th>{showRPN && <th className="p-2 text-center">RPN</th>}<th className="p-2 text-center">Edit</th></tr></thead>
@@ -1493,28 +1156,8 @@ render();
                                                                             <div className="flex items-start p-2 gap-2 group">
                                                                                 <button onClick={(e)=>{e.stopPropagation(); toggleFail(sub.id, fail.id)}} className="mt-1 text-slate-400"><Icon name={fail.collapsed?"chevronDown":"chevronUp"}/></button>
                                                                                 <div className="flex-1">
-                                                                                    <div className="relative">
-                                                                                        <SmartInput label="Functional Failure" value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, funcDescription: sub.func, existingFailures: sub.failures.filter(f => f.id !== fail.id && f.desc).map(f => f.desc), breakdownRows: sub.functionBreakdown ?? [], filledBreakdownIds: (sub.functionBreakdown ?? []).filter(r => sub.failures.some(f => f.id !== fail.id && f.sourcePair?.breakdownId === r.id)).map(r => r.id)}} />
-                                                                                        {fail.sourcePair && (() => {
-                                                                                            const linkedRow = fail.sourcePair.breakdownId
-                                                                                                ? sub.functionBreakdown?.find(r => r.id === fail.sourcePair!.breakdownId)
-                                                                                                : undefined;
-                                                                                            // Prefer the verbatim snippet from the breakdown row; fall back to function (+ standard).
-                                                                                            const display = linkedRow?.snippet
-                                                                                                || (fail.sourcePair.standard
-                                                                                                    ? `${fail.sourcePair.function} (${fail.sourcePair.standard})`
-                                                                                                    : fail.sourcePair.function);
-                                                                                            return (
-                                                                                                <span className="group/srcpair absolute bottom-1.5 left-1.5 z-10 cursor-help leading-none opacity-40 hover:opacity-100 transition-opacity">
-                                                                                                    <span className="text-slate-600 text-sm select-none">ⓘ</span>
-                                                                                                    <span className="pointer-events-none absolute left-0 bottom-full mb-1 hidden group-hover/srcpair:block z-20 bg-slate-800 text-white text-xs px-2 py-1.5 rounded shadow-lg whitespace-normal max-w-xs opacity-100">
-                                                                                                        <span className="font-semibold">{fail.sourcePair.category}</span>: "{display}"
-                                                                                                    </span>
-                                                                                                </span>
-                                                                                            );
-                                                                                        })()}
-                                                                                    </div>
-                                                                                    <div className="flex gap-4 mt-1 items-center">
+                                                                                    <SmartInput label="Functional Failure" value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} />
+                                                                                    <div className="flex gap-4 mt-1">
                                                                                         <button onClick={(e)=>{e.stopPropagation(); genModes(sub.id, fail.id, sub.name, sub.specs, sub.func, fail.desc)}} disabled={modeGenId === fail.id} className="text-xs text-brand-600 font-bold flex gap-1 items-center hover:underline">{modeGenId === fail.id ? "..." : <span><Icon name="bolt"/> Generate Modes</span>}</button>
                                                                                         <button onClick={(e)=>{e.stopPropagation(); openAttachments('fail', sub, fail)}} className="text-xs text-slate-500 font-bold flex gap-1 items-center hover:text-brand-600"><Icon name="clip" className="w-3 h-3"/> References</button>
                                                                                     </div>
@@ -1526,20 +1169,10 @@ render();
                                                                     {!fail.collapsed && fail.modes.map((mode, mIdx) => (
                                                                         <tr key={mode.id} className="group hover:bg-slate-50">
                                                                             <td className="p-2 border-r bg-slate-50/10 text-right text-xs text-slate-300">M{mIdx+1}</td>
-                                                                            <td className="p-2 border-r relative">
-                                                                                <SmartInput label="Failure Mode" value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, failureDesc: fail.desc, existingModes: fail.modes.filter(m => m.id !== mode.id && m.mode).map(m => m.mode), systemModes: relevantSystemModes({ name: sub.name, specs: sub.specs, func: sub.func })}} />
-                                                                                {mode.systemModeId && (
-                                                                                    <span className="group/sysmode absolute bottom-3 left-3 z-10 cursor-help leading-none opacity-40 hover:opacity-100 transition-opacity">
-                                                                                        <span className="text-indigo-600 text-sm select-none">ⓘ</span>
-                                                                                        <span className="pointer-events-none absolute left-0 bottom-full mb-1 hidden group-hover/sysmode:block z-20 bg-slate-800 text-white text-xs px-2 py-1.5 rounded shadow-lg whitespace-normal max-w-xs opacity-100">
-                                                                                            <span className="font-semibold">Historical mode</span>: "{mode.mode}"{typeof mode.systemModeCount === 'number' ? ` — ${mode.systemModeCount} occurrence${mode.systemModeCount === 1 ? '' : 's'} → O = ${countToOccurrence(mode.systemModeCount)}` : ''}
-                                                                                        </span>
-                                                                                    </span>
-                                                                                )}
-                                                                            </td>
+                                                                            <td className="p-2 border-r"><SmartInput label="Failure Mode" value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
                                                                             <td className="p-2 border-r"><SmartInput label="Failure Effect" value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} isTextArea apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
                                                                             <td className="p-2 border-r"><SmartInput label="Failure Cause" value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
-                                                                            <td className="p-2 border-r"><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, checklistText: checklistText, detectionScore: Number(mode.rpn.d) || 5, rpnTotal: (Number(mode.rpn.s) || 5) * (Number(mode.rpn.o) || 5) * (Number(mode.rpn.d) || 5)}} /></td>
+                                                                            <td className="p-2 border-r"><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, checklistText: checklistText, detectionScore: Number(mode.rpn.d) || 5}} /></td>
                                                                             {showRPN && <td className="p-2 text-center"><div className="flex justify-center gap-0.5 mb-1"><input className="w-5 text-center border text-xs" value={mode.rpn.s} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, s:e.target.value})}/><input className="w-5 text-center border text-xs" value={mode.rpn.o} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, o:e.target.value})}/><input className="w-5 text-center border text-xs" value={mode.rpn.d} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, d:e.target.value})}/></div><div className={`text-xs font-bold rounded py-1 border ${getRpnColor((Number(mode.rpn.s)||1)*(Number(mode.rpn.o)||1)*(Number(mode.rpn.d)||1))}`}>{(Number(mode.rpn.s)||1)*(Number(mode.rpn.o)||1)*(Number(mode.rpn.d)||1)}</div></td>}
                                                                             <td className="p-2 text-center opacity-0 group-hover:opacity-100"><div className="flex flex-col items-center gap-1"><button onClick={(e)=>{e.stopPropagation();deleteMode(sub.id,fail.id,mode.id)}} className="text-red-500 mb-2"><Icon name="trash"/></button><button onClick={(e)=>{e.stopPropagation();aiScoreModeRpn(sub.id,fail.id,mode.id)}} className={`text-blue-500 text-sm ${rpnLoadingId===String(mode.id) ? "animate-pulse scale-110 drop-shadow-[0_0_6px_rgba(59,130,246,0.6)]" : ""}`} title="AI score S/O/D">🤖</button></div></td>
                                                                         </tr>
@@ -1549,12 +1182,7 @@ render();
                                                             ))}
                                                         </tbody>
                                                     </table>
-                                                    <div className="border-t flex items-center justify-center gap-2">
-                                                        <button onClick={(e)=>{e.stopPropagation(); addFail(sub.id)}} className="flex-1 py-2 text-xs font-bold text-slate-400 hover:text-brand-600">+ Add Failure</button>
-                                                        {isSubExhausted(sub) && (
-                                                            <span className="text-[10px] font-bold uppercase tracking-wide bg-slate-200 text-slate-600 px-2 py-1 rounded mr-2">Function fully covered ✓</span>
-                                                        )}
-                                                    </div>
+                                                    <button onClick={(e)=>{e.stopPropagation(); addFail(sub.id)}} className="w-full py-2 text-xs font-bold text-slate-400 hover:text-brand-600 border-t">+ Add Failure</button>
                                                 </div>
                                             </div>
                                         )}
@@ -1603,8 +1231,43 @@ render();
                             </div>
                         ) : (
                             <div className="tree-viewport">
-  <div className="fixed top-20 right-10 z-20 map-export-hide">
+  <div className="fixed top-20 right-10 z-50 map-export-hide">
     <div className="relative flex items-center gap-2">
+
+      {/* Subsystem filter */}
+      <div className="relative">
+        <button
+          onClick={() => setShowSubFilter(s => !s)}
+          className="bg-white border px-2 py-2 rounded shadow text-[11px] font-bold hover:bg-brand-50 flex items-center gap-1"
+          title="Filter subsystems"
+        >
+          Subsystems
+          {mapHiddenSubs.size > 0 && (
+            <span className="bg-brand-500 text-white text-[9px] rounded-full px-1">
+              {activeProject!.subsystems.length - mapHiddenSubs.size}/{activeProject!.subsystems.length}
+            </span>
+          )}
+          <span className="text-slate-400">▼</span>
+        </button>
+        {showSubFilter && (
+          <div className="absolute top-10 left-0 bg-white border rounded shadow-xl z-30 min-w-[180px] py-1">
+            <button
+              onClick={() => setMapHiddenSubs(new Set())}
+              className="w-full text-left px-3 py-1.5 text-[11px] font-bold text-brand-600 hover:bg-brand-50 border-b"
+            >Select All</button>
+            <button
+              onClick={() => setMapHiddenSubs(new Set(activeProject!.subsystems.map(s => s.id)))}
+              className="w-full text-left px-3 py-1.5 text-[11px] font-bold text-slate-500 hover:bg-slate-50 border-b"
+            >Deselect All</button>
+            {activeProject!.subsystems.map(sub => (
+              <label key={sub.id} className="flex items-center gap-2 px-3 py-1.5 text-[11px] hover:bg-slate-50 cursor-pointer">
+                <input type="checkbox" checked={!mapHiddenSubs.has(sub.id)} onChange={() => toggleSubVisibility(sub.id)} />
+                <span className="truncate max-w-[140px]" title={sub.name}>{sub.name}</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Expand all */}
       <button
@@ -1623,6 +1286,21 @@ render();
       >
         Collapse
       </button>
+
+      {/* Zoom controls */}
+      <div className="flex items-center gap-1 bg-white border rounded shadow px-1 py-1">
+        <button
+          onClick={() => setMapZoom(z => +Math.max(0.25, z - 0.1).toFixed(2))}
+          className="w-6 h-6 flex items-center justify-center text-slate-600 hover:bg-slate-100 rounded font-bold text-base leading-none"
+          title="Zoom out"
+        >−</button>
+        <span className="text-[11px] font-bold w-10 text-center select-none">{Math.round(mapZoom * 100)}%</span>
+        <button
+          onClick={() => setMapZoom(z => +Math.min(2, z + 0.1).toFixed(2))}
+          className="w-6 h-6 flex items-center justify-center text-slate-600 hover:bg-slate-100 rounded font-bold text-base leading-none"
+          title="Zoom in"
+        >+</button>
+      </div>
 
       {/* Download */}
       <div className="relative">
@@ -1665,13 +1343,15 @@ render();
 
     </div>
   </div>
+                                <div style={{ zoom: mapZoom }}>
                                 <HybridMapView
-                                    project={activeProject}
+                                    project={filteredProject!}
                                     treeExpanded={treeExpanded}
                                     treeSelected={treeSelected}
                                     onToggle={toggleTree}
                                     onSelect={selectTree}
                                 />
+                                </div>
 
                             </div>
                         )}
@@ -1704,20 +1384,21 @@ render();
                     onClose={() => setShowSystemModes(false)}
                 />
             )}
-
-            {breakdownModalSubId && activeProject && (() => {
-                const sub = activeProject.subsystems.find(s => s.id === breakdownModalSubId);
-                if (!sub) return null;
-                return (
+            {breakdownSubId && (() => {
+                const activeSub = activeProject?.subsystems.find(s => s.id === breakdownSubId);
+                return activeSub ? (
                     <FunctionBreakdownModal
-                        sub={sub}
-                        onClose={() => setBreakdownModalSubId(null)}
-                        onRedecompose={() => redecomposeSub(sub.id)}
-                        onLinkOrphan={(failureId, breakdownId) => linkOrphanFailure(failureId, breakdownId)}
-                        onUnlink={(failureId) => unlinkFailure(failureId)}
-                        isRedecomposing={redecomposingId === sub.id}
+                        sub={activeSub}
+                        onClose={() => setBreakdownSubId(null)}
+                        onRedecompose={() => redecomposeFunction(breakdownSubId)}
+                        isRedecomposing={redecomposingId === breakdownSubId}
+                        onMatch={() => runBreakdownMatch(breakdownSubId)}
+                        isMatching={matchingId === breakdownSubId}
+                        matchResults={breakdownMatches}
+                        onGenerateFF={(row) => generateFFForRow(breakdownSubId, row)}
+                        generatingRowId={generatingRowId}
                     />
-                );
+                ) : null;
             })()}
         </div>
     );

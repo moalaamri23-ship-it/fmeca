@@ -11,23 +11,6 @@ export interface Mode {
   cause: string;
   mitigation: string;
   rpn: RPN;
-  systemModeId?: string;       // matched System Mode key (slug of mode name)
-  systemModeCount?: number;    // historical count at time of generation (drives O score)
-}
-
-export type FailureCategory =
-  | 'Total Failure'
-  | 'Partial/Degraded Failure'
-  | 'Erratic Failure'
-  | 'Secondary/Conditional Failure';
-
-export interface BreakdownRow {
-  id: string;                  // stable id, referenced by Failure.sourcePair.breakdownId
-  function: string;            // verb + object
-  standard: string;            // value/expectation
-  category: FailureCategory;
-  snippet: string;             // verbatim slice from the original function description
-  canonical_failure: string;   // pre-computed FF text — wand returns this verbatim
 }
 
 export interface Failure {
@@ -35,12 +18,18 @@ export interface Failure {
   desc: string;
   modes: Mode[];
   collapsed?: boolean;
-  sourcePair?: {
-    breakdownId?: string;            // hard link to Subsystem.functionBreakdown row (preferred)
-    function: string;
-    standard: string;
-    category: FailureCategory;
-  };
+}
+
+export interface BreakdownRow {
+  id: string;
+  function: string;  // verb + object
+  standard: string;  // value/expectation
+  snippet: string;   // verbatim slice from the function description
+}
+
+export interface BreakdownMatch {
+  rowId: string;
+  failureIds: string[];
 }
 
 export interface Subsystem {
@@ -54,14 +43,8 @@ export interface Subsystem {
   showImageJson: boolean;
   failures: Failure[];
   collapsed?: boolean;
-  exhaustionState?: {
-    // Legacy: kept readable for backward compat. New code derives exhaustion from functionBreakdown.
-    funcHash: string;
-    failureCount: number;
-    isExhausted: boolean;
-  };
-  functionBreakdown?: BreakdownRow[];  // canonical decomposition; null until first run
-  funcHashAtBreakdown?: string;        // hash of sub.func when breakdown was last generated
+  functionBreakdown?: BreakdownRow[];
+  funcHashAtBreakdown?: string;
 }
 
 export interface Project {
@@ -103,17 +86,4 @@ export interface ContextData {
   specs?: string;
   checklistText?: string;
   detectionScore?: number;
-  funcDescription?: string;       // subsystem function description (for FF wand)
-  existingFailures?: string[];    // other FF descriptions already defined (for uniqueness)
-  failureDesc?: string;           // parent functional failure (for FM wand context)
-  existingModes?: string[];       // other FM names already defined (for uniqueness)
-  // Persistent-breakdown wiring (Phase 1) — supersedes the legacy subsystemExhausted flag.
-  // The wand consumes these to compute exhaustion deterministically without an AI call:
-  //   exhausted iff breakdownRows is non-empty AND every row's id is in filledBreakdownIds.
-  breakdownRows?: BreakdownRow[];      // current subsystem's full breakdown
-  filledBreakdownIds?: string[];       // breakdownId values that already have a linked FF
-  // System Modes wiring (Phase 4):
-  systemModes?: Array<{ mode: string; count: number }>;  // relevant historical modes for FM wand preference
-  // RPN-aware mitigation (Phase 5):
-  rpnTotal?: number;              // S * O * D for the parent mode (drives mitigation count)
 }
