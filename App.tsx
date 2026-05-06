@@ -932,51 +932,103 @@ render();
         setGenId(null);
     };
     const genModes = async (sId: string, fId: string, name: string, specs: string, func: string, failDesc: string) => { setModeGenId(fId); if(activeProject) { const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl); if(modes) setActiveProject(p => p ? ({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, ...modes.map(m => ({...m, id: generateId()}))]} : f)} : s)}) : null); } setModeGenId(null); };
+    // Phase 3 — masterGen unified pipeline. For each subsystem, run an isolated pipeline:
+    //   skeleton (slim) → function description → decompose → bounded full generation
+    // Each subsystem's calls are independent (no shared call covering multiple subsystems),
+    // which reduces cross-subsystem hallucination. NO final exhaustion check — when the user
+    // later clicks Auto-Fill on a generated subsystem, exhaustion is detected immediately
+    // because every breakdown row already has a linked FF.
     const masterGen = async () => {
         if (!apiKey && aiProvider !== 'copilot') return alert("API Key required.");
         if (!activeProject?.name) return alert("Enter System Name.");
         setLoadingMaster(true);
 
-        // Step 1: Generate subsystem skeletons (name, specs, func, initial failures)
-        const rawSubs = await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
-        if (!rawSubs || !Array.isArray(rawSubs) || rawSubs.length === 0) { alert("Generation failed."); setLoadingMaster(false); return; }
-
-        // Build a rich project context so all downstream steps see the full system description,
-        // not just the name — this is what generateMasterStructure already receives via sysDesc.
-        const projectContext = activeProject.desc
-            ? `${activeProject.name}: ${activeProject.desc.substring(0, 800)}`
-            : activeProject.name;
-
-        const completedSubs: any[] = [];
-        for (const s of rawSubs) {
-            // Step 2: Regenerate func using the same mechanism as the Function field magic wand
-            // Pass projectContext so the function description is aware of the full system config.
-            const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: projectContext, subsystem: s.name, specs: s.specs }, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
-            const enrichedSub = { ...s, func: funcDesc || s.func };
-
-            // Step 3: Derive comprehensive functional failures — pass full projectContext.
-            const expanded = await AIService.generateCompleteSubsystem(enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl);
-            const failures: any[] = expanded?.failures?.length > 0 ? expanded.failures : (enrichedSub.failures || []);
-
-            // Step 4: Derive comprehensive failure modes — pass full projectContext.
-            const fullFailures: any[] = [];
-            for (const f of failures) {
-                const modes = await AIService.generateModesForFailure(f.desc, enrichedSub.name, enrichedSub.specs, enrichedSub.func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl);
-                fullFailures.push({ ...f, modes: modes?.length > 0 ? modes : (f.modes || []) });
+        try {
+            // ---- Phase A: skeleton (one slim AI call) ----
+            const skeleton = await AIService.generateSubsystemSkeleton(
+                activeProject.name, activeProject.desc, apiKey, modelName,
+                aiSourceMode, globalFileText, aiProvider, azureEndpoint,
+                systemContext, powerAutomateUrl
+            );
+            if (!skeleton || skeleton.length === 0) {
+                alert("Master generation failed at the skeleton step.");
+                return;
             }
-            completedSubs.push({ ...enrichedSub, failures: fullFailures });
-        }
 
-        const newSubs = completedSubs.map(s => ({
-            id: generateId(), name: s.name, specs: s.specs, func: s.func,
-            imageData: "", imageName: "", imageJson: "", showImageJson: false,
-            failures: (s.failures || []).map((f: any) => ({
-                id: generateId(), desc: f.desc,
-                modes: (f.modes || []).map((m: any) => ({ id: generateId(), mode: m.mode, effect: m.effect, cause: m.cause, mitigation: m.mitigation, rpn: m.rpn || { s: 5, o: 5, d: 5 } }))
-            }))
-        }));
-        setActiveProject(p => p ? ({ ...p, subsystems: [...p.subsystems, ...newSubs] }) : null);
-        setLoadingMaster(false);
+            const projectContext = activeProject.desc
+                ? `${activeProject.name}: ${activeProject.desc.substring(0, 800)}`
+                : activeProject.name;
+
+            // ---- Phase B: per-subsystem isolated pipeline ----
+            const completedSubs: Subsystem[] = [];
+            for (const sk of skeleton) {
+                // S2 — function description (one focused AI call). Pass `brief` as a starting
+                // hint via specs context so the function is aware of the subsystem's role.
+                const funcDesc = await AIService.generate(
+                    "Function", "", apiKey, modelName, aiSourceMode, globalFileText,
+                    { project: projectContext, subsystem: sk.name, specs: sk.specs || sk.brief },
+                    aiProvider, azureEndpoint, systemContext, powerAutomateUrl
+                );
+                const finalFunc = (funcDesc || sk.brief || '').trim();
+
+                // S3 — decompose into breakdown rows.
+                const decomposed = await AIService.decomposeFunction(
+                    finalFunc, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext
+                );
+                const rows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
+
+                // S5 — bounded full generation: one FF per row (with breakdownId), 2-3 modes each.
+                let newFailures: Failure[] = [];
+                if (rows.length > 0) {
+                    const generated = await AIService.generateCompleteSubsystem(
+                        sk.name, sk.specs, finalFunc, projectContext, apiKey, modelName,
+                        aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext,
+                        checklistText, powerAutomateUrl, /* existingFailures */ [], /* breakdownRows */ rows
+                    );
+                    if (generated && Array.isArray(generated.failures)) {
+                        const rowsById = new Map(rows.map(r => [r.id, r]));
+                        newFailures = generated.failures.map((f: any, i: number) => {
+                            const emittedId = f?.sourcePair?.breakdownId;
+                            const row = (emittedId && rowsById.get(emittedId)) || rows[i];
+                            const sourcePair: Failure['sourcePair'] = row ? {
+                                breakdownId: row.id,
+                                function: row.function,
+                                standard: row.standard,
+                                category: row.category,
+                            } : undefined;
+                            return {
+                                id: generateId(),
+                                desc: String(f.desc || row?.canonical_failure || '').trim(),
+                                modes: (f.modes || []).map((m: any) => ({
+                                    id: generateId(),
+                                    mode: m.mode || '',
+                                    effect: m.effect || '',
+                                    cause: m.cause || '',
+                                    mitigation: m.mitigation || '',
+                                    rpn: m.rpn || { s: 5, o: 5, d: 5 },
+                                })),
+                                ...(sourcePair ? { sourcePair } : {}),
+                            };
+                        });
+                    }
+                }
+
+                completedSubs.push({
+                    id: generateId(),
+                    name: sk.name,
+                    specs: sk.specs,
+                    func: finalFunc,
+                    imageData: '', imageName: '', imageJson: '', showImageJson: false,
+                    failures: newFailures,
+                    functionBreakdown: rows,
+                    funcHashAtBreakdown: simpleHash(finalFunc),
+                });
+            }
+
+            setActiveProject(p => p ? ({ ...p, subsystems: [...p.subsystems, ...completedSubs] }) : null);
+        } finally {
+            setLoadingMaster(false);
+        }
     };
     const injectLib = (item: LibraryItem) => { if(!activeProject) return; if(activeProject.subsystems.length === 0) return alert("Add Subsystem"); let targetSubId = activeSubId || activeProject.subsystems[0].id; const targetIndex = activeProject.subsystems.findIndex(s => s.id === targetSubId); if(targetIndex === -1) return; const nm: Mode = {id: generateId(), mode: item.mode, effect: item.effect || "", cause: item.cause, mitigation: item.task, rpn:{s:5,o:5,d:5}}; const nf: Failure = {id: generateId(), desc: item.fail || `Failure`, modes: [nm]}; const newSubs = [...activeProject.subsystems]; newSubs[targetIndex] = {...newSubs[targetIndex], failures: [...newSubs[targetIndex].failures, nf]}; setActiveProject({...activeProject, subsystems: newSubs}); };
     const getRpnColor = (r: number) => r >= 100 ? "bg-red-100 text-red-800" : r >= 40 ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800";

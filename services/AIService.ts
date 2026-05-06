@@ -542,6 +542,64 @@ Requirements:
         } catch(e) { return []; }
     },
 
+    /**
+     * Phase 3 — slim front-end of masterGen. Returns ONLY [{name, specs, brief}] per subsystem
+     * so each subsystem can then run its own isolated pipeline (function → decompose → bounded
+     * generation). Lessens cross-subsystem hallucination compared to the legacy
+     * generateMasterStructure that asks for the full FF/FM hierarchy in one giant call.
+     */
+    async generateSubsystemSkeleton(
+        sysName: string, sysDesc: string,
+        key: string, modelName: string,
+        mode: string = 'ai', refText: string = '',
+        aiProvider: string = '', azureEndpoint: string = '',
+        systemContext: string = '', powerAutomateUrl: string = ''
+    ): Promise<Array<{ name: string; specs: string; brief: string }>> {
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') {
+            await new Promise(r => setTimeout(r, 1500));
+            return [];
+        }
+        const corePrompt = `Act as a Senior Reliability Engineer. Analyze System "${sysName}" (${sysDesc || 'no description provided'}).
+
+Task: Break the system into 3-6 critical SUBSYSTEMS. For each subsystem produce:
+  • name  — short subsystem name (e.g. "Drive Motor", "Cooling System").
+  • specs — comma-separated technical specs in the format "Key: Value Unit" (e.g. "Power: 110 kW, Speed: 2960 rpm").
+  • brief — one sentence stating the subsystem's role in the system (used downstream to build the full Function description).
+
+Do NOT generate Functions, Functional Failures, Failure Modes, or Mitigations here — those are produced in later steps to keep this call focused.
+
+Return strictly valid JSON:
+{ "subsystems": [ { "name": "string", "specs": "string (Key: Value Unit, ...)", "brief": "string (one sentence)" } ] }`;
+
+        const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
+
+        try {
+            const res = await this.chat({
+                feature: 'subsystem-skeleton',
+                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
+                model: modelName,
+                messages: [{ role: 'user', content }],
+                mode: mode as 'ai' | 'file' | 'hybrid',
+                refText,
+                apiKey: key,
+                responseFormat: 'json'
+            });
+            const parsed = this.extractJSON(res);
+            if (!parsed?.subsystems || !Array.isArray(parsed.subsystems)) return [];
+            return parsed.subsystems
+                .map((s: any) => ({
+                    name: String(s?.name ?? '').trim(),
+                    specs: String(s?.specs ?? '').trim(),
+                    brief: String(s?.brief ?? '').trim(),
+                }))
+                .filter((s: any) => s.name);
+        } catch {
+            return [];
+        }
+    },
+
     async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = [], breakdownRows: BreakdownRow[] = []): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
