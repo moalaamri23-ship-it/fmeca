@@ -59,6 +59,15 @@ const FAILURE_CATEGORIES: FailureCategory[] = [
     'Secondary/Conditional Failure',
 ];
 
+// Phase 5 — Mitigation count scales with the mode's RPN total (S × O × D, range 1-1000).
+// Higher RPN warrants layered defenses; low RPN doesn't need busywork.
+export const mitigationCountForRpn = (rpn: number): string => {
+    if (rpn >= 200) return '4-6';
+    if (rpn >= 100) return '3-4';
+    if (rpn >= 50)  return '2-3';
+    return '1-2';
+};
+
 const normalizeCategory = (raw: any): FailureCategory => {
     const s = String(raw ?? '').toLowerCase();
     if (s.includes('partial') || s.includes('degrad')) return 'Partial/Degraded Failure';
@@ -413,7 +422,10 @@ Requirements:
         if (lowerLabel.includes("mitigation")) {
             const d = (contextData.detectionScore as number) ?? 5;
             const checklistContent = (contextData.checklistText as string) ?? '';
-            const count = d >= 7 ? '4-6' : d >= 4 ? '3-4' : '2-3';
+            // Phase 5 — count scales with the FULL RPN total (S × O × D), not just D.
+            // Falls back to a D-derived estimate when only D is available (legacy callers).
+            const rpnTotal = (contextData.rpnTotal as number) ?? (d * 25);
+            const count = mitigationCountForRpn(rpnTotal);
             const detectionNote = d >= 7
                 ? `Detection score is HIGH (D=${d}/10). Prioritize adding monitoring instruments and detection barriers to reduce this score.`
                 : d <= 3
@@ -633,7 +645,7 @@ Return strictly valid JSON:
         const existingBlock = existingFailures.length > 0
             ? `\nExisting Functional Failures already defined (DO NOT repeat or closely resemble — generate only NEW ones not yet covered):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n`
             : '';
-        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
+        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.\n\nMitigation COUNT (per mode) scales with that mode's RPN total = S × O × D:\n  • RPN ≥ 200 → 4-6 actions\n  • RPN 100-199 → 3-4 actions\n  • RPN 50-99 → 2-3 actions\n  • RPN < 50 → 1-2 actions\nCompute each mode's RPN from the S/O/D you assign, then size its mitigation list to match.`;
 
         // Phase 4 — historical modes block (System Modes). When the AI generates a Failure Mode
         // that semantically matches one of the listed historical modes, it MUST emit that mode's
@@ -697,7 +709,7 @@ Return strictly valid JSON:
         if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Effect", cause: "Cause", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:6,o:4,d:3} }]; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
             ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
-        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
+        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.\n\nMitigation COUNT (per mode) scales with that mode's RPN total = S × O × D:\n  • RPN ≥ 200 → 4-6 actions\n  • RPN 100-199 → 3-4 actions\n  • RPN 50-99 → 2-3 actions\n  • RPN < 50 → 1-2 actions\nCompute each mode's RPN from the S/O/D you assign, then size its mitigation list to match.`;
         const corePrompt = `${checklistBlock}Context: System "${project}", Subsystem "${subName}", Specs "${subSpecs}". Function: "${subFunc}". Functional Failure: "${failDesc}".
         Task: Generate 2-3 specific Failure Modes that result in this Functional Failure.
         For each mode, determine Effect, Root Cause, and Mitigation Task.
