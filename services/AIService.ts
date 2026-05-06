@@ -348,8 +348,32 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
         if (lowerLabel.includes("failure mode")) {
             const failDesc = (contextData.failureDesc as string) ?? '';
             const existing = (contextData.existingModes as string[]) ?? [];
+            const sysModes = (contextData.systemModes as Array<{ mode: string; count: number }> | undefined) ?? [];
+
+            // Phase 4 — wand on a blank FM cell prefers historical System Modes when relevance is
+            // strong. Returns the verbatim mode name (no AI call). App.tsx's updateMode auto-links
+            // the systemModeId/count and overwrites O on next render.
+            if (!currentText && sysModes.length > 0) {
+                const haystack = `${failDesc} ${(contextData.subsystem as string) || ''}`.toLowerCase();
+                const existingNorm = new Set(existing.map(e => e.toLowerCase().trim()));
+                const scored = sysModes
+                    .filter(m => !existingNorm.has(m.mode.toLowerCase().trim())) // skip already-used
+                    .map(m => {
+                        const words = m.mode.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+                        const overlap = words.filter(w => haystack.includes(w)).length;
+                        return { mode: m, overlap };
+                    })
+                    .sort((a, b) => b.overlap - a.overlap || b.mode.count - a.mode.count);
+                if (scored.length > 0 && scored[0].overlap > 0) {
+                    return scored[0].mode.mode;
+                }
+            }
+
             const existingBlock = existing.length > 0
                 ? `Existing Failure Modes already defined (DO NOT repeat or closely resemble):\n${existing.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n`
+                : '';
+            const sysModesBlock = (!currentText && sysModes.length > 0)
+                ? `Historical Failure Modes (operational data — prefer matching one of these if it fits):\n${sysModes.slice(0, 8).map((m, i) => `${i + 1}. ${m.mode} — ${m.count} occurrences`).join('\n')}\n\n`
                 : '';
             const failBlock = failDesc?.trim() ? `Functional Failure: "${failDesc}"\n` : '';
             let fmPrompt: string;
@@ -363,7 +387,7 @@ Requirements:
 3. Return ONLY the Failure Mode — one concise phrase, no prefix, no explanation.`;
             } else {
                 fmPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".
-${failBlock}${existingBlock}Task: Generate ONE new Failure Mode for this Functional Failure.
+${failBlock}${existingBlock}${sysModesBlock}Task: Generate ONE new Failure Mode for this Functional Failure.
 Requirements:
 1. Describe the physical way the failure occurs (e.g., "Bearing wear", "Seal leakage", "Impeller erosion", "Shaft misalignment").
 2. Be specific and different from any existing modes listed above.
@@ -600,7 +624,7 @@ Return strictly valid JSON:
         }
     },
 
-    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = [], breakdownRows: BreakdownRow[] = []): Promise<any> {
+    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = [], breakdownRows: BreakdownRow[] = [], relevantSystemModes: Array<{ mode: string; count: number }> = []): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
@@ -610,6 +634,15 @@ Return strictly valid JSON:
             ? `\nExisting Functional Failures already defined (DO NOT repeat or closely resemble — generate only NEW ones not yet covered):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n`
             : '';
         const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
+
+        // Phase 4 — historical modes block (System Modes). When the AI generates a Failure Mode
+        // that semantically matches one of the listed historical modes, it MUST emit that mode's
+        // name verbatim and tag the output with systemModeId so the client can attach the
+        // historical count and overwrite the Occurrence (O) score deterministically.
+        const slugForPrompt = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        const systemModesBlock = relevantSystemModes.length > 0
+            ? `\nHISTORICAL FAILURE MODES (operational data — match these FIRST before inventing new modes):\n${relevantSystemModes.map((m, i) => `${i + 1}. "${m.mode}" — ${m.count} occurrences (systemModeId: "${slugForPrompt(m.mode)}")`).join('\n')}\n\nMATCHING RULE: For each Failure Mode you generate, FIRST check whether one of the listed historical modes describes the SAME physical failure mechanism (same component, same failure type). If yes, use the listed mode name VERBATIM as the "mode" field AND set "systemModeId" to its slug shown above. Only invent a new mode (with no systemModeId) when no listed mode applies. Do NOT force a match — leave systemModeId omitted when there is no genuine semantic overlap.\n`
+            : '';
 
         const bounded = breakdownRows.length > 0;
 
@@ -627,11 +660,15 @@ Return strictly valid JSON:
         2. Derive 1-2 NEW Functional Failures from the Function (negation of expectations) that are NOT already covered by any existing failure above.
         3. For each new failure, generate 2-3 Failure Modes, Effects, Causes, and Mitigations.`;
 
-        const schemaBlock = bounded
-            ? `Return JSON object: { "failures": [ { "desc": "string", "sourcePair": { "breakdownId": "string", "function": "string", "standard": "string", "category": "Total Failure" | "Partial/Degraded Failure" | "Erratic Failure" | "Secondary/Conditional Failure" }, "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} }, ... at least 2 entries ] } ] }`
-            : `Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} }, ... at least 2 entries ] } ] }`;
+        const modeFields = relevantSystemModes.length > 0
+            ? `{ "mode": "string", "systemModeId": "<slug from list above, OR omit if no match>", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} }`
+            : `{ "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} }`;
 
-        const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".${existingBlock}${breakdownBlock}
+        const schemaBlock = bounded
+            ? `Return JSON object: { "failures": [ { "desc": "string", "sourcePair": { "breakdownId": "string", "function": "string", "standard": "string", "category": "Total Failure" | "Partial/Degraded Failure" | "Erratic Failure" | "Secondary/Conditional Failure" }, "modes": [ ${modeFields}, ... at least 2 entries ] } ] }`
+            : `Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ ${modeFields}, ... at least 2 entries ] } ] }`;
+
+        const corePrompt = `${checklistBlock}${systemModesBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".${existingBlock}${breakdownBlock}
         ${taskBlock}
         ${schemaBlock}${mitigationInstruction}`;
 

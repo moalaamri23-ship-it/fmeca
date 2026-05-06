@@ -217,6 +217,59 @@ const collapseAllTree = () => {
     // Derived: non-empty only when data is present AND enabled
     const systemContext = (systemContextEnabled && systemModes.length > 0) ? buildSystemContext(systemType, systemModes) : '';
 
+    // ---- Phase 4: System Modes helpers ----
+
+    // Slug a System Mode name into a stable id used to match AI-emitted systemModeId back to count.
+    const slugMode = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+    // Filter+rank System Modes for relevance to a subsystem context (name + specs + func).
+    // Word-overlap scoring (RAGService.findBestSubsystem pattern). Returns at most 12 entries.
+    const relevantSystemModes = (ctx: { name?: string; specs?: string; func?: string }): SystemMode[] => {
+        if (!systemContextEnabled || systemModes.length === 0) return [];
+        const haystack = `${ctx.name || ''} ${ctx.specs || ''} ${ctx.func || ''}`.toLowerCase();
+        if (!haystack.trim()) return systemModes.slice(0, 12);
+        const scored = systemModes.map(m => {
+            const mWords = m.mode.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+            const overlap = mWords.filter(w => haystack.includes(w)).length;
+            return { mode: m, score: overlap, count: m.count };
+        });
+        const filtered = scored.filter(x => x.score > 0 || x.count >= 5);
+        // If filtering left nothing, fall back to top-by-count (still useful as historical signal).
+        const pool = filtered.length > 0 ? filtered : scored;
+        return pool.sort((a, b) => b.score - a.score || b.count - a.count)
+                   .slice(0, 12)
+                   .map(x => x.mode);
+    };
+
+    // Map historical occurrence count → Occurrence (O) score on the 1-10 RPN scale.
+    const countToOccurrence = (count: number): number => {
+        if (count >= 10) return 9;
+        if (count >= 5) return 7;
+        if (count >= 2) return 5;
+        if (count >= 1) return 3;
+        return 1;
+    };
+
+    // After AI generation, walk every Mode that emitted a systemModeId and overwrite its O score
+    // from the historical count. S and D stay AI-generated. Stamps systemModeCount for traceability.
+    const applySystemModeOOverride = (failures: Failure[], modes: SystemMode[]): Failure[] => {
+        if (modes.length === 0) return failures;
+        const bySlug = new Map(modes.map(m => [slugMode(m.mode), m]));
+        return failures.map(f => ({
+            ...f,
+            modes: f.modes.map(m => {
+                if (!m.systemModeId) return m;
+                const sm = bySlug.get(m.systemModeId);
+                if (!sm) return m;
+                return {
+                    ...m,
+                    systemModeCount: sm.count,
+                    rpn: { ...m.rpn, o: countToOccurrence(sm.count) },
+                };
+            }),
+        }));
+    };
+
 const tryIso=(x:any)=>{ try{ if(!x) return null; const d=new Date(x); return Number.isNaN(d.getTime())?null:d.toISOString(); }catch(e){ return null; } };
 const normalizeProjectDates=(sp:any)=>{ const now=nowIso(); const createdAt=sp.createdAt||sp.updatedAt||tryIso(sp.created)||tryIso(sp.updated)||now; const updatedAt=sp.updatedAt||tryIso(sp.updated)||createdAt; return { ...sp, createdAt, updatedAt }; };
 
@@ -727,7 +780,47 @@ render();
     const deleteFail = (sId: string, fId: string) => {if (!activeProject) return; ask("Delete Failure?", () => {setActiveProject(p => p? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? { ...s, failures: s.failures.filter(f => f.id !== fId) } : s )}) : p ); }); };
     const toggleFail = (sId: string, fId: string) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: !f.collapsed} : f)} : s)}) : null); };
     const addMode = (sId: string, fId: string, data?: Mode) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, data || {id: generateId(), mode:"", effect:"", cause:"", mitigation:"", rpn:{s:5,o:5,d:5}}]} : f)} : s)}) : null); };
-    const updateMode = (sId: string, fId: string, mId: string, k: keyof Mode, v: any) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, modes: f.modes.map(m => m.id === mId ? {...m, [k]: v} : m)} : f)} : s)}) : null); };
+    const updateMode = (sId: string, fId: string, mId: string, k: keyof Mode, v: any) => {
+        if (!activeProject) return;
+        setActiveProject(p => p ? touchProject({
+            ...p,
+            subsystems: p.subsystems.map(s => {
+                if (s.id !== sId) return s;
+                // Phase 4 — when the FM 'mode' field is updated, try to auto-link to a System Mode
+                // by exact-name match. Sets systemModeId + systemModeCount and overwrites O.
+                let matchedSysMode: SystemMode | undefined;
+                if (k === 'mode' && typeof v === 'string' && v.trim()) {
+                    const relevant = relevantSystemModes({ name: s.name, specs: s.specs, func: s.func });
+                    matchedSysMode = relevant.find(m => m.mode.trim().toLowerCase() === v.trim().toLowerCase());
+                }
+                return {
+                    ...s,
+                    failures: s.failures.map(f => {
+                        if (f.id !== fId) return f;
+                        return {
+                            ...f,
+                            modes: f.modes.map(m => {
+                                if (m.id !== mId) return m;
+                                const next: Mode = { ...m, [k]: v };
+                                if (k === 'mode') {
+                                    if (matchedSysMode) {
+                                        next.systemModeId = slugMode(matchedSysMode.mode);
+                                        next.systemModeCount = matchedSysMode.count;
+                                        next.rpn = { ...next.rpn, o: countToOccurrence(matchedSysMode.count) };
+                                    } else if ((!v || !String(v).trim()) && m.systemModeId) {
+                                        // Clearing the FM text drops the historical link.
+                                        next.systemModeId = undefined;
+                                        next.systemModeCount = undefined;
+                                    }
+                                }
+                                return next;
+                            }),
+                        };
+                    }),
+                };
+            }),
+        }) : null);
+    };
     const deleteMode = (sId: string, fId: string, mId: string) => {if (!activeProject) return; ask("Delete Mode?", () => {setActiveProject(p => p? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId? {...s, failures: s.failures.map(f => f.id === fId ? { ...f, modes: f.modes.filter(m => m.id !== mId) } : f ) }: s )}) : p ); }); };
     // const handleDragOver = (e: React.DragEvent) => e.preventDefault();
     const handleDrop=(e:React.DragEvent,dropIndex:number)=>{ e.preventDefault(); setDragId(null); setDragAllowed(null); };
@@ -891,17 +984,18 @@ render();
 
         // ---- Step 4: bounded generation for unfilled rows only ----
         const existingFailures = linkedFailures.filter(f => f.desc).map(f => f.desc);
+        const relevant = relevantSystemModes({ name, specs, func });
         const res = await AIService.generateCompleteSubsystem(
             name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode,
             globalFileText, aiProvider, azureEndpoint, systemContext, checklistText,
-            powerAutomateUrl, existingFailures, unfilled
+            powerAutomateUrl, existingFailures, unfilled, relevant
         );
 
         if (res && res.failures && res.failures.length > 0) {
             // Append, preferring the AI-emitted breakdownId then falling back to positional mapping
             // against unfilled[i]. Tag every new failure with the row's source metadata.
             const rowsById = new Map(rows.map(r => [r.id, r]));
-            const newFailures: Failure[] = res.failures.map((f: any, i: number) => {
+            const builtFailures: Failure[] = res.failures.map((f: any, i: number) => {
                 const emittedId = f?.sourcePair?.breakdownId;
                 const row = (emittedId && rowsById.get(emittedId)) || unfilled[i];
                 const sourcePair: Failure['sourcePair'] = row ? {
@@ -913,10 +1007,20 @@ render();
                 return {
                     id: generateId(),
                     desc: String(f.desc || row?.canonical_failure || '').trim(),
-                    modes: (f.modes || []).map((m: any) => ({ ...m, id: generateId() })),
+                    modes: (f.modes || []).map((m: any) => ({
+                        id: generateId(),
+                        mode: m.mode || '',
+                        effect: m.effect || '',
+                        cause: m.cause || '',
+                        mitigation: m.mitigation || '',
+                        rpn: m.rpn || { s: 5, o: 5, d: 5 },
+                        ...(m.systemModeId ? { systemModeId: String(m.systemModeId) } : {}),
+                    })),
                     ...(sourcePair ? { sourcePair } : {}),
                 };
             });
+            // Phase 4 — overwrite Occurrence (O) on FMs that matched a System Mode
+            const newFailures = applySystemModeOOverride(builtFailures, relevant);
             setActiveProject(p => p ? ({
                 ...p,
                 subsystems: p.subsystems.map(s => s.id !== sId ? s : {
@@ -980,14 +1084,15 @@ render();
                 // S5 — bounded full generation: one FF per row (with breakdownId), 2-3 modes each.
                 let newFailures: Failure[] = [];
                 if (rows.length > 0) {
+                    const relevant = relevantSystemModes({ name: sk.name, specs: sk.specs, func: finalFunc });
                     const generated = await AIService.generateCompleteSubsystem(
                         sk.name, sk.specs, finalFunc, projectContext, apiKey, modelName,
                         aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext,
-                        checklistText, powerAutomateUrl, /* existingFailures */ [], /* breakdownRows */ rows
+                        checklistText, powerAutomateUrl, /* existingFailures */ [], /* breakdownRows */ rows, /* systemModes */ relevant
                     );
                     if (generated && Array.isArray(generated.failures)) {
                         const rowsById = new Map(rows.map(r => [r.id, r]));
-                        newFailures = generated.failures.map((f: any, i: number) => {
+                        const builtFailures: Failure[] = generated.failures.map((f: any, i: number) => {
                             const emittedId = f?.sourcePair?.breakdownId;
                             const row = (emittedId && rowsById.get(emittedId)) || rows[i];
                             const sourcePair: Failure['sourcePair'] = row ? {
@@ -1006,10 +1111,13 @@ render();
                                     cause: m.cause || '',
                                     mitigation: m.mitigation || '',
                                     rpn: m.rpn || { s: 5, o: 5, d: 5 },
+                                    ...(m.systemModeId ? { systemModeId: String(m.systemModeId) } : {}),
                                 })),
                                 ...(sourcePair ? { sourcePair } : {}),
                             };
                         });
+                        // Apply count → O override deterministically (S/D stay AI-generated).
+                        newFailures = applySystemModeOOverride(builtFailures, relevant);
                     }
                 }
 
@@ -1418,7 +1526,17 @@ render();
                                                                     {!fail.collapsed && fail.modes.map((mode, mIdx) => (
                                                                         <tr key={mode.id} className="group hover:bg-slate-50">
                                                                             <td className="p-2 border-r bg-slate-50/10 text-right text-xs text-slate-300">M{mIdx+1}</td>
-                                                                            <td className="p-2 border-r"><SmartInput label="Failure Mode" value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, failureDesc: fail.desc, existingModes: fail.modes.filter(m => m.id !== mode.id && m.mode).map(m => m.mode)}} /></td>
+                                                                            <td className="p-2 border-r relative">
+                                                                                <SmartInput label="Failure Mode" value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, failureDesc: fail.desc, existingModes: fail.modes.filter(m => m.id !== mode.id && m.mode).map(m => m.mode), systemModes: relevantSystemModes({ name: sub.name, specs: sub.specs, func: sub.func })}} />
+                                                                                {mode.systemModeId && (
+                                                                                    <span className="group/sysmode absolute bottom-3 left-3 z-10 cursor-help leading-none opacity-40 hover:opacity-100 transition-opacity">
+                                                                                        <span className="text-indigo-600 text-sm select-none">ⓘ</span>
+                                                                                        <span className="pointer-events-none absolute left-0 bottom-full mb-1 hidden group-hover/sysmode:block z-20 bg-slate-800 text-white text-xs px-2 py-1.5 rounded shadow-lg whitespace-normal max-w-xs opacity-100">
+                                                                                            <span className="font-semibold">Historical mode</span>: "{mode.mode}"{typeof mode.systemModeCount === 'number' ? ` — ${mode.systemModeCount} occurrence${mode.systemModeCount === 1 ? '' : 's'} → O = ${countToOccurrence(mode.systemModeCount)}` : ''}
+                                                                                        </span>
+                                                                                    </span>
+                                                                                )}
+                                                                            </td>
                                                                             <td className="p-2 border-r"><SmartInput label="Failure Effect" value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} isTextArea apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
                                                                             <td className="p-2 border-r"><SmartInput label="Failure Cause" value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
                                                                             <td className="p-2 border-r"><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, checklistText: checklistText, detectionScore: Number(mode.rpn.d) || 5}} /></td>

@@ -111,6 +111,8 @@ export interface ContextData {
   // Persistent-breakdown wiring (Phase 1):
   breakdownRows?: BreakdownRow[];      // current subsystem's full breakdown (for FF wand short-circuit)
   filledBreakdownIds?: string[];       // breakdownId values that already have a linked FF
+  // System Modes wiring (Phase 4):
+  systemModes?: Array<{ mode: string; count: number }>;  // relevant historical modes for FM wand preference
   // RPN-aware mitigation (Phase 5):
   rpnTotal?: number;              // S * O * D for the parent mode (drives mitigation count)
 }
