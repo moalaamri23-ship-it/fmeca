@@ -5,6 +5,7 @@ import { Icon } from './components/Icon';
 import { SmartInput } from './components/SmartInput';
 import { MitigationBuilder } from './components/MitigationBuilder';
 import { SystemModesModal, SystemMode } from './components/SystemModesModal';
+import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
 import { TreeNode } from './components/TreeNode';
 import { HybridMapView } from './components/HybridMapView';
 import { AttachmentModal } from './components/AttachmentModal';
@@ -163,6 +164,8 @@ const App = () => {
     const [systemModes, setSystemModes] = useState<SystemMode[]>([]);
     const [systemContextEnabled, setSystemContextEnabled] = useState(true);
     const [showSystemModes, setShowSystemModes] = useState(false);
+    const [breakdownModalSubId, setBreakdownModalSubId] = useState<string | null>(null);
+    const [redecomposingId, setRedecomposingId] = useState<string | null>(null);
 
 
     const toggleTree = (id: string) => setTreeExpanded(prev => {
@@ -749,6 +752,88 @@ render();
 
     const setBusy = (id: string, on: boolean) => setRpnBusy(prev => { const next = new Set(prev); on ? next.add(id) : next.delete(id); return next; });
 
+    // ---- Function Breakdown Modal handlers (Phase 2) ----
+
+    // Re-decompose the function description for a subsystem. Wipes existing breakdownId links
+    // (FF text stays); user re-links via the modal's "Match to row" dropdown or the auto-link
+    // useEffect kicks in if the new canonical_failure happens to match an existing FF's text.
+    const redecomposeSub = async (sId: string) => {
+        if (!activeProject) return;
+        const sub = activeProject.subsystems.find(s => s.id === sId);
+        if (!sub) return;
+        if (!apiKey && aiProvider !== 'copilot') { alert("API Key required."); return; }
+        setRedecomposingId(sId);
+        try {
+            const decomposed = await AIService.decomposeFunction(
+                sub.func, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext
+            );
+            if (decomposed.length === 0) {
+                alert("Decomposition failed — check the function description and try again.");
+                return;
+            }
+            const newRows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
+            // Re-link any existing FF whose desc exactly matches a new canonical_failure.
+            setActiveProject(p => p ? ({
+                ...p,
+                subsystems: p.subsystems.map(s => {
+                    if (s.id !== sId) return s;
+                    const wiped = s.failures.map(f => f.sourcePair?.breakdownId
+                        ? { ...f, sourcePair: { ...f.sourcePair, breakdownId: undefined } }
+                        : f);
+                    const relinked = autoLinkExistingFFs(wiped, newRows);
+                    return {
+                        ...s,
+                        functionBreakdown: newRows,
+                        funcHashAtBreakdown: simpleHash(s.func || ''),
+                        failures: relinked,
+                    };
+                }),
+            }) : null);
+        } finally {
+            setRedecomposingId(null);
+        }
+    };
+
+    // Link an orphan FF (no sourcePair.breakdownId) to a chosen breakdown row.
+    const linkOrphanFailure = (failureId: string, breakdownId: string) => {
+        if (!activeProject) return;
+        setActiveProject(p => p ? ({
+            ...p,
+            subsystems: p.subsystems.map(s => {
+                const row = s.functionBreakdown?.find(r => r.id === breakdownId);
+                if (!row) return s;
+                if (!s.failures.some(f => f.id === failureId)) return s;
+                return {
+                    ...s,
+                    failures: s.failures.map(f => f.id !== failureId ? f : ({
+                        ...f,
+                        sourcePair: {
+                            breakdownId: row.id,
+                            function: row.function,
+                            standard: row.standard,
+                            category: row.category,
+                        },
+                    })),
+                };
+            }),
+        }) : null);
+    };
+
+    // Drop the breakdownId from an FF's sourcePair (keeps category metadata).
+    const unlinkFailure = (failureId: string) => {
+        if (!activeProject) return;
+        setActiveProject(p => p ? ({
+            ...p,
+            subsystems: p.subsystems.map(s => ({
+                ...s,
+                failures: s.failures.map(f => {
+                    if (f.id !== failureId || !f.sourcePair) return f;
+                    return { ...f, sourcePair: { ...f.sourcePair, breakdownId: undefined } };
+                }),
+            })),
+        }) : null);
+    };
+
     const autoGen = async (sId: string, name: string, specs: string, func: string) => {
         setGenId(sId);
         if (!activeProject) { setGenId(null); return; }
@@ -1215,7 +1300,16 @@ render();
                                         {!sub.collapsed && (
                                             <div className="animate-enter">
                                                 <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4">
-                                                    <div className="flex-1"><SmartInput label="Function" value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs}} /></div>
+                                                    <div className="flex-1 relative">
+                                                        <SmartInput label="Function" value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs}} />
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); setBreakdownModalSubId(sub.id); }}
+                                                            title="View function breakdown — see how the function description is decomposed into [function, expectation, category] rows mapped to your Functional Failures"
+                                                            className="absolute top-[-2px] left-[78px] text-slate-400 hover:text-brand-600 transition"
+                                                        >
+                                                            <Icon name="table" className="w-3.5 h-3.5"/>
+                                                        </button>
+                                                    </div>
                                                     {isSubExhausted(sub) && (
                                                         <span className="text-[10px] font-bold uppercase tracking-wide bg-slate-200 text-slate-600 px-2 py-1 rounded self-center">Function fully covered ✓</span>
                                                     )}
@@ -1440,6 +1534,21 @@ render();
                     onClose={() => setShowSystemModes(false)}
                 />
             )}
+
+            {breakdownModalSubId && activeProject && (() => {
+                const sub = activeProject.subsystems.find(s => s.id === breakdownModalSubId);
+                if (!sub) return null;
+                return (
+                    <FunctionBreakdownModal
+                        sub={sub}
+                        onClose={() => setBreakdownModalSubId(null)}
+                        onRedecompose={() => redecomposeSub(sub.id)}
+                        onLinkOrphan={(failureId, breakdownId) => linkOrphanFailure(failureId, breakdownId)}
+                        onUnlink={(failureId) => unlinkFailure(failureId)}
+                        isRedecomposing={redecomposingId === sub.id}
+                    />
+                );
+            })()}
         </div>
     );
 };
