@@ -833,10 +833,20 @@ Output format:
     // LIVE MODEL FETCHING
     // -------------------------------------------------------------------------
 
-    async fetchModels(provider: 'gemini' | 'openai' | 'anthropic', apiKey: string): Promise<TieredModels> {
+    async fetchModels(provider: 'gemini' | 'openai' | 'anthropic' | 'openrouter', apiKey: string): Promise<TieredModels> {
         let all: string[] = [];
 
-        if (provider === 'openai') {
+        if (provider === 'openrouter') {
+            // OpenRouter model list is public; bearer token sent when present.
+            const res = await fetch('https://openrouter.ai/api/v1/models', {
+                headers: apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}
+            });
+            if (!res.ok) throw new Error(`OpenRouter models fetch failed: ${res.status}`);
+            const data = await res.json();
+            all = (data.data || [])
+                .map((m: any) => m.id as string)
+                .filter((id: string) => !!id);
+        } else if (provider === 'openai') {
             const res = await fetch('https://api.openai.com/v1/models', {
                 headers: { 'Authorization': `Bearer ${apiKey}` }
             });
