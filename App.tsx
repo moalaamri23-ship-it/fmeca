@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { toPng, toJpeg } from 'html-to-image';
 import XLSX from 'xlsx-js-style';
 import { Icon } from './components/Icon';
@@ -260,8 +260,41 @@ setProjects(
     }
     }, [view, tab, activeProject]);
 
-    useEffect(() => { 
-        if(projects.length>0) localStorage.setItem('rcm_projects_v44', JSON.stringify(projects)); 
+    // Live refs for the unload flush (always hold the latest value).
+    const activeProjectRef = useRef(activeProject);
+    activeProjectRef.current = activeProject;
+    const projectsRef = useRef(projects);
+    projectsRef.current = projects;
+
+    // Debounced sync of live editor edits into the projects array (persisted by the
+    // effect below). Without this, activeProject edits only reach localStorage on
+    // closeEditor — a reload mid-edit loses everything. Debounced so we don't
+    // serialize the whole project to localStorage on every keystroke (avoids lag).
+    useEffect(() => {
+        if (!activeProject) return;
+        const t = setTimeout(() => {
+            setProjects(prev => prev.map(p => p.id === activeProject.id ? activeProject : p));
+        }, 500);
+        return () => clearTimeout(t);
+    }, [activeProject]);
+
+    // Safety flush: write pending edits synchronously before the tab unloads,
+    // covering the debounce window when closing/reloading.
+    useEffect(() => {
+        const flush = () => {
+            const ap = activeProjectRef.current;
+            if (!ap) return;
+            try {
+                const merged = projectsRef.current.map(p => p.id === ap.id ? ap : p);
+                localStorage.setItem('rcm_projects_v44', JSON.stringify(merged));
+            } catch { /* quota / serialization — nothing we can do at unload */ }
+        };
+        window.addEventListener('beforeunload', flush);
+        return () => window.removeEventListener('beforeunload', flush);
+    }, []);
+
+    useEffect(() => {
+        if(projects.length>0) localStorage.setItem('rcm_projects_v44', JSON.stringify(projects));
         localStorage.setItem('rcm_api_key_v44', apiKey);
         localStorage.setItem('rcm_model_name_v1', modelName);
         localStorage.setItem('rcm_ai_source_mode', aiSourceMode);
