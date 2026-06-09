@@ -62,6 +62,10 @@ type ChatbotResponseStyle = "normal" | "concise" | "one_sentence";
 type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter' | 'copilot';
 
 const PROVIDER_LABELS: Record<AIProvider, string> = { gemini: 'Gemini', openai: 'OpenAI', anthropic: 'Anthropic', azure: 'Azure', openrouter: 'OpenRouter', copilot: 'Copilot' };
+// Deployed (production) build exposes only Copilot + OpenRouter; local dev exposes all providers.
+const VISIBLE_PROVIDERS: AIProvider[] = import.meta.env.PROD
+    ? ['copilot', 'openrouter']
+    : (Object.keys(PROVIDER_LABELS) as AIProvider[]);
 const PROVIDER_MODELS: Record<string, string[]> = {
     gemini: ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
     openai: ['gpt-4o-mini', 'gpt-4o', 'o3-mini'],
@@ -220,7 +224,10 @@ setProjects(
     setApiKey(localStorage.getItem('rcm_api_key_v44') || '');
     setModelName(localStorage.getItem('rcm_model_name_v1') || 'gemini-2.0-flash');
     setAiSourceMode(localStorage.getItem('rcm_ai_source_mode') || 'ai');
-    setAiProvider((localStorage.getItem('rcm_ai_provider') as AIProvider) || 'gemini');
+    const storedProvider = (localStorage.getItem('rcm_ai_provider') as AIProvider) || 'gemini';
+    const initialProvider = VISIBLE_PROVIDERS.includes(storedProvider) ? storedProvider : VISIBLE_PROVIDERS[0];
+    setAiProvider(initialProvider);
+    if (initialProvider !== storedProvider) setModelName(DEFAULT_MODELS[initialProvider]);
     setAzureEndpoint(localStorage.getItem('rcm_azure_endpoint') || '');
     setPowerAutomateUrl(localStorage.getItem('rcm_power_automate_url') || '');
     setEnableChatbot(localStorage.getItem('rcm_enable_chatbot') !== 'false');
@@ -935,7 +942,7 @@ render();
                                 <div className="bg-white p-6 rounded border max-w-xl">
                                     <h2 className="text-lg font-semibold mb-4">AI Provider</h2>
                                     <div className="flex flex-wrap gap-1 bg-slate-100 p-1 rounded mb-5">
-                                        {(Object.keys(PROVIDER_LABELS) as AIProvider[]).map(p => (
+                                        {VISIBLE_PROVIDERS.map(p => (
                                             <button key={p} onClick={() => { setAiProvider(p); setModelName(DEFAULT_MODELS[p]); }} className={`px-3 py-1.5 rounded text-xs font-bold transition ${aiProvider === p ? 'bg-brand-600 text-white shadow' : 'text-slate-500 hover:text-slate-700 hover:bg-white'}`}>{PROVIDER_LABELS[p]}</button>
                                         ))}
                                     </div>
