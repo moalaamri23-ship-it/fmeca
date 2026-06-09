@@ -7,8 +7,6 @@ interface Props {
     liveModels: TieredModels | null;
     fallbackModels: string[];
     provider: string;
-    /** When true, the footer persists added models to localStorage under this provider */
-    allowCustomList?: boolean;
 }
 
 const MAX_FAVORITES = 4;
@@ -19,15 +17,12 @@ const StarIcon = ({ filled }: { filled: boolean }) => (
     </svg>
 );
 
-export const ModelSelector: React.FC<Props> = ({ value, onChange, liveModels, fallbackModels, provider, allowCustomList = false }) => {
+export const ModelSelector: React.FC<Props> = ({ value, onChange, liveModels, fallbackModels, provider }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [search, setSearch] = useState('');
 
     const [favorites, setFavorites] = useState<string[]>(() => {
         try { return JSON.parse(localStorage.getItem(`fmeca_fav_${provider}`) || '[]'); } catch { return []; }
-    });
-    const [userModels, setUserModels] = useState<string[]>(() => {
-        try { return JSON.parse(localStorage.getItem(`fmeca_user_models_${provider}`) || '[]'); } catch { return []; }
     });
 
     const [customInput, setCustomInput] = useState('');
@@ -38,7 +33,6 @@ export const ModelSelector: React.FC<Props> = ({ value, onChange, liveModels, fa
     // Reload per-provider state when provider changes
     useEffect(() => {
         try { setFavorites(JSON.parse(localStorage.getItem(`fmeca_fav_${provider}`) || '[]')); } catch { setFavorites([]); }
-        try { setUserModels(JSON.parse(localStorage.getItem(`fmeca_user_models_${provider}`) || '[]')); } catch { setUserModels([]); }
         setSearch('');
         setShowCustom(false);
         setCustomInput('');
@@ -65,11 +59,6 @@ export const ModelSelector: React.FC<Props> = ({ value, onChange, liveModels, fa
         setFavorites(next);
     };
 
-    const persistUserModels = (next: string[]) => {
-        localStorage.setItem(`fmeca_user_models_${provider}`, JSON.stringify(next));
-        setUserModels(next);
-    };
-
     const toggleFavorite = (model: string, e: React.MouseEvent) => {
         e.stopPropagation();
         if (favorites.includes(model)) {
@@ -79,20 +68,9 @@ export const ModelSelector: React.FC<Props> = ({ value, onChange, liveModels, fa
         }
     };
 
-    const removeUserModel = (model: string, e: React.MouseEvent) => {
-        e.stopPropagation();
-        const next = userModels.filter(m => m !== model);
-        persistUserModels(next);
-        // Also remove from favorites if it was there
-        if (favorites.includes(model)) persistFavorites(favorites.filter(m => m !== model));
-    };
-
     const submitCustom = () => {
         const id = customInput.trim();
         if (!id) return;
-        if (allowCustomList && !userModels.includes(id)) {
-            persistUserModels([...userModels, id]);
-        }
         onChange(id);
         setIsOpen(false);
         setSearch('');
@@ -109,23 +87,20 @@ export const ModelSelector: React.FC<Props> = ({ value, onChange, liveModels, fa
 
     // All known models for "is this value custom?" check
     const allLiveModels = liveModels ? [...liveModels.pro, ...liveModels.balanced, ...liveModels.efficient] : [];
-    const knownModels = [...(allLiveModels.length > 0 ? allLiveModels : fallbackModels), ...userModels];
+    const knownModels = allLiveModels.length > 0 ? allLiveModels : fallbackModels;
     const isCurrentCustom = value && !knownModels.includes(value) && !favorites.includes(value);
 
-    type Tier = { label: string; models: string[]; labelColor: string; dotColor: string; removable?: boolean };
+    type Tier = { label: string; models: string[]; labelColor: string; dotColor: string };
     const tiers: Tier[] = [];
 
     if (favorites.length > 0) {
         tiers.push({ label: 'Favorites', models: favorites, labelColor: 'text-amber-600', dotColor: 'bg-amber-400' });
     }
-    if (userModels.length > 0) {
-        tiers.push({ label: 'My Models', models: userModels, labelColor: 'text-violet-600', dotColor: 'bg-violet-400', removable: true });
-    }
     if (liveModels) {
         if (liveModels.pro.length) tiers.push({ label: 'Pro', models: liveModels.pro, labelColor: 'text-purple-600', dotColor: 'bg-purple-400' });
         if (liveModels.balanced.length) tiers.push({ label: 'Balanced', models: liveModels.balanced, labelColor: 'text-brand-600', dotColor: 'bg-brand-400' });
         if (liveModels.efficient.length) tiers.push({ label: 'Efficient', models: liveModels.efficient, labelColor: 'text-green-600', dotColor: 'bg-green-400' });
-    } else if (fallbackModels.length > 0 && userModels.length === 0) {
+    } else if (fallbackModels.length > 0) {
         tiers.push({ label: 'Models', models: fallbackModels, labelColor: 'text-slate-500', dotColor: 'bg-slate-400' });
     }
 
@@ -205,18 +180,6 @@ export const ModelSelector: React.FC<Props> = ({ value, onChange, liveModels, fa
                                                 {model}
                                             </span>
                                             {/* Remove button — only on My Models tier */}
-                                            {tier.removable && (
-                                                <button
-                                                    type="button"
-                                                    onClick={e => removeUserModel(model, e)}
-                                                    title="Remove from my list"
-                                                    className="shrink-0 text-slate-300 opacity-0 group-hover:opacity-100 hover:text-red-500 transition-all"
-                                                >
-                                                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
-                                                        <path d="M18 6L6 18M6 6l12 12"/>
-                                                    </svg>
-                                                </button>
-                                            )}
                                             {/* Star button */}
                                             <button
                                                 type="button"
@@ -239,10 +202,10 @@ export const ModelSelector: React.FC<Props> = ({ value, onChange, liveModels, fa
                             </div>
                         )}
 
-                        {/* Empty state for allowCustomList with nothing added yet */}
-                        {allowCustomList && filtered.length === 0 && !search && (
+                        {/* Empty state — no live models fetched yet */}
+                        {filtered.length === 0 && !search && !isCurrentCustom && (
                             <div className="px-3 py-6 text-center text-xs text-slate-400">
-                                No models yet — add one below
+                                No models loaded — click Refresh, or enter an ID below
                             </div>
                         )}
 
@@ -271,36 +234,29 @@ export const ModelSelector: React.FC<Props> = ({ value, onChange, liveModels, fa
                                 onClick={() => setShowCustom(true)}
                                 className="w-full text-left text-xs text-slate-400 hover:text-brand-600 px-1 py-0.5 transition-colors"
                             >
-                                {allowCustomList ? '+ Add model to my list…' : '+ Enter custom model ID…'}
+                                + Enter custom model ID…
                             </button>
                         ) : (
-                            <div className="space-y-1.5">
-                                <div className="flex gap-1.5">
-                                    <input
-                                        autoFocus
-                                        type="text"
-                                        value={customInput}
-                                        onChange={e => setCustomInput(e.target.value)}
-                                        onKeyDown={e => {
-                                            if (e.key === 'Enter') submitCustom();
-                                            if (e.key === 'Escape') { setShowCustom(false); setCustomInput(''); }
-                                        }}
-                                        placeholder={allowCustomList ? 'e.g. anthropic/claude-3-5-sonnet' : 'e.g. gpt-5-turbo'}
-                                        className="flex-1 border border-slate-200 rounded px-2 py-1 text-xs font-mono outline-none focus:border-brand-500 bg-white"
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={submitCustom}
-                                        className="px-2.5 py-1 bg-brand-600 text-white text-xs rounded font-semibold hover:bg-brand-700 transition"
-                                    >
-                                        {allowCustomList ? 'Add' : 'Use'}
-                                    </button>
-                                </div>
-                                {allowCustomList && (
-                                    <p className="text-[10px] text-slate-400 px-1">
-                                        Model will be saved to your list and selected.
-                                    </p>
-                                )}
+                            <div className="flex gap-1.5">
+                                <input
+                                    autoFocus
+                                    type="text"
+                                    value={customInput}
+                                    onChange={e => setCustomInput(e.target.value)}
+                                    onKeyDown={e => {
+                                        if (e.key === 'Enter') submitCustom();
+                                        if (e.key === 'Escape') { setShowCustom(false); setCustomInput(''); }
+                                    }}
+                                    placeholder="e.g. anthropic/claude-3-5-sonnet"
+                                    className="flex-1 border border-slate-200 rounded px-2 py-1 text-xs font-mono outline-none focus:border-brand-500 bg-white"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={submitCustom}
+                                    className="px-2.5 py-1 bg-brand-600 text-white text-xs rounded font-semibold hover:bg-brand-700 transition"
+                                >
+                                    Use
+                                </button>
                             </div>
                         )}
                     </div>

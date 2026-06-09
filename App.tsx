@@ -279,7 +279,7 @@ setProjects(
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
     }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, enableChatbot, chatbotStyle, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
 
-    const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic'] as const;
+    const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic', 'openrouter'] as const;
     type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
 
     const doFetchModels = async (provider: FetchableProvider, key: string) => {
@@ -931,19 +931,6 @@ render();
                                             <div>
                                                 <label className="block text-xs font-semibold text-slate-500 mb-1">Deployment Name</label>
                                                 <input type="text" value={modelName} onChange={e => setModelName(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="your-deployment-name"/>
-                                            </div>
-                                        ) : aiProvider === 'openrouter' ? (
-                                            <div>
-                                                <label className="block text-xs font-semibold text-slate-500 mb-1">Model</label>
-                                                <ModelSelector
-                                                    value={modelName}
-                                                    onChange={setModelName}
-                                                    liveModels={null}
-                                                    fallbackModels={[]}
-                                                    provider="openrouter"
-                                                    allowCustomList={true}
-                                                />
-                                                <p className="text-xs text-slate-400 mt-1">Add any OpenRouter model ID (e.g. anthropic/claude-3-5-sonnet, meta-llama/llama-3-70b-instruct)</p>
                                             </div>
                                         ) : (
                                             <div>
