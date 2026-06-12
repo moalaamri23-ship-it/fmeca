@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Icon } from './Icon';
 import { AIService } from '../services/AIService';
 import { ContextData } from '../types';
@@ -26,6 +26,15 @@ interface SmartInputProps {
 export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value, onChange, isTextArea, heightClass, onBlur, apiKey, modelName, placeholder, aiSourceMode = 'ai', referenceFileText = '', contextData = {}, aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = '' }) => {
     const [loading, setLoading] = useState(false);
     const [expanded, setExpanded] = useState(false);
+    const modalTextRef = useRef<HTMLTextAreaElement>(null);
+    // Auto-fit the modal textarea to its content (capped at 70% of the viewport).
+    useEffect(() => {
+        if (!expanded) return;
+        const el = modalTextRef.current;
+        if (!el) return;
+        el.style.height = 'auto';
+        el.style.height = Math.max(120, Math.min(el.scrollHeight + 2, window.innerHeight * 0.7)) + 'px';
+    }, [expanded, value]);
     const handleAI = async () => {
         setLoading(true);
         try {
@@ -40,7 +49,7 @@ export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value
         <div className="w-full mb-1 relative group">
             {label && (
                 <div className="flex items-center gap-1.5 mb-1 ml-1">
-                    <label onDoubleClick={(e) => { e.stopPropagation(); setExpanded(true); }} title="Double-click to expand" className="text-[10px] font-bold text-slate-400 uppercase cursor-zoom-in select-none hover:text-brand-600 transition">{label}</label>
+                    <label onClick={(e) => { e.stopPropagation(); setExpanded(true); }} className="text-[10px] font-bold text-slate-400 uppercase cursor-default select-none hover:text-brand-600 transition">{label}</label>
                     {labelAddon}
                 </div>
             )}
@@ -62,13 +71,14 @@ export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value
                             <button onClick={() => setExpanded(false)} className="text-slate-400 hover:text-slate-700 font-bold px-2" title="Close (Esc)">✕</button>
                         </div>
                         <textarea
+                            ref={modalTextRef}
                             autoFocus
                             value={value || ""}
                             onChange={e => onChange(e.target.value)}
                             onBlur={onBlur}
                             onKeyDown={e => { if (e.key === 'Escape') setExpanded(false); }}
                             placeholder={placeholder}
-                            className="w-full h-[60vh] bg-white border border-slate-200 rounded p-3 text-sm outline-none focus:border-brand-500 transition resize-none"
+                            className="w-full bg-white border border-slate-200 rounded p-3 text-sm outline-none focus:border-brand-500 transition resize-none overflow-auto"
                         />
                     </div>
                 </div>
