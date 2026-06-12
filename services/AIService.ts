@@ -472,7 +472,9 @@ export const AIService = {
         3. For each failure, generate Failure Modes, Effects, Causes, Current Controls and Mitigations. Failure modes must be unique across the whole subsystem — never repeat a mode under two failures.
         Field rules:
         - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
-        - "currentControls": detection/protection that typically ALREADY exists as standard practice for this equipment class (installed instruments, routine PMs). Empty string if none can be assumed.
+        ${(mode === 'file' || mode === 'hybrid')
+            ? '- "currentControls": ONLY controls evidenced in the REFERENCE DATA or PM CHECKLIST above (installed instrument tags with alarm limits, existing PM tasks). Do NOT assume typical industry practice — empty string if no evidence.'
+            : '- "currentControls": always return an empty string "" — no plant evidence is available in this mode; controls must not be assumed.'}
         - "mitigation": RECOMMENDED actions (not yet implemented).
         - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
         ${RPN_ANCHORS}
@@ -494,7 +496,13 @@ export const AIService = {
                 apiKey: key,
                 responseFormat: 'json'
             });
-            return this.extractJSON(res);
+            const parsed = this.extractJSON(res);
+            // currentControls is evidence-only: without a reference file or checklist
+            // (pure AI mode) it must stay empty no matter what the model returned.
+            if (mode !== 'file' && mode !== 'hybrid') {
+                (parsed?.failures || []).forEach((f: any) => (f.modes || []).forEach((m: any) => { m.currentControls = ''; }));
+            }
+            return parsed;
         } catch(e) { return null; }
     },
 
@@ -512,7 +520,9 @@ export const AIService = {
         Field rules per mode:
         - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
         - "cause": the dominant root cause of this mode.
-        - "currentControls": detection/protection that typically ALREADY exists as standard practice for this equipment class. Empty string if none can be assumed.
+        ${(mode === 'file' || mode === 'hybrid')
+            ? '- "currentControls": ONLY controls evidenced in the REFERENCE DATA or PM CHECKLIST above (installed instrument tags with alarm limits, existing PM tasks). Do NOT assume typical industry practice — empty string if no evidence.'
+            : '- "currentControls": always return an empty string "" — no plant evidence is available in this mode; controls must not be assumed.'}
         - "mitigation": RECOMMENDED actions (not yet implemented).
         - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
         ${RPN_ANCHORS}
@@ -535,7 +545,10 @@ export const AIService = {
                 responseFormat: 'json'
             });
             const parsed = this.extractJSON(res);
-            return parsed.modes || [];
+            const modes = parsed.modes || [];
+            // currentControls is evidence-only: forced empty in pure AI mode.
+            if (mode !== 'file' && mode !== 'hybrid') modes.forEach((m: any) => { m.currentControls = ''; });
+            return modes;
         } catch(e) { return []; }
     },
 
