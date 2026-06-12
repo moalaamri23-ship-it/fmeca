@@ -276,8 +276,17 @@ export const AIService = {
 
     extractJSON(text: string): any {
         try { return JSON.parse(text); } catch (e) {
-            const start = text.indexOf('{'); const end = text.lastIndexOf('}');
-            if (start !== -1 && end !== -1) return JSON.parse(text.substring(start, end + 1));
+            // Strip markdown code fences (Copilot/chatty models wrap JSON in ```json ... ```)
+            let t = text.replace(/```[a-zA-Z]*\s*/g, '').replace(/```/g, '').trim();
+            const tryRange = (open: string, close: string) => {
+                const start = t.indexOf(open); const end = t.lastIndexOf(close);
+                if (start !== -1 && end > start) { try { return JSON.parse(t.substring(start, end + 1)); } catch { return undefined; } }
+                return undefined;
+            };
+            const obj = tryRange('{', '}');
+            if (obj !== undefined) return obj;
+            const arr = tryRange('[', ']');
+            if (arr !== undefined) return arr;
             throw new Error("No JSON");
         }
     },
