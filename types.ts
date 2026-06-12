@@ -89,4 +89,6 @@ export interface ContextData {
   specs?: string;
   checklistText?: string;
   detectionScore?: number;
+  /** Mode's existing controls — mitigation generation recommends only what these don't cover. */
+  currentControls?: string;
 }

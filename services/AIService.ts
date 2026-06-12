@@ -304,6 +304,28 @@ export const AIService = {
 
         const wordCount = currentText ? currentText.trim().split(/\s+/).filter(Boolean).length : 0;
 
+        // --- CURRENT CONTROLS SPECIALIST ---
+        // Checklist-evidence only: without a loaded PM checklist in File/Hybrid mode
+        // there is nothing to extract — leave the field untouched, no AI call.
+        if (lowerLabel.includes("current controls")) {
+            const checklistContent = (contextData.checklistText as string) ?? '';
+            if (!((mode === 'file' || mode === 'hybrid') && checklistContent.trim())) return currentText || '';
+            const existingNote = currentText?.trim() ? `Current field text to revise against the checklist:\n"""${currentText}"""\n` : '';
+            const controlsPrompt = `PM CHECKLIST KNOWLEDGE (the plant's EXISTING PM program, organized by team and interval):\n"""\n${checklistContent.slice(0, 6000)}\n"""\n\nContext: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".\n${existingNote}Task: List ONLY the existing PM tasks from the checklist above that act as current controls (detection or prevention) relevant to this subsystem. Use the checklist section name as the team owner.\nRules:\n- Do NOT invent tasks that are not in the checklist.\n- Do NOT pull from any other source.\n- If nothing in the checklist applies, return an empty response.\nFormat: "1- Task (Team)" one per line. Return ONLY the list, no headers or explanations.`;
+            return this.chat({
+                feature: 'field-generation',
+                provider: (aiProvider || inferProvider(key)) as any,
+                azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
+                model: modelName,
+                messages: [{ role: 'user', content: controlsPrompt + (systemContext ? '\n\n' + systemContext : '') }],
+                mode: 'ai',
+                apiKey: key,
+                responseFormat: 'text'
+            });
+        }
+        // --- END CURRENT CONTROLS SPECIALIST ---
+
         if (currentText && wordCount > 0 && wordCount <= 5) {
             return this.chat({
                 feature: 'field-generation',
@@ -331,13 +353,15 @@ export const AIService = {
             const ownerRules = `Owner assignment (add team in parentheses after each action):\n- Sensor, transmitter, switch, monitor, level/pressure/vibration/flow tag → (Instrument team)\n- Lubrication, alignment, bearing, seal, coupling, mechanical inspection → (Mechanical team)\n- Control system, PLC, SCADA, interlock, delay, communication → (Automation team)\n- Operational round, manual monitoring, log, operator check → (Operation team)`;
             const formatRule = `Format: "1- Action description [Tag: TAGNO (Hi: X unit, Hi-Hi: Y unit) if applicable] (Owner)"\nWrite each action on its own line. Return ONLY the numbered list, no headers or explanations.`;
             const existingNote = currentText?.trim() ? `Existing mitigations to enhance and expand:\n"""${currentText}"""\n` : '';
+            const controlsCovered = (contextData.currentControls as string)?.trim()
+                ? `CURRENT CONTROLS already in place (these failure aspects are COVERED — do NOT recommend them again; recommend only actions that close the remaining gaps):\n"""\n${(contextData.currentControls as string).trim()}\n"""\n` : '';
             let mitigationPrompt: string;
             if (mode === 'file' || mode === 'hybrid') {
                 const refSection = refText?.trim() ? `REFERENCE DATA (P&IDs, datasheets, safeguarding instruments with tag numbers and alarm limits):\n"""\n${refText.slice(0, 7000)}\n"""\n\n` : '';
                 const checkSection = checklistContent?.trim() ? `PM CHECKLIST KNOWLEDGE (organized by team and PM interval):\n"""\n${checklistContent.slice(0, 6000)}\n"""\n\n` : '';
-                mitigationPrompt = `${refSection}${checkSection}Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".\n${detectionNote}\n${existingNote}\nGenerate ${count} mitigation actions using this priority:\n1. Extract relevant PM tasks from CHECKLIST KNOWLEDGE — use the checklist section name as the team owner.\n2. From REFERENCE DATA, identify safeguarding instruments (tags like VXIT, PT, TT, LE, FIT, etc.) with their alarm limits; suggest utilizing or installing them for detection improvement.\n3. Add reliability-knowledge mitigations to further reduce Detection if D > 6.\n${ownerRules}\n${formatRule}`;
+                mitigationPrompt = `${refSection}${checkSection}Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".\n${detectionNote}\n${controlsCovered}${existingNote}\nGenerate ${count} mitigation actions using this priority:\n1. Extract relevant PM tasks from CHECKLIST KNOWLEDGE that are NOT already listed in current controls — use the checklist section name as the team owner.\n2. From REFERENCE DATA, identify safeguarding instruments (tags like VXIT, PT, TT, LE, FIT, etc.) with their alarm limits; suggest utilizing or installing them for detection improvement.\n3. Add reliability-knowledge mitigations to further reduce Detection if D > 6.\nNever duplicate an action already covered by current controls.\n${ownerRules}\n${formatRule}`;
             } else {
-                mitigationPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".\n${detectionNote}\n${existingNote}\nGenerate ${count} maintenance mitigation actions for this failure.\n${ownerRules}\n${formatRule}`;
+                mitigationPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".\n${detectionNote}\n${controlsCovered}${existingNote}\nGenerate ${count} maintenance mitigation actions for this failure. Never duplicate an action already covered by current controls.\n${ownerRules}\n${formatRule}`;
             }
             const mitigationContent = mitigationPrompt + (systemContext ? '\n\n' + systemContext : '');
             return this.chat({
@@ -484,7 +508,7 @@ export const AIService = {
         ${((mode === 'file' || mode === 'hybrid') && checklistText?.trim())
             ? '- "currentControls": ONLY existing PM tasks evidenced in the PM CHECKLIST KNOWLEDGE above. Do NOT pull controls from reference data and do NOT assume typical industry practice — empty string if the checklist has no relevant task.'
             : '- "currentControls": always return an empty string "" — current controls require PM checklist evidence, which is not available.'}
-        - "mitigation": RECOMMENDED actions (not yet implemented).
+        - "mitigation": RECOMMENDED actions (not yet implemented) that close the gaps NOT covered by currentControls — never duplicate a task already listed in currentControls.
         - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
         ${RPN_ANCHORS}
         ${LIBRARY_EXAMPLES}
@@ -534,7 +558,7 @@ export const AIService = {
         ${((mode === 'file' || mode === 'hybrid') && checklistText?.trim())
             ? '- "currentControls": ONLY existing PM tasks evidenced in the PM CHECKLIST KNOWLEDGE above. Do NOT pull controls from reference data and do NOT assume typical industry practice — empty string if the checklist has no relevant task.'
             : '- "currentControls": always return an empty string "" — current controls require PM checklist evidence, which is not available.'}
-        - "mitigation": RECOMMENDED actions (not yet implemented).
+        - "mitigation": RECOMMENDED actions (not yet implemented) that close the gaps NOT covered by currentControls — never duplicate a task already listed in currentControls.
         - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
         ${RPN_ANCHORS}
         ${LIBRARY_EXAMPLES}
