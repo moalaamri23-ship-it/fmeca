@@ -10,6 +10,7 @@ interface SmartInputProps {
     onChange: (value: string) => void;
     isTextArea?: boolean;
     heightClass?: string;
+    onBlur?: () => void;
     apiKey: string;
     modelName: string;
     placeholder?: string;
@@ -22,7 +23,7 @@ interface SmartInputProps {
     powerAutomateUrl?: string;
 }
 
-export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value, onChange, isTextArea, heightClass, apiKey, modelName, placeholder, aiSourceMode = 'ai', referenceFileText = '', contextData = {}, aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = '' }) => {
+export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value, onChange, isTextArea, heightClass, onBlur, apiKey, modelName, placeholder, aiSourceMode = 'ai', referenceFileText = '', contextData = {}, aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = '' }) => {
     const [loading, setLoading] = useState(false);
     const handleAI = async () => {
         setLoading(true);
@@ -44,7 +45,7 @@ export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value
             )}
             <div className="relative">
                 {isTextArea ? 
-                    <textarea value={value||""} onChange={e => onChange(e.target.value)} onClick={e=>e.stopPropagation()} placeholder={placeholder} className={`w-full bg-white border border-slate-200 rounded p-2 text-sm ${heightClass || 'min-h-[50px]'} outline-none focus:border-brand-500 transition shadow-sm`}/>
+                    <textarea value={value||""} onChange={e => onChange(e.target.value)} onBlur={onBlur} onClick={e=>e.stopPropagation()} placeholder={placeholder} className={`w-full bg-white border border-slate-200 rounded p-2 text-sm ${heightClass || 'min-h-[50px]'} outline-none focus:border-brand-500 transition shadow-sm`}/>
                     : 
                     <input value={value||""} onChange={e => onChange(e.target.value)} onClick={e=>e.stopPropagation()} placeholder={placeholder} className="w-full bg-white border border-slate-200 rounded p-2 text-sm outline-none focus:border-brand-500 transition shadow-sm"/>
                 }
