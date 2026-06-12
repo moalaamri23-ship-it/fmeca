@@ -25,6 +25,7 @@ interface SmartInputProps {
 
 export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value, onChange, isTextArea, heightClass, onBlur, apiKey, modelName, placeholder, aiSourceMode = 'ai', referenceFileText = '', contextData = {}, aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = '' }) => {
     const [loading, setLoading] = useState(false);
+    const [expanded, setExpanded] = useState(false);
     const handleAI = async () => {
         setLoading(true);
         try {
@@ -39,7 +40,7 @@ export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value
         <div className="w-full mb-1 relative group">
             {label && (
                 <div className="flex items-center gap-1.5 mb-1 ml-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase">{label}</label>
+                    <label onDoubleClick={(e) => { e.stopPropagation(); setExpanded(true); }} title="Double-click to expand" className="text-[10px] font-bold text-slate-400 uppercase cursor-zoom-in select-none hover:text-brand-600 transition">{label}</label>
                     {labelAddon}
                 </div>
             )}
@@ -53,6 +54,25 @@ export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value
                     {loading?"...":<Icon name="wand"/>}
                 </button>
             </div>
-        </div> 
+            {expanded && (
+                <div className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-6" onClick={(e) => { e.stopPropagation(); setExpanded(false); }}>
+                    <div className="bg-white rounded-lg shadow-2xl w-full max-w-2xl p-4 animate-enter" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center justify-between mb-2">
+                            <span className="text-xs font-bold text-slate-500 uppercase">{label}</span>
+                            <button onClick={() => setExpanded(false)} className="text-slate-400 hover:text-slate-700 font-bold px-2" title="Close (Esc)">✕</button>
+                        </div>
+                        <textarea
+                            autoFocus
+                            value={value || ""}
+                            onChange={e => onChange(e.target.value)}
+                            onBlur={onBlur}
+                            onKeyDown={e => { if (e.key === 'Escape') setExpanded(false); }}
+                            placeholder={placeholder}
+                            className="w-full h-[60vh] bg-white border border-slate-200 rounded p-3 text-sm outline-none focus:border-brand-500 transition resize-none"
+                        />
+                    </div>
+                </div>
+            )}
+        </div>
     );
 };
