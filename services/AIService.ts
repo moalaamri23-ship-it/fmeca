@@ -1,4 +1,5 @@
 import { ContextData } from '../types';
+import { RICH_LIBRARY } from '../constants';
 
 /*
   -------------------------------------------------------------------------
@@ -23,6 +24,46 @@ const AI_CONFIG = {
         vision: '/api/ai-vision'
     }
 };
+
+// Infer provider from API key shape. Anthropic keys also start with "sk-",
+// so the more specific prefixes must be checked first.
+const inferProvider = (key: string): string =>
+    key.startsWith('sk-ant-') ? 'anthropic'
+    : key.startsWith('sk-or-') ? 'openrouter'
+    : key.startsWith('sk-') ? 'openai'
+    : 'gemini';
+
+// Shared S/O/D rating anchors injected into every prompt that produces or
+// evaluates RPN values, so scores are comparable across calls and models.
+const RPN_ANCHORS = `S/O/D RATING ANCHORS (1-10). Score against these bands — do NOT default to 5:
+Severity (S) — rate the END EFFECT at system level:
+  1-2: Negligible — no downtime, cosmetic only.
+  3-4: Minor — local degradation or brief partial output loss, simple repair.
+  5-6: Moderate — notable output loss or partial system outage, planned repair needed.
+  7-8: Major — full system outage or significant production loss, costly repair.
+  9-10: Hazardous — safety/environmental harm or regulatory breach (9 = with warning, 10 = without warning).
+Occurrence (O) — likelihood of this CAUSE producing the mode in typical industrial service:
+  1-2: Remote — rarely seen over equipment life (> 5 years between events).
+  3-4: Low — isolated events (every 2-5 years).
+  5-6: Occasional — every 1-2 years.
+  7-8: Frequent — several times per year.
+  9-10: Persistent — monthly or continuous problem.
+Detection (D) — ability of the CURRENT controls to detect or prevent before impact:
+  1-2: Near-certain — online monitoring with alarm/trip on this mode.
+  3-4: High — condition monitoring or frequent inspection catches onset.
+  5-6: Moderate — periodic inspection might catch it in time.
+  7-8: Low — usually discovered only at functional failure.
+  9-10: None — no stated controls, or purely reactive. Use 9-10 when controls are absent or unknown.`;
+
+// Compact few-shot examples drawn from the built-in failure library. Used to
+// anchor vocabulary and granularity of generated FFs/modes (ISO 14224 style).
+const LIBRARY_EXAMPLES = (() => {
+    const lines: string[] = [];
+    Object.entries(RICH_LIBRARY).forEach(([cat, items]) =>
+        items.slice(0, 3).forEach(i =>
+            lines.push(`- ${cat}: FF "${i.fail}" → Mode "${i.mode}" | Cause "${i.cause}" | Task "${i.task}"`)));
+    return `VOCABULARY EXAMPLES (granularity/terminology reference only — adapt to the actual equipment, do not copy):\n${lines.join('\n')}`;
+})();
 
 export interface AIMessage {
     role: string;
@@ -218,10 +259,17 @@ export const AIService = {
     // HELPERS
     // -------------------------------------------------------------------------
 
-    attachContext(prompt: string, mode: string, refText: string): string {
+    attachContext(prompt: string, mode: string, refText: string, responseFormat?: string): string {
         if (!refText || !refText.trim()) return prompt;
         const refBlock = `REFERENCE DATA:\n"""\n${refText.slice(0, 15000)}\n"""\n`;
-        if (mode === 'file') return `${refBlock}Use ONLY Reference Data. If not found, say "N/A".\nTASK: ${prompt}`;
+        if (mode === 'file') {
+            // For JSON tasks "say N/A" would break the parser — keep the output
+            // shape intact and signal missing data through empty fields instead.
+            const missingRule = responseFormat === 'json'
+                ? 'Use ONLY Reference Data. The output MUST still be the requested JSON: omit or leave empty any items not supported by Reference Data — never reply with prose like "N/A".'
+                : 'Use ONLY Reference Data. If not found, say "N/A".';
+            return `${refBlock}${missingRule}\nTASK: ${prompt}`;
+        }
         if (mode === 'hybrid') return `${refBlock}Use Reference Data as primary. Supplement with general knowledge.\nTASK: ${prompt}`;
         return prompt;
     },
@@ -250,7 +298,7 @@ export const AIService = {
         if (currentText && wordCount > 0 && wordCount <= 5) {
             return this.chat({
                 feature: 'field-generation',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
@@ -285,7 +333,7 @@ export const AIService = {
             const mitigationContent = mitigationPrompt + (systemContext ? '\n\n' + systemContext : '');
             return this.chat({
                 feature: 'field-generation',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
@@ -362,7 +410,7 @@ export const AIService = {
 
         return this.chat({
             feature: 'field-generation',
-            provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+            provider: (aiProvider || inferProvider(key)) as any,
             azureEndpoint: azureEndpoint || undefined,
             powerAutomateUrl: powerAutomateUrl || undefined,
             model: modelName,
@@ -377,25 +425,15 @@ export const AIService = {
 
     async generateMasterStructure(sysName: string, sysDesc: string, key: string, modelName: string, mode: string, refText: string, aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<any> {
         if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 2000)); return []; }
+        // Skeletons only — function, failures and modes are generated by the
+        // dedicated downstream steps in masterGen; anything more here is discarded.
         const corePrompt = `Act as Senior Reliability Engineer. Analyze System "${sysName}" (${sysDesc}).
-        Break into 3-6 critical Subsystems.
-        Step 1: For each subsystem, generate 'specs' first using format "Key: Value Unit, Key: Value Unit".
-        Step 2: Generate 'func' (Function) using: Action + Specs Values + Normal Expectations (continuous op, no noise/leaks).
-        Step 3: Generate multiple (2-4) distinct 'failures' (Functional Failures) that represent different ways the function can fail (e.g., total loss, partial loss, intermittent operation, over-function).
-        Step 4: For EACH failure, generate 1-2 Failure Modes, Effects, Causes, and Mitigations (Hierarchy: Func -> Multiple Failures -> Mode -> Effect -> Cause -> Mitigation).
+        Identify the critical Subsystems for a formal FMECA. Scale the count to the system's complexity and criticality (simple package: 3-4, complex train: up to 8).
+        For each subsystem, generate 'specs' using format "Key: Value Unit, Key: Value Unit" with realistic values for this class of equipment.
         Output strictly valid JSON object:
         { "subsystems": [ {
             "name": "string (Subsystem Name)",
-            "specs": "string (Key: Value Unit, ...)",
-            "func": "string (Action + Specs + Normal Expectations)",
-            "failures": [ {
-                "desc": "string (Functional Failure 1)",
-                "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ]
-            },
-            {
-                "desc": "string (Functional Failure 2)",
-                "modes": [ ... ]
-            } ]
+            "specs": "string (Key: Value Unit, ...)"
         } ] }`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
@@ -403,7 +441,7 @@ export const AIService = {
         try {
             const res = await this.chat({
                 feature: 'master-structure',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
@@ -418,26 +456,35 @@ export const AIService = {
         } catch(e) { return []; }
     },
 
-    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = ''): Promise<any> {
+    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = []): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-        if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Loss of integrity", cause: "Aging", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
+        if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Local: Loss of integrity; End: Reduced system availability", cause: "Aging", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
             ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
+        const existingBlock = existingFailures.length > 0
+            ? `Existing Functional Failures already defined for this subsystem (DO NOT repeat or closely resemble):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n` : '';
         const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
-        const corePrompt = `${checklistBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".
+        const corePrompt = `${checklistBlock}${existingBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".
         Task:
         1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
-        2. Derive multiple (2-4) distinct Functional Failures strictly from the Function (negation of expectations).
-        3. For each failure, generate Failure Modes, Effects, Causes, and Mitigations.
-        Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] } ] }${mitigationInstruction}`;
+        2. Derive distinct Functional Failures strictly from the Function (negation of each stated expectation). Scale the count to the subsystem's complexity and criticality (simple component: 2, critical complex subsystem: up to 5). Cover total loss, partial loss, intermittent operation and over-function where the function supports them.
+        3. For each failure, generate Failure Modes, Effects, Causes, Current Controls and Mitigations. Failure modes must be unique across the whole subsystem — never repeat a mode under two failures.
+        Field rules:
+        - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
+        - "currentControls": detection/protection that typically ALREADY exists as standard practice for this equipment class (installed instruments, routine PMs). Empty string if none can be assumed.
+        - "mitigation": RECOMMENDED actions (not yet implemented).
+        - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
+        ${RPN_ANCHORS}
+        ${LIBRARY_EXAMPLES}
+        Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "currentControls": "string", "mitigation": "string", "rpn": {"s": <int 1-10>, "o": <int 1-10>, "d": <int 1-10>} } ] } ] }${mitigationInstruction}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 
         try {
             const res = await this.chat({
                 feature: 'subsystem-generation',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
@@ -451,24 +498,33 @@ export const AIService = {
         } catch(e) { return null; }
     },
 
-    async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = ''): Promise<any[]> {
+    async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingModes: string[] = []): Promise<any[]> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-        if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Effect", cause: "Cause", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:6,o:4,d:3} }]; }
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Local: Effect; End: System effect", cause: "Cause", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:6,o:4,d:3} }]; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
             ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
+        const existingBlock = existingModes.length > 0
+            ? `Failure Modes already defined in this subsystem (DO NOT repeat or closely resemble any of them):\n${existingModes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n` : '';
         const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
-        const corePrompt = `${checklistBlock}Context: System "${project}", Subsystem "${subName}", Specs "${subSpecs}". Function: "${subFunc}". Functional Failure: "${failDesc}".
-        Task: Generate 2-3 specific Failure Modes that result in this Functional Failure.
-        For each mode, determine Effect, Root Cause, and Mitigation Task.
-        Return JSON object: { "modes": [ { "mode": "string", "effect": "string", "cause": "string", "mitigation": "string", "rpn": {"s": 5, "o": 5, "d": 5} } ] }${mitigationInstruction}`;
+        const corePrompt = `${checklistBlock}${existingBlock}Context: System "${project}", Subsystem "${subName}", Specs "${subSpecs}". Function: "${subFunc}". Functional Failure: "${failDesc}".
+        Task: Generate 2-3 specific Failure Modes that result in this Functional Failure. Fewer is acceptable if the failure only has one or two credible modes — do not invent filler modes.
+        Field rules per mode:
+        - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
+        - "cause": the dominant root cause of this mode.
+        - "currentControls": detection/protection that typically ALREADY exists as standard practice for this equipment class. Empty string if none can be assumed.
+        - "mitigation": RECOMMENDED actions (not yet implemented).
+        - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
+        ${RPN_ANCHORS}
+        ${LIBRARY_EXAMPLES}
+        Return JSON object: { "modes": [ { "mode": "string", "effect": "string", "cause": "string", "currentControls": "string", "mitigation": "string", "rpn": {"s": <int 1-10>, "o": <int 1-10>, "d": <int 1-10>} } ] }${mitigationInstruction}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 
         try {
             const res = await this.chat({
                 feature: 'mode-generation',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
@@ -493,6 +549,7 @@ async evaluateRpnFromText(
     mode: string;
     effect: string;
     cause: string;
+    currentControls?: string;
     mitigation: string;
     key: string;
     modelName: string;
@@ -506,7 +563,7 @@ async evaluateRpnFromText(
 ): Promise<{ s: number; o: number; d: number; reason?: string }> {
   const {
     project, subName, subSpecs, subFunc, failDesc,
-    mode, effect, cause, mitigation,
+    mode, effect, cause, currentControls = '', mitigation,
     key, modelName, modeSource = 'ai', refText = '',
     aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = ''
   } = args;
@@ -534,12 +591,15 @@ Failure Details:
 - Failure Mode: "${mode}"
 - Effect: "${effect}"
 - Root Cause: "${cause}"
-- Existing Mitigation / Controls: "${mitigation}"
+- CURRENT Controls (already in place): "${currentControls || 'None stated'}"
+- RECOMMENDED Actions (proposed, NOT yet implemented): "${mitigation}"
+
+${RPN_ANCHORS}
 
 Mandatory Scoring Logic (DO NOT VIOLATE):
 
 Severity (S):
-- Rate the consequence of the EFFECT only, not the cause.
+- Rate the consequence of the EFFECT only, not the cause. If the effect states both a local and an end (system-level) effect, rate the END effect.
 - Safety, environmental harm, and total production loss dominate Severity.
 - If the effect is local, reversible, or causes minor performance degradation, Severity MUST be LOW.
 - If the effect description is vague or mild, do NOT assume worst-case.
@@ -550,21 +610,18 @@ Occurrence (O):
 - Do NOT assume rare failures are frequent.
 - Wear, fouling, leakage, misalignment → moderate occurrence unless stated otherwise.
 - Random catastrophic failures should have LOW occurrence unless explicitly frequent.
-- If no frequency indicators exist, choose a conservative MID-RANGE value (4–6), not extremes.
+- If no frequency indicators exist, choose a MID-RANGE value (4–6), not extremes.
 
 Detection (D):
-- Detection reflects how likely the CURRENT CONTROLS can detect or prevent the failure BEFORE impact.
-- Better detection → LOWER D value.
-- Poor or reactive controls → HIGHER D value.
-- If mitigation includes condition monitoring, alarms, trips, inspections, or diagnostics,
-  Detection MUST IMPROVE (D decreases).
-- If mitigation is vague, generic, or absent, Detection MUST be HIGH.
-- Never assign low Detection unless detection capability is explicitly stated.
+- Score D against the CURRENT Controls ONLY. RECOMMENDED Actions are not yet implemented and MUST NOT improve D.
+- Better current detection → LOWER D value.
+- Poor, reactive, or absent current controls → HIGHER D value (8-10).
+- If current controls include condition monitoring, alarms, trips, inspections, or diagnostics, D decreases accordingly.
+- Never assign low Detection unless detection capability is explicitly stated in CURRENT Controls.
 
 Consistency Rules:
-- Improved mitigation must NEVER increase Detection rating.
 - Mild effects must NEVER result in high Severity.
-- Conservative scoring is preferred over aggressive scoring.
+- When genuinely uncertain between two adjacent bands, choose the HIGHER-RISK band (higher S or D) — but never jump bands beyond what the stated information supports.
 - Avoid clustering all values at 5 unless justified.
 
 Output Requirements:
@@ -585,7 +642,7 @@ Output format:
 
   const res = await this.chat({
     feature: 'rpn-evaluation',
-    provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+    provider: (aiProvider || inferProvider(key)) as any,
     azureEndpoint: azureEndpoint || undefined,
     powerAutomateUrl: powerAutomateUrl || undefined,
     model: modelName,
@@ -658,7 +715,7 @@ Output format:
             ? lastUserMessage.content
             : '';
 
-        const fullPrompt = this.attachContext(rawPrompt, req.mode, req.refText ?? '');
+        const fullPrompt = this.attachContext(rawPrompt, req.mode, req.refText ?? '', req.responseFormat);
 
         const payload = {
             sessionId: req.sessionId ?? crypto.randomUUID(),
@@ -684,7 +741,7 @@ Output format:
         // DIRECT mode: Use direct calls to OpenAI/Gemini
         // Apply context attachment locally as backend is not involved
         const rawContent = typeof req.messages[0].content === 'string' ? req.messages[0].content : "";
-        const fullPrompt = this.attachContext(rawContent, req.mode, req.refText || '');
+        const fullPrompt = this.attachContext(rawContent, req.mode, req.refText || '', req.responseFormat);
 
         try {
             if (req.provider === 'anthropic') {
@@ -923,7 +980,7 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
         try {
             return await this.chat({
                 feature: 'ff-for-row',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
@@ -981,7 +1038,7 @@ Return ONLY this JSON, no prose, no markdown:
         try {
             const res = await this.chat({
                 feature: 'function-decomposition',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
@@ -1048,7 +1105,7 @@ Include an entry for every row, even if failureIds is empty.`;
         try {
             const res = await this.chat({
                 feature: 'breakdown-matching',
-                provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+                provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,

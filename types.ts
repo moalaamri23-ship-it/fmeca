@@ -9,6 +9,9 @@ export interface Mode {
   mode: string;
   effect: string;
   cause: string;
+  /** Controls already in place — Detection (D) is scored against these only. */
+  currentControls?: string;
+  /** Recommended actions — proposed, not yet implemented; never credited toward D. */
   mitigation: string;
   rpn: RPN;
 }
