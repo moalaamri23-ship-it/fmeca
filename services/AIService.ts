@@ -514,6 +514,8 @@ export const AIService = {
             ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
         const existingBlock = existingModes.length > 0
             ? `Failure Modes already defined in this subsystem (DO NOT repeat or closely resemble any of them):\n${existingModes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n` : '';
+        // Retry with backoff — bulk generation can hit provider rate limits.
+        const MODE_ATTEMPTS = 3;
         const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
         const corePrompt = `${checklistBlock}${existingBlock}Context: System "${project}", Subsystem "${subName}", Specs "${subSpecs}". Function: "${subFunc}". Functional Failure: "${failDesc}".
         Task: Generate 2-3 specific Failure Modes that result in this Functional Failure. Fewer is acceptable if the failure only has one or two credible modes — do not invent filler modes.
@@ -531,25 +533,33 @@ export const AIService = {
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 
-        try {
-            const res = await this.chat({
-                feature: 'mode-generation',
-                provider: (aiProvider || inferProvider(key)) as any,
-                azureEndpoint: azureEndpoint || undefined,
-                powerAutomateUrl: powerAutomateUrl || undefined,
-                model: modelName,
-                messages: [{ role: 'user', content: content }],
-                mode: mode as 'ai'|'file'|'hybrid',
-                refText,
-                apiKey: key,
-                responseFormat: 'json'
-            });
-            const parsed = this.extractJSON(res);
-            const modes = parsed.modes || [];
-            // currentControls is evidence-only: forced empty in pure AI mode.
-            if (mode !== 'file' && mode !== 'hybrid') modes.forEach((m: any) => { m.currentControls = ''; });
-            return modes;
-        } catch(e) { console.warn('[generateModesForFailure] failed:', e); return []; }
+        let lastErr: any;
+        for (let attempt = 1; attempt <= MODE_ATTEMPTS; attempt++) {
+            try {
+                const res = await this.chat({
+                    feature: 'mode-generation',
+                    provider: (aiProvider || inferProvider(key)) as any,
+                    azureEndpoint: azureEndpoint || undefined,
+                    powerAutomateUrl: powerAutomateUrl || undefined,
+                    model: modelName,
+                    messages: [{ role: 'user', content: content }],
+                    mode: mode as 'ai'|'file'|'hybrid',
+                    refText,
+                    apiKey: key,
+                    responseFormat: 'json'
+                });
+                const parsed = this.extractJSON(res);
+                const modes = parsed.modes || [];
+                // currentControls is evidence-only: forced empty in pure AI mode.
+                if (mode !== 'file' && mode !== 'hybrid') modes.forEach((m: any) => { m.currentControls = ''; });
+                return modes;
+            } catch(e) {
+                lastErr = e;
+                if (attempt < MODE_ATTEMPTS) await new Promise(r => setTimeout(r, 3000 * attempt));
+            }
+        }
+        console.warn('[generateModesForFailure] failed after retries:', lastErr);
+        return [];
     },
 
 async evaluateRpnFromText(

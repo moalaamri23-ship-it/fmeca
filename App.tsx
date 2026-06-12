@@ -834,8 +834,18 @@ render();
             : activeProject.name;
 
         const issues: string[] = [];
-        // Subsystems are independent — build them in parallel.
-        const completedSubs: any[] = await Promise.all(rawSubs.map(async (s: any) => {
+        // Bounded worker pool — full parallelism trips provider rate limits
+        // (free/lite OpenRouter models especially), which silently empties results.
+        const runPool = async <T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> => {
+            const results: R[] = new Array(items.length);
+            let next = 0;
+            await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+                while (next < items.length) { const idx = next++; results[idx] = await worker(items[idx]); }
+            }));
+            return results;
+        };
+        // Subsystems are independent — build them concurrently, but capped.
+        const completedSubs: any[] = await runPool(rawSubs, 2, (async (s: any) => {
             try {
                 // Step 2: Generate func using the same mechanism as the Function field magic wand.
                 const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: projectContext, subsystem: s.name, specs: s.specs }, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
@@ -871,13 +881,15 @@ render();
                 }
 
                 // Step 5: Score every mode through the formal RPN evaluator — replaces the
-                // generation-time guesses with anchored, controls-aware scores.
-                await Promise.all(failures.flatMap(f => f.modes.map(async (m: any) => {
+                // generation-time guesses with anchored, controls-aware scores. Capped
+                // concurrency to stay under provider rate limits.
+                const allModes = failures.flatMap(f => f.modes.map((m: any) => ({ f, m })));
+                await runPool(allModes, 2, (async ({ f, m }: any) => {
                     try {
                         const r = await AIService.evaluateRpnFromText({ project: projectContext, subName: s.name, subSpecs: s.specs || '', subFunc: func, failDesc: f.desc, mode: m.mode || '', effect: m.effect || '', cause: m.cause || '', currentControls: m.currentControls || '', mitigation: m.mitigation || '', key: apiKey, modelName, modeSource: aiSourceMode as any, refText: globalFileText || '', aiProvider, azureEndpoint, systemContext, powerAutomateUrl });
                         m.rpn = { s: r.s, o: r.o, d: r.d };
                     } catch { /* keep generation-time rpn on scoring failure */ }
-                })));
+                }));
 
                 return { ...s, func, breakdown, failures };
             } catch (e: any) {
