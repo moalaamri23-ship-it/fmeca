@@ -503,7 +503,7 @@ export const AIService = {
                 (parsed?.failures || []).forEach((f: any) => (f.modes || []).forEach((m: any) => { m.currentControls = ''; }));
             }
             return parsed;
-        } catch(e) { return null; }
+        } catch(e) { console.warn('[generateCompleteSubsystem] failed:', e); return null; }
     },
 
     async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingModes: string[] = []): Promise<any[]> {
@@ -549,7 +549,7 @@ export const AIService = {
             // currentControls is evidence-only: forced empty in pure AI mode.
             if (mode !== 'file' && mode !== 'hybrid') modes.forEach((m: any) => { m.currentControls = ''; });
             return modes;
-        } catch(e) { return []; }
+        } catch(e) { console.warn('[generateModesForFailure] failed:', e); return []; }
     },
 
 async evaluateRpnFromText(

@@ -865,6 +865,7 @@ render();
                 const failures: any[] = [];
                 for (const desc of ffDescs) {
                     const modes = await AIService.generateModesForFailure(desc, s.name, s.specs, func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, seenModes);
+                    if (!modes || modes.length === 0) issues.push(`${s.name} / "${desc.slice(0, 60)}": no failure modes generated`);
                     (modes || []).forEach((m: any) => { if (m.mode) seenModes.push(m.mode); });
                     failures.push({ desc, modes: modes || [] });
                 }
