@@ -481,9 +481,9 @@ export const AIService = {
         3. For each failure, generate Failure Modes, Effects, Causes, Current Controls and Mitigations. Failure modes must be unique across the whole subsystem — never repeat a mode under two failures.
         Field rules:
         - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
-        ${(mode === 'file' || mode === 'hybrid')
-            ? '- "currentControls": ONLY controls evidenced in the REFERENCE DATA or PM CHECKLIST above (installed instrument tags with alarm limits, existing PM tasks). Do NOT assume typical industry practice — empty string if no evidence.'
-            : '- "currentControls": always return an empty string "" — no plant evidence is available in this mode; controls must not be assumed.'}
+        ${((mode === 'file' || mode === 'hybrid') && checklistText?.trim())
+            ? '- "currentControls": ONLY existing PM tasks evidenced in the PM CHECKLIST KNOWLEDGE above. Do NOT pull controls from reference data and do NOT assume typical industry practice — empty string if the checklist has no relevant task.'
+            : '- "currentControls": always return an empty string "" — current controls require PM checklist evidence, which is not available.'}
         - "mitigation": RECOMMENDED actions (not yet implemented).
         - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
         ${RPN_ANCHORS}
@@ -506,9 +506,9 @@ export const AIService = {
                 responseFormat: 'json'
             });
             const parsed = this.extractJSON(res);
-            // currentControls is evidence-only: without a reference file or checklist
-            // (pure AI mode) it must stay empty no matter what the model returned.
-            if (mode !== 'file' && mode !== 'hybrid') {
+            // currentControls requires PM checklist evidence — forced empty otherwise,
+            // no matter what the model returned.
+            if (!((mode === 'file' || mode === 'hybrid') && checklistText?.trim())) {
                 (parsed?.failures || []).forEach((f: any) => (f.modes || []).forEach((m: any) => { m.currentControls = ''; }));
             }
             return parsed;
@@ -531,9 +531,9 @@ export const AIService = {
         Field rules per mode:
         - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
         - "cause": the dominant root cause of this mode.
-        ${(mode === 'file' || mode === 'hybrid')
-            ? '- "currentControls": ONLY controls evidenced in the REFERENCE DATA or PM CHECKLIST above (installed instrument tags with alarm limits, existing PM tasks). Do NOT assume typical industry practice — empty string if no evidence.'
-            : '- "currentControls": always return an empty string "" — no plant evidence is available in this mode; controls must not be assumed.'}
+        ${((mode === 'file' || mode === 'hybrid') && checklistText?.trim())
+            ? '- "currentControls": ONLY existing PM tasks evidenced in the PM CHECKLIST KNOWLEDGE above. Do NOT pull controls from reference data and do NOT assume typical industry practice — empty string if the checklist has no relevant task.'
+            : '- "currentControls": always return an empty string "" — current controls require PM checklist evidence, which is not available.'}
         - "mitigation": RECOMMENDED actions (not yet implemented).
         - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
         ${RPN_ANCHORS}
@@ -559,8 +559,8 @@ export const AIService = {
                 });
                 const parsed = this.extractJSON(res);
                 const modes = parsed.modes || [];
-                // currentControls is evidence-only: forced empty in pure AI mode.
-                if (mode !== 'file' && mode !== 'hybrid') modes.forEach((m: any) => { m.currentControls = ''; });
+                // currentControls requires PM checklist evidence — forced empty otherwise.
+                if (!((mode === 'file' || mode === 'hybrid') && checklistText?.trim())) modes.forEach((m: any) => { m.currentControls = ''; });
                 return modes;
             } catch(e) {
                 lastErr = e;
