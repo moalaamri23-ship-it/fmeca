@@ -1,5 +1,6 @@
 import { ContextData } from '../types';
 import { RICH_LIBRARY } from '../constants';
+import { buildCopilotPrompt, parseCopilotReply, getCopilotSessionId } from './copilotHelper';
 
 /*
   -------------------------------------------------------------------------
@@ -137,6 +138,54 @@ export const AIService = {
      */
     async chatWithTools(req: AIRequestPayload, tools: ToolDefinition[]): Promise<ToolChatResult> {
         try {
+            // Copilot has no native function-calling — emulate it over text.
+            // buildCopilotPrompt appends a TOOL PROTOCOL teaching the model to
+            // reply with a ```tool fence; parseCopilotReply converts it back into
+            // the same tool_calls shape the native providers produce.
+            if (req.provider === 'copilot') {
+                if (!req.powerAutomateUrl) {
+                    throw new Error('Power Automate URL is required for Copilot provider.');
+                }
+                const postPrompt = async (messages: AIMessage[]): Promise<string> => {
+                    const res = await fetch(req.powerAutomateUrl as string, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            sessionId: req.sessionId ?? getCopilotSessionId(),
+                            prompt: buildCopilotPrompt(messages, tools),
+                            responseFormat: 'text'
+                        })
+                    });
+                    if (!res.ok) {
+                        const errText = await res.text();
+                        throw new Error(`Power Automate Error: ${res.statusText}${errText ? ` — ${errText}` : ''}`);
+                    }
+                    return res.text();
+                };
+
+                const raw = await postPrompt(req.messages);
+                let parsed = parseCopilotReply(raw);
+
+                // A ```tool fence with broken JSON would otherwise surface a
+                // half-answer as final — give the model one repair round-trip.
+                if (parsed.malformedToolFence) {
+                    const repaired = await postPrompt([
+                        ...req.messages,
+                        { role: 'assistant', content: raw },
+                        {
+                            role: 'user',
+                            content: 'Your ```tool fence contained invalid JSON and could not be executed. ' +
+                                'Re-send the tool call as ONE valid ```tool fence (a JSON object with "name" and "arguments"), and nothing else.'
+                        }
+                    ]);
+                    parsed = parseCopilotReply(repaired);
+                }
+
+                return parsed.calls.length > 0
+                    ? { type: 'tool_calls', calls: parsed.calls }
+                    : { type: 'text', content: parsed.content };
+            }
+
             if (req.provider === 'openai' || req.provider === 'azure' || req.provider === 'openrouter') {
                 const openAITools = tools.map(t => ({
                     type: 'function' as const,
