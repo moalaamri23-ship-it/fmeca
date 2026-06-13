@@ -18,6 +18,8 @@ interface Chunk {
     type: 'project-header' | 'subsystem' | 'functional-failure' | 'failure-mode';
 }
 
+const norm = (s: string) => String(s || "").trim().toLowerCase().replace(/-/g, "_");
+
 export const RAGService = {
 
 
@@ -45,7 +47,7 @@ buildFailureModeIndex(project: Project): string {
         const rpn = s * o * d;
 
         lines.push(
-          `[FM-${m.id}] Sub="${sub.name}" | FF="${f.desc}" | Mode="${m.mode}" | RPN=${rpn} (S${s} O${o} D${d})`
+          `[FM-${m.id}] Sub="${sub.name}" | FF="${f.desc}" | Mode="${m.mode}" | CurrentControls="${m.currentControls || ''}" | RPN=${rpn} (S${s} O${o} D${d})`
         );
       });
     });
@@ -167,12 +169,10 @@ const needsFailureModes =
 if (needsFailureModes && !hasInc("failure_mode")) {
   include.push({
     level: "failure_mode",
-    fields: ["subsystem", "functional_failure", "mode", "cause", "effect", "mitigation", "rpn"]
-  });
-}
-
-  const norm = (s: string) => String(s || "").trim().toLowerCase().replace(/-/g, "_");
-  const inc = (lvl: string) => include.find(x => norm(x.level) === norm(lvl));
+      fields: ["subsystem", "functional_failure", "mode", "cause", "effect", "currentControls", "mitigation", "rpn"]
+    });
+  }
+	  const inc = (lvl: string) => include.find(x => norm(x.level) === norm(lvl));
 
 // --- Auto budget sizing (based on actual project size + requested fields) ---
 const countRows = (p: Project) => {
@@ -193,13 +193,14 @@ const estimateFFLineLen = (fields: string[]) => {
 const estimateFMLineLen = (fields: string[]) => {
   const base = 40;
   const perField: Record<string, number> = {
-    subsystem: 40,
-    functional_failure: 80,
-    mode: 90,
-    cause: 120,
-    effect: 120,
-    mitigation: 120,
-    rpn: 30
+	    subsystem: 40,
+	    functional_failure: 80,
+	    mode: 90,
+	    cause: 120,
+	    effect: 120,
+	    currentControls: 120,
+	    mitigation: 120,
+	    rpn: 30
   };
   return base + fields.reduce((a, f) => a + (perField[f] ?? 40), 0);
 };
@@ -304,7 +305,7 @@ const ffCountsBySubsystem = (project.subsystems || []).map(s => ({
 
         if (typeof rpnMin === "number" && rpn < rpnMin) return;
 
-        const fmText = `${sub.name} ${ff.desc} ${fm.mode} ${fm.cause} ${fm.effect} ${fm.mitigation} RPN ${rpn}`;
+	        const fmText = `${sub.name} ${ff.desc} ${fm.mode} ${fm.cause} ${fm.effect} ${fm.currentControls} ${fm.mitigation} RPN ${rpn}`;
         const score = termScore(fmText);
 
 
@@ -347,9 +348,10 @@ const ffCountsBySubsystem = (project.subsystems || []).map(s => ({
     if (fields.includes("subsystem")) parts.push(`Sub="${safe(sub.name, "(unnamed)")}"`);
     if (fields.includes("functional_failure")) parts.push(`FF="${safe(ff.desc)}"`);
     if (fields.includes("mode")) parts.push(`Mode="${safe(fm.mode)}"`);
-    if (fields.includes("effect")) parts.push(`Effect="${safe(fm.effect)}"`);
-    if (fields.includes("cause")) parts.push(`Cause="${safe(fm.cause)}"`);
-    if (fields.includes("mitigation")) parts.push(`Mitigation="${safe(fm.mitigation)}"`);
+	    if (fields.includes("effect")) parts.push(`Effect="${safe(fm.effect)}"`);
+	    if (fields.includes("cause")) parts.push(`Cause="${safe(fm.cause)}"`);
+	    if (fields.includes("currentControls") || fields.includes("current_controls")) parts.push(`CurrentControls="${safe(fm.currentControls, "")}"`);
+	    if (fields.includes("mitigation")) parts.push(`Mitigation="${safe(fm.mitigation)}"`);
     if (fields.includes("rpn")) parts.push(`RPN=${total} (S${s} O${o} D${d})`);
     return parts.join(" | ");
   };
@@ -369,8 +371,12 @@ if (ffInc) {
   ffCountsBySubsystem.forEach(x => push(`- ${x.name}: ${x.ffCount}`));
   push("---");
 
-  push("FUNCTIONAL FAILURES:");
-  }
+	  push("FUNCTIONAL FAILURES:");
+	  ffs
+	    .sort((a, b) => (b.score - a.score) || String(a.sub.name || "").localeCompare(String(b.sub.name || "")))
+	    .forEach(x => push(fmtFF(x.sub, x.ff, ffInc.fields || ["subsystem", "desc"])));
+	  push("---");
+	  }
 
   const fmInc = inc("failure_mode");
   if (fmInc) {
@@ -439,13 +445,13 @@ if (ffInc) {
                 // 4. Failure Mode Level
                 fail.modes.forEach(mode => {
                     const rpnVal = (Number(mode.rpn.s)||1)*(Number(mode.rpn.o)||1)*(Number(mode.rpn.d)||1);
-                    const modeText = `Subsystem: ${sub.name}. Functional Failure: ${fail.desc}. Failure Mode: ${mode.mode}. Effect: ${mode.effect || 'N/A'}. Cause: ${mode.cause || 'N/A'}. Mitigation/Control: ${mode.mitigation || 'N/A'}. RPN: S=${mode.rpn.s}, O=${mode.rpn.o}, D=${mode.rpn.d}, Total=${rpnVal}.`;
+	                    const modeText = `Subsystem: ${sub.name}. Functional Failure: ${fail.desc}. Failure Mode: ${mode.mode}. Effect: ${mode.effect || 'N/A'}. Cause: ${mode.cause || 'N/A'}. Current Controls: ${mode.currentControls || 'N/A'}. Mitigation/Control: ${mode.mitigation || 'N/A'}. RPN: S=${mode.rpn.s}, O=${mode.rpn.o}, D=${mode.rpn.d}, Total=${rpnVal}.`;
                     
                     chunks.push({
                         id: `mode-${mode.id}`,
                         text: modeText,
                         source: `Failure Mode in ${sub.name}`,
-                        keywords: [sub.name, fail.desc, mode.mode, mode.cause, mode.effect, mode.mitigation, 'failure mode', 'rpn', 'risk'],
+	                        keywords: [sub.name, fail.desc, mode.mode, mode.cause, mode.effect, mode.currentControls, mode.mitigation, 'failure mode', 'current controls', 'rpn', 'risk'],
                         type: 'failure-mode'
                     });
                 });
@@ -554,11 +560,12 @@ if (ffInc) {
                 if (!(ff.modes || []).length) { lines.push('  (No failure modes defined)'); return; }
                 ff.modes.forEach((m: any) => {
                     const s = Number(m.rpn?.s) || 1, o = Number(m.rpn?.o) || 1, d = Number(m.rpn?.d) || 1;
-                    lines.push(`  Mode: ${safe(m.mode)} | RPN=${s * o * d} (S${s} O${o} D${d})`);
-                    lines.push(`    Effect: ${safe(m.effect)}`);
-                    lines.push(`    Cause: ${safe(m.cause)}`);
-                    lines.push(`    Mitigation: ${safe(m.mitigation)}`);
-                });
+	                    lines.push(`  Mode: ${safe(m.mode)} | RPN=${s * o * d} (S${s} O${o} D${d})`);
+	                    lines.push(`    Effect: ${safe(m.effect)}`);
+	                    lines.push(`    Cause: ${safe(m.cause)}`);
+	                    lines.push(`    Current Controls: ${safe(m.currentControls, 'None recorded')}`);
+	                    lines.push(`    Mitigation: ${safe(m.mitigation)}`);
+	                });
             });
             return lines.join('\n');
         }
@@ -574,7 +581,7 @@ if (ffInc) {
                     if ((ff.desc || '').toLowerCase().includes(q))
                         results.push(`[Functional Failure in "${safe(sub.name)}"] ${safe(ff.desc)}`);
                     (ff.modes || []).forEach((m: any) => {
-                        const inMode = [m.mode, m.effect, m.cause, m.mitigation].some(f => (f || '').toLowerCase().includes(q));
+	                        const inMode = [m.mode, m.effect, m.cause, m.currentControls, m.mitigation].some(f => (f || '').toLowerCase().includes(q));
                         if (inMode) {
                             const rpn = (Number(m.rpn?.s) || 1) * (Number(m.rpn?.o) || 1) * (Number(m.rpn?.d) || 1);
                             results.push(`[Mode in "${safe(sub.name)}" / "${safe(ff.desc)}"] ${safe(m.mode)} | RPN=${rpn}`);
@@ -586,7 +593,7 @@ if (ffInc) {
         }
 
         if (name === 'get_rpn_summary') {
-            type Row = { sub: string; ff: string; mode: string; rpn: number; s: number; o: number; d: number };
+	            type Row = { sub: string; ff: string; mode: string; controls: string; rpn: number; s: number; o: number; d: number };
             const rows: Row[] = [];
             (project.subsystems || []).forEach(sub => {
                 if (args.subsystem_name) {
@@ -598,13 +605,13 @@ if (ffInc) {
                         const s = Number(m.rpn?.s) || 1, o = Number(m.rpn?.o) || 1, d = Number(m.rpn?.d) || 1;
                         const rpn = s * o * d;
                         if (typeof args.min_rpn === 'number' && rpn < args.min_rpn) return;
-                        rows.push({ sub: safe(sub.name), ff: safe(ff.desc), mode: safe(m.mode), rpn, s, o, d });
+	                        rows.push({ sub: safe(sub.name), ff: safe(ff.desc), mode: safe(m.mode), controls: safe(m.currentControls, 'None recorded'), rpn, s, o, d });
                     });
                 });
             });
             rows.sort((a, b) => b.rpn - a.rpn);
             return rows.length
-                ? rows.map(r => `RPN=${r.rpn}(S${r.s} O${r.o} D${r.d}) | Sub="${r.sub}" | FF="${r.ff}" | Mode="${r.mode}"`).join('\n')
+	                ? rows.map(r => `RPN=${r.rpn}(S${r.s} O${r.o} D${r.d}) | Sub="${r.sub}" | FF="${r.ff}" | Mode="${r.mode}" | CurrentControls="${r.controls}"`).join('\n')
                 : 'No failure modes found.';
         }
 
@@ -625,7 +632,7 @@ if (ffInc) {
 
         // DETECT FUNCTIONAL FAILURE LIST QUERY
         // Logic: Query asks for "functional failure" but NOT specific mode/cause/effect details.
-        const detailKeywords = ['mode', 'cause', 'root', 'effect', 'consequence', 'mitigation', 'action', 'control', 'task', 'rpn', 'risk', 'severity', 'occurrence', 'detection', 's=', 'o=', 'd='];
+	        const detailKeywords = ['mode', 'cause', 'root', 'effect', 'consequence', 'mitigation', 'action', 'control', 'controls', 'current control', 'task', 'rpn', 'risk', 'severity', 'occurrence', 'detection', 's=', 'o=', 'd='];
         const isFFQuery = queryLower.includes('functional') && 
                           queryLower.includes('failure') && 
                           !detailKeywords.some(k => queryLower.includes(k));

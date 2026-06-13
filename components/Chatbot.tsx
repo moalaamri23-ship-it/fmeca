@@ -13,6 +13,10 @@ interface ChatbotProps {
   azureEndpoint?: string;
   systemContext?: string;
   powerAutomateUrl?: string;
+  referenceFileText?: string;
+  referenceFileName?: string;
+  checklistText?: string;
+  checklistFileName?: string;
 }
 
 function styleDirective(style: "normal" | "concise" | "one_sentence") {
@@ -38,6 +42,7 @@ RESPONSE STYLE:
 interface Message {
     role: 'user' | 'assistant' | 'system';
     content: string;
+    sources?: string[];
 }
 // ===== System Prompts =====
 
@@ -90,7 +95,7 @@ const FMECA_TOOLS: ToolDefinition[] = [
     },
     {
         name: 'get_failure_modes',
-        description: 'Get all failure modes for a subsystem with effect, cause, mitigation and RPN scores. Optionally filter to a specific functional failure.',
+        description: 'Get all failure modes for a subsystem with effect, cause, current controls, mitigation and RPN scores. Optionally filter to a specific functional failure.',
         parameters: {
             type: 'object',
             properties: {
@@ -102,7 +107,7 @@ const FMECA_TOOLS: ToolDefinition[] = [
     },
     {
         name: 'search_project',
-        description: 'Search across all project data — subsystems, functional failures, failure modes, effects, causes, mitigations — for a term or phrase.',
+        description: 'Search across all project data — subsystems, functional failures, failure modes, effects, causes, current controls, mitigations — for a term or phrase.',
         parameters: {
             type: 'object',
             properties: {
@@ -174,7 +179,7 @@ function safeJsonParse(raw: string) {
 }
 
 
-export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelName, responseStyle, aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = '' }) => {
+export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelName, responseStyle, aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = '', referenceFileText = '', referenceFileName = '', checklistText = '', checklistFileName = '' }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState("");
@@ -194,6 +199,15 @@ export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelNa
     const [isDragging, setIsDragging] = useState(false);
     const dragStart = useRef({ y: 0, startY: 0 });
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const skipNextSaveRef = useRef(false);
+    const wasDraggingRef = useRef(false);
+
+    const initialMessages: Message[] = [{
+        role: 'assistant',
+        content: "Hello! I am your RCM Consultant. I can help analyze your FMECA project, suggest improvements, or identify risks. How can I assist you today?"
+    }];
+
+    const chatStorageKey = activeProject?.id ? `rcm_chatbot_msgs_${activeProject.id}` : 'rcm_chatbot_msgs';
 
     // Init Logic
     useEffect(() => {
@@ -204,25 +218,34 @@ export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelNa
             setYPos(window.innerHeight - 100);
         }
 
-        const savedMsgs = localStorage.getItem('rcm_chatbot_msgs');
-        if (savedMsgs) {
-            try { setMessages(JSON.parse(savedMsgs)); } catch(e) {}
-        } else {
-            setMessages([{ role: 'assistant', content: "Hello! I am your RCM Consultant. I can help analyze your FMECA project, suggest improvements, or identify risks. How can I assist you today?" }]);
-        }
     }, []);
 
     useEffect(() => {
-        localStorage.setItem('rcm_chatbot_msgs', JSON.stringify(messages));
+        skipNextSaveRef.current = true;
+        const savedMsgs = localStorage.getItem(chatStorageKey);
+        if (savedMsgs) {
+            try { setMessages(JSON.parse(savedMsgs)); } catch(e) {}
+        } else {
+            setMessages(initialMessages);
+        }
+    }, [chatStorageKey]);
+
+    useEffect(() => {
+        if (skipNextSaveRef.current) {
+            skipNextSaveRef.current = false;
+            return;
+        }
+        localStorage.setItem(chatStorageKey, JSON.stringify(messages));
         if (isOpen && messagesEndRef.current) {
             messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
         }
-    }, [messages, isOpen]);
+    }, [messages, isOpen, chatStorageKey]);
 
     // Vertical Drag Logic
     const handleMouseDown = (e: React.MouseEvent) => {
         if (isOpen) return;
         setIsDragging(true);
+        wasDraggingRef.current = false;
         dragStart.current = { y: e.clientY, startY: yPos };
         document.addEventListener('mousemove', handleMouseMove);
         document.addEventListener('mouseup', handleMouseUp);
@@ -230,6 +253,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelNa
 
     const handleMouseMove = (e: MouseEvent) => {
         const deltaY = e.clientY - dragStart.current.y;
+        if (Math.abs(deltaY) > 3) wasDraggingRef.current = true;
         let newY = dragStart.current.startY + deltaY;
         // Constraint to screen height with padding
         newY = Math.max(20, Math.min(window.innerHeight - 80, newY));
@@ -269,7 +293,39 @@ export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelNa
     }
   ];
   setMessages(initial);
-  localStorage.removeItem('rcm_chatbot_msgs');
+  localStorage.removeItem(chatStorageKey);
+  };
+
+  const buildExternalKnowledgeContext = (userText: string): { context: string; sources: string[] } => {
+    const q = userText.toLowerCase();
+    const wantsChecklist = ['checklist', 'pm ', 'preventive', 'inspection', 'current control', 'control', 'task', 'maintenance'].some(k => q.includes(k));
+    const wantsReference = ['reference', 'file', 'datasheet', 'data sheet', 'p&id', 'pid', 'tag', 'alarm', 'instrument', 'manual', 'spec'].some(k => q.includes(k));
+    const sections: string[] = [];
+    const sources: string[] = [];
+
+    if (referenceFileText.trim() && (wantsReference || referenceFileText.length <= 6000)) {
+      sections.push(`REFERENCE FILE (${referenceFileName || 'uploaded file'}):\n${referenceFileText.slice(0, 10000)}`);
+      sources.push(referenceFileName ? `Reference file: ${referenceFileName}` : 'Reference file');
+    }
+
+    if (checklistText.trim() && (wantsChecklist || checklistText.length <= 6000)) {
+      sections.push(`PM CHECKLIST (${checklistFileName || 'uploaded checklist'}):\n${checklistText.slice(0, 7000)}`);
+      sources.push(checklistFileName ? `Checklist: ${checklistFileName}` : 'Checklist');
+    }
+
+    return {
+      context: sections.length ? `SUPPLEMENTAL USER FILE DATA:\n---\n${sections.join('\n\n---\n\n')}` : '',
+      sources
+    };
+  };
+
+  const summarizeToolSource = (name: string, args: Record<string, any>): string => {
+    if (name === 'list_subsystems') return 'Project subsystem list';
+    if (name === 'get_subsystem_detail') return `Subsystem detail: ${args.subsystem_name || 'selected subsystem'}`;
+    if (name === 'get_failure_modes') return `Failure modes: ${args.subsystem_name || 'selected subsystem'}`;
+    if (name === 'search_project') return `Project search: ${args.query || 'query'}`;
+    if (name === 'get_rpn_summary') return args.subsystem_name ? `RPN summary: ${args.subsystem_name}` : 'Project RPN summary';
+    return name;
   };
 
 
@@ -299,8 +355,12 @@ export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelNa
 const provider = (aiProvider || (apiKey.startsWith('sk-') ? 'openai' : 'gemini')) as any;
 const richIndex = (isRagEnabled && activeProject) ? RAGService.buildRichIndex(activeProject) : '';
 let retrievedContext = "";
+let retrievalSources: string[] = [];
 
 if (isRagEnabled && activeProject) {
+    const externalKnowledge = buildExternalKnowledgeContext(userText);
+    retrievalSources = [...externalKnowledge.sources];
+
     // Step 1: Tool selection via real function calling
     // The AI sees the rich index (orientation) and calls the right tool(s) to fetch exact data.
     const toolSelectorMessages: AIMessage[] = [
@@ -335,12 +395,13 @@ ${richIndex}
 
         if (toolResult.type === 'tool_calls' && toolResult.calls && toolResult.calls.length > 0) {
             const resultParts: string[] = [];
-            for (const call of toolResult.calls) {
-                const result = RAGService.executeToolCall(call.name, call.args, activeProject);
-                resultParts.push(`[${call.name}(${JSON.stringify(call.args)})]\n${result}`);
-            }
-            retrievedContext = resultParts.join('\n\n---\n\n');
-            toolsSucceeded = true;
+	            for (const call of toolResult.calls) {
+	                const result = RAGService.executeToolCall(call.name, call.args, activeProject);
+	                resultParts.push(`[${call.name}(${JSON.stringify(call.args)})]\n${result}`);
+	                retrievalSources.push(summarizeToolSource(call.name, call.args));
+	            }
+	            retrievedContext = resultParts.join('\n\n---\n\n');
+	            toolsSucceeded = true;
         }
     } catch {
         toolsSucceeded = false;
@@ -367,14 +428,22 @@ ${richIndex}
                 apiKey
             });
             const plan = safeJsonParse(planRaw);
-            if (plan) retrievedContext = RAGService.buildContextByPlan(plan, userText, activeProject);
-        } catch { /* continue to keyword fallback */ }
-    }
+	            if (plan) {
+                    retrievedContext = RAGService.buildContextByPlan(plan, userText, activeProject);
+                    retrievalSources.push('Planner-selected project context');
+                }
+	        } catch { /* continue to keyword fallback */ }
+	    }
 
     // Step 1c (last resort): keyword retrieval
-    if (!retrievedContext) {
-        retrievedContext = RAGService.retrieveContext(userText, activeProject, 80);
-    }
+	    if (!retrievedContext) {
+	        retrievedContext = RAGService.retrieveContext(userText, activeProject, 80);
+	        retrievalSources.push('Keyword project retrieval');
+	    }
+
+        if (externalKnowledge.context) {
+            retrievedContext = retrievedContext ? `${retrievedContext}\n\n---\n\n${externalKnowledge.context}` : externalKnowledge.context;
+        }
 }
 
 // Step 2: Build the answering system prompt
@@ -423,7 +492,8 @@ const apiMessages: AIMessage[] = [
                 apiKey
             });
 
-            setMessages(prev => [...prev, { role: 'assistant', content: response }]);
+	            const uniqueSources = Array.from(new Set(retrievalSources.filter(Boolean))).slice(0, 6);
+	            setMessages(prev => [...prev, { role: 'assistant', content: response, sources: isRagEnabled ? uniqueSources : [] }]);
         } catch (e: any) {
             setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${e.message || "Failed to connect."}` }]);
         }
@@ -442,7 +512,7 @@ const apiMessages: AIMessage[] = [
                     ${isDragging ? 'cursor-grabbing opacity-100 translate-x-0' : 'cursor-grab opacity-50 hover:opacity-100 translate-x-1/2 hover:translate-x-0'}
                     `}
                     title="RCM Consultant"
-                    onClick={(e) => { if(!isDragging) setIsOpen(true); }}
+                    onClick={() => { if(!wasDraggingRef.current) setIsOpen(true); }}
                 >
                     <div className="mr-2"> {/* Offset icon slightly left because of half-circle shape */}
                         <Icon name="wand" className="w-6 h-6" />
@@ -496,9 +566,20 @@ const apiMessages: AIMessage[] = [
                                             ? 'bg-brand-600 text-white rounded-tr-none' 
                                             : 'bg-white text-slate-700 border border-slate-200 rounded-tl-none'
                                     }`}>
-                                        {m.role === 'assistant'
-  ? <div dangerouslySetInnerHTML={renderMiniMarkdown(m.content)} />
-  : m.content}
+	                                        {m.role === 'assistant'
+	  ? <>
+          <div dangerouslySetInnerHTML={renderMiniMarkdown(m.content)} />
+          {!!m.sources?.length && (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {m.sources.map((src, idx) => (
+                <span key={`${src}-${idx}`} className="text-[10px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5">
+                  {src}
+                </span>
+              ))}
+            </div>
+          )}
+        </>
+	  : m.content}
 
                                     </div>
                                 </div>

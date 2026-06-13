@@ -199,11 +199,11 @@ export const AIService = {
 
                 const body: any = {
                     contents,
-                    tools: [{ function_declarations: functionDeclarations }],
-                    tool_config: { function_calling_config: { mode: 'AUTO' } }
+                    tools: [{ functionDeclarations }],
+                    toolConfig: { functionCallingConfig: { mode: 'AUTO' } }
                 };
                 if (systemMsg) {
-                    body.system_instruction = { parts: [{ text: typeof systemMsg.content === 'string' ? systemMsg.content : '' }] };
+                    body.systemInstruction = { parts: [{ text: typeof systemMsg.content === 'string' ? systemMsg.content : '' }] };
                 }
 
                 const model = (req.model && req.model.trim()) || 'gemini-2.0-flash';
@@ -766,10 +766,14 @@ Output format:
             throw new Error('Power Automate URL is required for Copilot provider.');
         }
 
-        const lastUserMessage = [...req.messages].reverse().find(m => m.role === 'user');
-        const rawPrompt = typeof lastUserMessage?.content === 'string'
-            ? lastUserMessage.content
-            : '';
+        const rawPrompt = req.feature === 'chatbot'
+            ? req.messages
+                .map(m => `${m.role.toUpperCase()}:\n${typeof m.content === 'string' ? m.content : ''}`)
+                .join('\n\n')
+            : (() => {
+                const lastUserMessage = [...req.messages].reverse().find(m => m.role === 'user');
+                return typeof lastUserMessage?.content === 'string' ? lastUserMessage.content : '';
+            })();
 
         const fullPrompt = this.attachContext(rawPrompt, req.mode, req.refText ?? '', req.responseFormat);
 
@@ -801,11 +805,17 @@ Output format:
 
         try {
             if (req.provider === 'anthropic') {
+                const systemText = req.messages
+                    .filter(m => m.role === 'system')
+                    .map(m => typeof m.content === 'string' ? m.content : '')
+                    .join('\n\n');
                 const msgs = req.feature === 'chatbot'
-                    ? req.messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: typeof m.content === 'string' ? m.content : '' }))
+                    ? req.messages
+                        .filter(m => m.role !== 'system')
+                        .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: typeof m.content === 'string' ? m.content : '' }))
                     : [{ role: 'user', content: fullPrompt + (req.responseFormat === 'json' ? ' Return JSON object only.' : '') }];
                 const body: any = { model: (req.model && req.model.trim()) || 'claude-sonnet-4-20250514', max_tokens: 4096, messages: msgs };
-                if (req.feature === 'chatbot') body.system = "You are a helpful RCM consultant.";
+                if (req.feature === 'chatbot') body.system = systemText || "You are a helpful RCM consultant.";
                 const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': req.apiKey, 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) });
                 const data = await res.json();
                 if (data.error) throw new Error(data.error.message || data.error.type || JSON.stringify(data.error));
@@ -838,7 +848,7 @@ Output format:
                     messages: [...req.messages.slice(0, -1), { role: "user", content: fullPrompt }]
                 };
                 // If it's a conversation history (chatbot), fullPrompt might replace just the last message
-                if (req.feature === 'chatbot') {
+	                if (req.feature === 'chatbot') {
                      // For chatbot, we append the system prompt/context to the last message or as system message
                      // Here we just modify the last user message for simplicity as per legacy generate() behavior logic
                      // But for proper chat, we should keep the history.
@@ -866,7 +876,11 @@ Output format:
                     // Flatten messages for simple stateless call if model doesn't support chat format easily in this SDK-less implementation
                     // Or map to Gemini content structure.
                     // For safety and strict adherence to "don't simplify", we map the conversation.
-                    const contents = req.messages.map(m => ({
+                    const systemText = req.messages
+                        .filter(m => m.role === 'system')
+                        .map(m => typeof m.content === 'string' ? m.content : '')
+                        .join('\n\n');
+                    const contents = req.messages.filter(m => m.role !== 'system').map(m => ({
                         role: m.role === 'assistant' ? 'model' : 'user',
                         parts: [{ text: typeof m.content === 'string' ? m.content : '' }]
                     }));
@@ -874,7 +888,7 @@ Output format:
                     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${(req.model && req.model.trim()) || "gemini-1.5-flash"}:generateContent?key=${req.apiKey}`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ contents, systemInstruction: { parts: [{ text: "You are a helpful RCM consultant." }] } }) // Basic system instruction support
+                        body: JSON.stringify({ contents, systemInstruction: { parts: [{ text: systemText || "You are a helpful RCM consultant." }] } }) // Basic system instruction support
                     });
                     const data = await res.json();
                     if (data.error) throw new Error(data.error.message);

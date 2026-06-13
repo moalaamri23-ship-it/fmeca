@@ -960,14 +960,18 @@ render();
             {activeProject && enableChatbot && view === 'editor' && (
   <Chatbot
     activeProject={activeProject}
-    apiKey={apiKey}
-    modelName={modelName}
-    responseStyle={chatbotStyle}
-    aiProvider={aiProvider}
-    azureEndpoint={azureEndpoint}
-    systemContext={systemContext}
-    powerAutomateUrl={powerAutomateUrl}
-  />
+	    apiKey={apiKey}
+	    modelName={modelName}
+	    responseStyle={chatbotStyle}
+	    aiProvider={aiProvider}
+	    azureEndpoint={azureEndpoint}
+	    systemContext={systemContext}
+	    powerAutomateUrl={powerAutomateUrl}
+	    referenceFileText={globalFileText}
+	    referenceFileName={globalFileName}
+	    checklistText={checklistText}
+	    checklistFileName={checklistFileName}
+	  />
 )}
 
             {view === 'dashboard' && (
