@@ -58,7 +58,7 @@ const sanitizeProject = (p: any): Project => {
     return newP;
 };
 
-type ChatbotResponseStyle = "normal" | "concise" | "one_sentence";
+type ChatbotResponseStyle = "normal" | "concise" | "tldr";
 type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter' | 'copilot';
 
 const PROVIDER_LABELS: Record<AIProvider, string> = { gemini: 'Gemini', openai: 'OpenAI', anthropic: 'Anthropic', azure: 'Azure', openrouter: 'OpenRouter', copilot: 'Copilot' };
@@ -231,7 +231,8 @@ setProjects(
     setAzureEndpoint(localStorage.getItem('rcm_azure_endpoint') || '');
     setPowerAutomateUrl(localStorage.getItem('rcm_power_automate_url') || '');
     setEnableChatbot(localStorage.getItem('rcm_enable_chatbot') !== 'false');
-    setChatbotStyle((localStorage.getItem('rcm_chatbot_style') as ChatbotResponseStyle) || 'normal');
+    const storedStyle = localStorage.getItem('rcm_chatbot_style');
+    setChatbotStyle((storedStyle === 'one_sentence' ? 'tldr' : storedStyle as ChatbotResponseStyle) || 'normal');
     setGlobalFileText(localStorage.getItem('rcm_global_file_text') || '');
     setGlobalFileName(localStorage.getItem('rcm_global_file_name') || '');
     setChecklistText(localStorage.getItem('rcm_checklist_text') || '');
@@ -1088,11 +1089,11 @@ render();
   >
     <option value="normal">Normal</option>
     <option value="concise">Concise</option>
-    <option value="one_sentence">One Sentence</option>
+    <option value="tldr">TL;DR</option>
   </select>
 
   <p className="text-xs text-slate-500 mt-1">
-    Normal keeps current behavior. Concise shortens responses. One sentence forces a single sentence output.
+    Normal keeps current behavior. Concise shortens responses. TL;DR gives the shortest possible answer, adding a compact table only when it explains what brief text cannot.
   </p>
 </div>
 

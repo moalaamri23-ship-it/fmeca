@@ -8,7 +8,7 @@ interface ChatbotProps {
   activeProject: Project | null;
   apiKey: string;
   modelName: string;
-  responseStyle: "normal" | "concise" | "one_sentence";
+  responseStyle: "normal" | "concise" | "tldr";
   aiProvider?: string;
   azureEndpoint?: string;
   systemContext?: string;
@@ -19,13 +19,13 @@ interface ChatbotProps {
   checklistFileName?: string;
 }
 
-function styleDirective(style: "normal" | "concise" | "one_sentence") {
-  if (style === "one_sentence") {
+function styleDirective(style: "normal" | "concise" | "tldr") {
+  if (style === "tldr") {
     return `
 RESPONSE STYLE (HARD RULE):
-- Output EXACTLY ONE sentence.
-- No line breaks, no bullets, no numbering.
-- If more detail is needed, compress into one sentence using semicolons.
+- Answer in the fewest words possible — ideally a single short sentence; compress extra detail with semicolons rather than adding more sentences.
+- When the answer needs structured detail that short prose cannot convey (rankings, comparisons, multi-field lists), add ONE compact markdown table after the sentence, limited to the most relevant rows/columns. Otherwise no table.
+- Nothing else.
 `.trim();
   }
   if (style === "concise") {
@@ -62,6 +62,7 @@ ANSWER GUIDELINES:
 
 OUTPUT STYLE:
 - Be concise and workshop-ready. Quote project fields when present.
+- For rankings, comparisons, or multi-field lists (e.g. RPN summaries, comparing subsystems), use a GitHub-flavored markdown table. Keep short single answers as prose.
 - End with one targeted follow-up question.`.trim();
 
 const SYSTEM_RAG_OFF = `
@@ -186,11 +187,56 @@ export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelNa
     const [loading, setLoading] = useState(false);
 
     const renderMiniMarkdown = (text: string) => {
-    let html = text
-        .replace(/^### (.*)$/gm, '<div class="font-semibold mt-2 mb-1">$1</div>') // ### Heading
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')                         // **bold**
-        .replace(/\n/g, '<br/>');                                                  // line breaks
-    return { __html: html };
+        const inline = (s: string) => s.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>'); // **bold**
+        const splitCells = (l: string) =>
+            l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+        const isRow = (l: string) => /^\s*\|.*\|\s*$/.test(l);
+        // Separator row: |---|:--:| etc. — dashes plus optional colons/pipes/spaces.
+        const isSep = (l: string) => /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(l) && l.includes('-');
+
+        const lines = text.split('\n');
+        const blocks: string[] = [];
+        let para: string[] = [];
+        const flushPara = () => { if (para.length) { blocks.push(para.join('<br/>')); para = []; } };
+
+        let i = 0;
+        while (i < lines.length) {
+            const line = lines[i];
+
+            // GitHub-flavored markdown table: header row + separator row + body rows.
+            if (isRow(line) && i + 1 < lines.length && isSep(lines[i + 1])) {
+                flushPara();
+                const headerCells = splitCells(line);
+                i += 2;
+                const bodyRows: string[][] = [];
+                while (i < lines.length && isRow(lines[i])) { bodyRows.push(splitCells(lines[i])); i++; }
+
+                const th = headerCells
+                    .map(c => `<th class="border border-slate-300 px-2 py-1 text-left font-semibold whitespace-nowrap">${inline(c)}</th>`)
+                    .join('');
+                const trs = bodyRows
+                    .map(r => `<tr>${r.map(c => `<td class="border border-slate-200 px-2 py-1 align-top">${inline(c)}</td>`).join('')}</tr>`)
+                    .join('');
+                blocks.push(
+                    `<div class="overflow-x-auto my-2"><table class="text-xs border-collapse w-full"><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table></div>`
+                );
+                continue;
+            }
+
+            // ### Heading
+            if (/^### (.*)$/.test(line)) {
+                flushPara();
+                blocks.push(`<div class="font-semibold mt-2 mb-1">${inline(line.replace(/^### /, ''))}</div>`);
+                i++;
+                continue;
+            }
+
+            para.push(inline(line));
+            i++;
+        }
+        flushPara();
+
+        return { __html: blocks.join('') };
     };
      
     const [isRagEnabled, setIsRagEnabled] = useState(true); 
