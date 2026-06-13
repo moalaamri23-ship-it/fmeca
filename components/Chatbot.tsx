@@ -523,9 +523,17 @@ const apiMessages: AIMessage[] = [
         .map(m => ({ role: m.role, content: m.content }))
 ];
 
-// Step 3: Generate final answer (plain chat — no tools, just context + history)
+// Step 3: Generate final answer — stream tokens like ChatGPT.
+// Copilot can't stream; AIService.chatStream emits the full reply as one chunk for it.
+        const uniqueSources = Array.from(new Set(retrievalSources.filter(Boolean))).slice(0, 6);
+        const answerSources = isRagEnabled ? uniqueSources : [];
         try {
-            const response = await AIService.chat({
+            // Keep `loading` true (blocks re-send, shows typing dots) until the first
+            // chunk arrives, then append the assistant bubble and fill it as more
+            // chunks stream in. Copilot delivers the whole reply as one chunk.
+            let acc = '';
+            let started = false;
+            await AIService.chatStream({
                 sessionId: 'chatbot-session',
                 feature: 'chatbot',
                 provider,
@@ -536,10 +544,25 @@ const apiMessages: AIMessage[] = [
                 mode: 'ai',
                 contextData: { retrievedChunks: isRagEnabled ? retrievedContext : "" },
                 apiKey
+            }, (delta) => {
+                acc += delta;
+                setMessages(prev => {
+                    if (!started) {
+                        started = true;
+                        return [...prev, { role: 'assistant', content: acc, sources: answerSources }];
+                    }
+                    const next = [...prev];
+                    const last = next[next.length - 1];
+                    if (last && last.role === 'assistant') {
+                        next[next.length - 1] = { ...last, content: acc, sources: answerSources };
+                    }
+                    return next;
+                });
             });
-
-	            const uniqueSources = Array.from(new Set(retrievalSources.filter(Boolean))).slice(0, 6);
-	            setMessages(prev => [...prev, { role: 'assistant', content: response, sources: isRagEnabled ? uniqueSources : [] }]);
+            // Empty reply (no chunks): still show an assistant bubble so the turn closes.
+            if (!started) {
+                setMessages(prev => [...prev, { role: 'assistant', content: '', sources: answerSources }]);
+            }
         } catch (e: any) {
             setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${e.message || "Failed to connect."}` }]);
         }
@@ -630,7 +653,7 @@ const apiMessages: AIMessage[] = [
                                     </div>
                                 </div>
                             ))}
-                            {loading && (
+                            {loading && messages[messages.length - 1]?.role !== 'assistant' && (
                                 <div className="flex justify-start">
                                     <div className="bg-white border border-slate-200 rounded-2xl rounded-tl-none p-3 shadow-sm flex gap-1">
                                         <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce"></div>

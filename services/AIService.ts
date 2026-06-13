@@ -131,6 +131,124 @@ export const AIService = {
     },
 
     /**
+     * Streaming chat — emits text deltas via onChunk as they arrive (ChatGPT-style).
+     * Returns the full concatenated text when done.
+     *
+     * Copilot (Power Automate) cannot stream and remote/proxy mode is non-streaming,
+     * so both fall back to a single onChunk with the full reply. Any streaming error
+     * falls back to a non-streaming chat() so the user still gets an answer.
+     *
+     * Built for the chatbot final-answer call (feature: 'chatbot') — messages are
+     * sent as-is (system + conversation), like _directChat's chatbot branch.
+     */
+    async chatStream(req: AIRequestPayload, onChunk: (delta: string) => void): Promise<string> {
+        // No real streaming for Copilot or remote-proxy mode — emit the full reply once.
+        if (req.provider === 'copilot' || AI_CONFIG.baseUrl) {
+            const full = await this.chat(req);
+            if (full) onChunk(full);
+            return full;
+        }
+
+        try {
+            const sys = () => req.messages
+                .filter(m => m.role === 'system')
+                .map(m => typeof m.content === 'string' ? m.content : '')
+                .join('\n\n');
+
+            let url: string;
+            let headers: Record<string, string>;
+            let body: any;
+            let parser: 'openai' | 'anthropic' | 'gemini';
+
+            if (req.provider === 'anthropic') {
+                parser = 'anthropic';
+                const convMsgs = req.messages
+                    .filter(m => m.role !== 'system')
+                    .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: typeof m.content === 'string' ? m.content : '' }));
+                url = 'https://api.anthropic.com/v1/messages';
+                headers = { 'Content-Type': 'application/json', 'x-api-key': req.apiKey, 'anthropic-version': '2023-06-01' };
+                body = { model: (req.model && req.model.trim()) || 'claude-sonnet-4-20250514', max_tokens: 4096, system: sys() || 'You are a helpful RCM consultant.', messages: convMsgs, stream: true };
+            } else if (req.provider === 'gemini') {
+                parser = 'gemini';
+                const contents = req.messages
+                    .filter(m => m.role !== 'system')
+                    .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: typeof m.content === 'string' ? m.content : '' }] }));
+                const model = (req.model && req.model.trim()) || 'gemini-2.0-flash';
+                url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${req.apiKey}`;
+                headers = { 'Content-Type': 'application/json' };
+                body = { contents, systemInstruction: { parts: [{ text: sys() || 'You are a helpful RCM consultant.' }] } };
+            } else {
+                // openai | openrouter | azure — OpenAI-compatible SSE
+                parser = 'openai';
+                if (req.provider === 'azure') {
+                    const endpoint = (req.azureEndpoint || '').replace(/\/$/, '');
+                    url = `${endpoint}/openai/deployments/${req.model}/chat/completions?api-version=2024-02-01`;
+                    headers = { 'Content-Type': 'application/json', 'api-key': req.apiKey };
+                    body = { messages: req.messages, stream: true };
+                } else if (req.provider === 'openrouter') {
+                    url = 'https://openrouter.ai/api/v1/chat/completions';
+                    headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${req.apiKey}` };
+                    body = { model: (req.model && req.model.trim()) || 'openai/gpt-4o-mini', messages: req.messages, stream: true };
+                } else {
+                    url = 'https://api.openai.com/v1/chat/completions';
+                    headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${req.apiKey}` };
+                    body = { model: (req.model && req.model.trim()) || 'gpt-4o-mini', messages: req.messages, stream: true };
+                }
+            }
+
+            const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+            if (!res.ok || !res.body) {
+                const errText = await res.text().catch(() => '');
+                throw new Error(`API error ${res.status}${errText ? ` — ${errText}` : ''}`);
+            }
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let full = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() ?? '';
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed.startsWith('data:')) continue;
+                    const payloadStr = trimmed.slice(5).trim();
+                    if (!payloadStr || payloadStr === '[DONE]') continue;
+
+                    try {
+                        const json = JSON.parse(payloadStr);
+                        let delta = '';
+                        if (parser === 'openai') {
+                            delta = json.choices?.[0]?.delta?.content || '';
+                        } else if (parser === 'gemini') {
+                            delta = (json.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || '').join('');
+                        } else { // anthropic
+                            if (json.type === 'content_block_delta') delta = json.delta?.text || '';
+                            else if (json.type === 'error') throw new Error(json.error?.message || 'Anthropic stream error');
+                        }
+                        if (delta) { full += delta; onChunk(delta); }
+                    } catch (parseErr) {
+                        // Re-throw real stream errors; ignore unparseable keep-alive lines.
+                        if (parseErr instanceof Error && parseErr.message.includes('stream error')) throw parseErr;
+                    }
+                }
+            }
+            return full;
+        } catch (e) {
+            // Fall back to non-streaming so the user still gets an answer.
+            console.warn('[AIService] Streaming failed, falling back to non-streaming chat.', e);
+            const full = await this.chat(req);
+            if (full) onChunk(full);
+            return full;
+        }
+    },
+
+    /**
      * Sends a chat request with tool definitions.
      * Returns either tool_calls (AI wants to call tools) or text (final answer).
      * Supports: openai, azure, openrouter (tools param), gemini (function_declarations).
