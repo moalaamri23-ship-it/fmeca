@@ -546,9 +546,14 @@ const apiMessages: AIMessage[] = [
                 apiKey
             }, (delta) => {
                 acc += delta;
+                // Set `started` synchronously here — NOT inside the updater below.
+                // React defers updater execution, so reading a flag mutated inside
+                // the updater at line "if (!started)" after the await can race and
+                // push a duplicate assistant bubble (repeated tool-source chips).
+                const isFirst = !started;
+                started = true;
                 setMessages(prev => {
-                    if (!started) {
-                        started = true;
+                    if (isFirst) {
                         return [...prev, { role: 'assistant', content: acc, sources: answerSources }];
                     }
                     const next = [...prev];
