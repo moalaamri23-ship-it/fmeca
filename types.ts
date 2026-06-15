@@ -14,6 +14,10 @@ export interface Mode {
   /** Recommended actions — proposed, not yet implemented; never credited toward D. */
   mitigation: string;
   rpn: RPN;
+  /** Hidden audit note from AI RPN scoring; available to the chatbot. */
+  rpnReason?: string;
+  /** Optional source/provenance labels shown only when Hybrid labels are enabled. */
+  sourceTags?: string[];
 }
 
 export interface Failure {
@@ -21,6 +25,7 @@ export interface Failure {
   desc: string;
   modes: Mode[];
   collapsed?: boolean;
+  sourceTags?: string[];
 }
 
 export interface BreakdownRow {
@@ -47,7 +52,9 @@ export interface Subsystem {
   failures: Failure[];
   collapsed?: boolean;
   functionBreakdown?: BreakdownRow[];
+  breakdownMatches?: BreakdownMatch[];
   funcHashAtBreakdown?: string;
+  sourceTags?: string[];
 }
 
 export interface Project {

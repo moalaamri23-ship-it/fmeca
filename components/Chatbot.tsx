@@ -144,7 +144,7 @@ Levels: "project_header", "subsystem", "functional_failure", "failure_mode"
 Fields (examples):
 - subsystem: name, func, specs
 - functional_failure: desc
-- failure_mode: mode, cause, effect, mitigation, rpn (S/O/D/Total)
+- failure_mode: mode, cause, effect, mitigation, rpn (S/O/D/Total), rpn_reason
 
 Output JSON schema:
 {

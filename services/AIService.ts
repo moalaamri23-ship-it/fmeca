@@ -1225,6 +1225,7 @@ Output format:
     async generateFFForRow(
         systemName: string,
         subsystemName: string,
+        subsystemSpecs: string,
         funcDesc: string,
         breakdownSnippet: string,
         breakdownStandard: string,
@@ -1242,10 +1243,12 @@ Output format:
             : '';
         const standardNote = breakdownStandard ? ` (standard: "${breakdownStandard}")` : '';
         const prompt = `Context: System "${systemName}", Subsystem "${subsystemName}".
+Subsystem Specs: "${subsystemSpecs || 'N/A'}"
 Subsystem Function: "${funcDesc}"
 Specific functional aspect to address: "${breakdownSnippet}"${standardNote}
 
 ${existingBlock}Task: Generate ONE Functional Failure that specifically addresses the loss or degradation of this functional aspect.
+Use the System, Subsystem, Specs, and complete Function as controlling context; do not make the failure generic if the context supports a more specific failure statement.
 Express it naturally as a reliability engineer would — a negation or reduction of that specific aspect.
 Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
 
@@ -1291,17 +1294,19 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
         // Normal groups them so the breakdown stays at the level of distinct primary
         // functions. This is the lever that controls how many functional failures the
         // downstream step derives — not a "produce fewer" instruction bolted on.
-        const groupingRules = detailLevel === 'normal'
-            ? `4. GROUP COMPOUND CONDITIONS: keep each distinct primary function as ONE row with its single most important standard. Do NOT split a combined operating/safety clause into separate rows — e.g. "without vibration, leakage, or excessive temperature" becomes ONE row:
-   • { function: "operates within limits", standard: "within normal vibration, leakage and temperature limits", snippet: "without abnormal vibration, leakage, or excessive temperature" }
-5. NO DUPLICATES: every [function, standard] pair must be unique. If you would repeat a pair, merge or skip.
-6. Prefer the FEWEST rows that still cover the distinct primary functions — merge closely related conditions rather than enumerating each one.`
-            : `4. SPLIT COMPOUND CONDITIONS: if the source text says "without vibration, leakage, or excessive temperature" — create THREE separate rows, one per condition:
-   • { function: "operates without fault", standard: "no abnormal vibration", snippet: "without abnormal vibration" }
-   • { function: "operates without fault", standard: "no leakage", snippet: "leakage" }
-   • { function: "operates without fault", standard: "no excessive temperature", snippet: "excessive temperature" }
-5. NO DUPLICATES: every [function, standard] pair must be unique. If you would repeat a pair, merge or skip.
-6. Each row must represent exactly ONE condition — never combine "no vibration AND no leakage" into a single standard.`;
+	        const groupingRules = detailLevel === 'normal'
+	            ? `5. GROUP COMPOUND CONDITIONS: keep each distinct primary function as ONE row with its single most important standard. Do NOT split a combined operating/safety clause into separate rows — e.g. "without vibration, leakage, or excessive temperature" becomes ONE row:
+	   • { function: "operates within limits", standard: "within normal vibration, leakage and temperature limits", snippet: "without abnormal vibration, leakage, or excessive temperature" }
+	6. SKIP TRIVIAL EXPECTATIONS: do not create rows for generic adjectives or goals such as "reliable", "efficient", "safe", "available", "continuous", "properly", or "as required" unless tied to a measurable value, containment/protection duty, operating envelope, or clearly distinct reliability consequence.
+	7. NO DUPLICATES: every [function, standard] pair must be unique. If you would repeat a pair, merge or skip.
+	8. Prefer the FEWEST rows that still cover the distinct primary functions — merge closely related conditions rather than enumerating each one.`
+	            : `5. SPLIT COMPOUND CONDITIONS: if the source text says "without vibration, leakage, or excessive temperature" — create THREE separate rows, one per condition:
+	   • { function: "operates without fault", standard: "no abnormal vibration", snippet: "without abnormal vibration" }
+	   • { function: "operates without fault", standard: "no leakage", snippet: "leakage" }
+	   • { function: "operates without fault", standard: "no excessive temperature", snippet: "excessive temperature" }
+	6. SKIP TRIVIAL EXPECTATIONS: do not create rows for generic adjectives or goals such as "reliable", "efficient", "safe", "available", "continuous", "properly", or "as required" unless tied to a measurable value, containment/protection duty, operating envelope, or clearly distinct reliability consequence.
+	7. NO DUPLICATES: every [function, standard] pair must be unique. If you would repeat a pair, merge or skip.
+	8. Each row must represent exactly ONE non-trivial condition — never combine "no vibration AND no leakage" into a single standard.`;
 
         const prompt = `You are a reliability engineer decomposing a subsystem Function description into a structured set of [function, standard, snippet] rows. Be deterministic — given the same input, always produce the same rows.
 
@@ -1313,8 +1318,9 @@ ${funcDesc}
 DECOMPOSITION RULES:
 1. function = verb + object (e.g. "delivers cooling water", "rotates shaft", "contains fluid")
 2. standard = one specific operating value or qualitative condition (e.g. "400 GPM at 100 PSI", "no abnormal vibration", "no leakage", "no excessive temperature")
-3. snippet = the verbatim slice from the original description this row came from (15–80 chars)
-${groupingRules}
+	3. snippet = the verbatim slice from the original description this row came from (15–80 chars)
+	4. Keep only rows whose failure would justify a distinct Functional Failure in an FMECA. Skip soft wording that would only produce vague FFs.
+	${groupingRules}
 
 Return ONLY this JSON, no prose, no markdown:
 { "rows": [ { "function": "...", "standard": "...", "snippet": "..." } ] }`;
@@ -1338,13 +1344,21 @@ Return ONLY this JSON, no prose, no markdown:
                 if (!p || !Array.isArray(p.rows)) throw new Error('decompose: bad shape');
                 return p;
             });
-            return parsed.rows
-                .map((r: any) => ({
-                    function: String(r?.function ?? '').trim(),
-                    standard: String(r?.standard ?? '').trim(),
-                    snippet: String(r?.snippet ?? '').trim(),
-                }))
-                .filter((r: any) => r.function);
+	            const seen = new Set<string>();
+	            const weakOnly = /^(reliable|efficient|safe|available|continuous|proper|properly|as required|normal|normal operation|good condition|acceptable|adequate)$/i;
+	            return parsed.rows
+	                .map((r: any) => ({
+	                    function: String(r?.function ?? '').trim(),
+	                    standard: String(r?.standard ?? '').trim(),
+	                    snippet: String(r?.snippet ?? '').trim(),
+	                }))
+	                .filter((r: any) => {
+	                    if (!r.function || !r.standard) return false;
+	                    const key = `${r.function.toLowerCase()}|${r.standard.toLowerCase()}`.replace(/\s+/g, ' ');
+	                    if (seen.has(key)) return false;
+	                    seen.add(key);
+	                    return !weakOnly.test(r.standard.trim());
+	                });
         } catch {
             return [];
         }
