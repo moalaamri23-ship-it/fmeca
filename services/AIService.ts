@@ -411,6 +411,29 @@ export const AIService = {
         }
     },
 
+    /**
+     * Retries an async op with exponential backoff + jitter. Built for bulk
+     * generation against rate-limited providers (free OpenRouter, Copilot): the
+     * burst of calls trips per-minute caps, so retries must spread out (jitter
+     * stops them colliding) and back off far enough to clear the window.
+     * Throwing inside `fn` (API error, bad/empty parse) triggers a retry.
+     */
+    async _withRetry<T>(fn: () => Promise<T>, attempts: number = 4, baseMs: number = 2000): Promise<T> {
+        let lastErr: any;
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                return await fn();
+            } catch (e) {
+                lastErr = e;
+                if (attempt < attempts) {
+                    const delay = Math.min(baseMs * 2 ** (attempt - 1), 20000) + Math.floor(Math.random() * 1000);
+                    await new Promise(r => setTimeout(r, delay));
+                }
+            }
+        }
+        throw lastErr;
+    },
+
     async vision(req: AIRequestPayload): Promise<string> {
         if (AI_CONFIG.baseUrl) {
             try {
@@ -557,7 +580,9 @@ export const AIService = {
                 2. NO introductory phrases like "The function is" or "Description:".
                 3. State what the subsystem does within the System.
                 4. Include key operating values from Specs if available.
-                5. Clearly state normal expectations (e.g., continuous operation, no abnormal vibration, leakage, or temperature).
+                ${((contextData as any)?.detailLevel === 'normal')
+                    ? '5. State the primary operating expectation concisely; do not enumerate every fault-free condition.'
+                    : '5. Clearly state normal expectations (e.g., continuous operation, no abnormal vibration, leakage, or temperature).'}
                 6. Preserve the user's core meaning and any specific values they provided.
                 Output strictly the description text only.`;
             } else if (lowerLabel.includes("spec")) {
@@ -587,7 +612,9 @@ export const AIService = {
                 2. NO introductory phrases like "The function is" or "Description:".
                 3. State what the subsystem does within the System.
                 4. Include key operating values from Specs (e.g., flow, pressure, RPM) if available.
-                5. Clearly state normal expectations (e.g., continuous operation, no abnormal vibration, leakage, or temperature).
+                ${((contextData as any)?.detailLevel === 'normal')
+                    ? '5. State the primary operating expectation concisely; do not enumerate every fault-free condition.'
+                    : '5. Clearly state normal expectations (e.g., continuous operation, no abnormal vibration, leakage, or temperature).'}
                 Output strictly the description text only.`;
             } else if (lowerLabel.includes("spec")) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}".
@@ -656,7 +683,7 @@ export const AIService = {
         } catch(e) { return []; }
     },
 
-    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = []): Promise<any> {
+    async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = [], detailLevel: 'normal' | 'detailed' = 'detailed'): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Local: Loss of integrity; End: Reduced system availability", cause: "Aging", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
@@ -668,7 +695,9 @@ export const AIService = {
         const corePrompt = `${checklistBlock}${existingBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".
         Task:
         1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
-        2. Derive distinct Functional Failures strictly from the Function (negation of each stated expectation). Scale the count to the subsystem's complexity and criticality (simple component: 2, critical complex subsystem: up to 5). Cover total loss, partial loss, intermittent operation and over-function where the function supports them.
+        ${detailLevel === 'normal'
+            ? '2. Derive distinct Functional Failures strictly from the Function (negation of each stated expectation). Scale the count to complexity (simple component: 2, complex subsystem: up to 3). Cover the most credible loss modes — do not enumerate every theoretical variant.'
+            : '2. Derive distinct Functional Failures strictly from the Function (negation of each stated expectation). Scale the count to the subsystem\'s complexity and criticality (simple component: 2, critical complex subsystem: up to 5). Cover total loss, partial loss, intermittent operation and over-function where the function supports them.'}
         3. For each failure, generate Failure Modes, Effects, Causes, Current Controls and Mitigations. Failure modes must be unique across the whole subsystem — never repeat a mode under two failures.
         Field rules:
         - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
@@ -715,7 +744,7 @@ export const AIService = {
         const existingBlock = existingModes.length > 0
             ? `Failure Modes already defined in this subsystem (DO NOT repeat or closely resemble any of them):\n${existingModes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n` : '';
         // Retry with backoff — bulk generation can hit provider rate limits.
-        const MODE_ATTEMPTS = 3;
+        const MODE_ATTEMPTS = 5;
         const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
         const corePrompt = `${checklistBlock}${existingBlock}Context: System "${project}", Subsystem "${subName}", Specs "${subSpecs}". Function: "${subFunc}". Functional Failure: "${failDesc}".
         Task: Generate 2-3 specific Failure Modes that result in this Functional Failure. Fewer is acceptable if the failure only has one or two credible modes — do not invent filler modes.
@@ -749,13 +778,19 @@ export const AIService = {
                     responseFormat: 'json'
                 });
                 const parsed = this.extractJSON(res);
-                const modes = parsed.modes || [];
+                // Tolerate alternate shapes some models return (bare array / different key).
+                const modes = parsed?.modes ?? parsed?.failure_modes ?? (Array.isArray(parsed) ? parsed : []);
+                // Empty result is treated as a transient failure → retry (the prompt always asks for ≥1 mode).
+                if (!modes.length) throw new Error('mode-generation: empty result');
                 // currentControls requires PM checklist evidence — forced empty otherwise.
                 if (!((mode === 'file' || mode === 'hybrid') && checklistText?.trim())) modes.forEach((m: any) => { m.currentControls = ''; });
                 return modes;
             } catch(e) {
                 lastErr = e;
-                if (attempt < MODE_ATTEMPTS) await new Promise(r => setTimeout(r, 3000 * attempt));
+                if (attempt < MODE_ATTEMPTS) {
+                    const delay = Math.min(2000 * 2 ** (attempt - 1), 20000) + Math.floor(Math.random() * 1000);
+                    await new Promise(r => setTimeout(r, delay));
+                }
             }
         }
         console.warn('[generateModesForFailure] failed after retries:', lastErr);
@@ -863,20 +898,21 @@ Output format:
 
   const rpnContent = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 
-  const res = await this.chat({
-    feature: 'rpn-evaluation',
-    provider: (aiProvider || inferProvider(key)) as any,
-    azureEndpoint: azureEndpoint || undefined,
-    powerAutomateUrl: powerAutomateUrl || undefined,
-    model: modelName,
-    messages: [{ role: 'user', content: rpnContent }],
-    mode: modeSource,
-    refText,
-    apiKey: key,
-    responseFormat: 'json'
+  const parsed = await this._withRetry(async () => {
+    const res = await this.chat({
+      feature: 'rpn-evaluation',
+      provider: (aiProvider || inferProvider(key)) as any,
+      azureEndpoint: azureEndpoint || undefined,
+      powerAutomateUrl: powerAutomateUrl || undefined,
+      model: modelName,
+      messages: [{ role: 'user', content: rpnContent }],
+      mode: modeSource,
+      refText,
+      apiKey: key,
+      responseFormat: 'json'
+    });
+    return this.extractJSON(res);
   });
-
-  const parsed = this.extractJSON(res);
 
   // Normalize and clamp
   const clamp = (n: any) => Math.min(10, Math.max(1, Math.round(Number(n) || 5)));
@@ -1215,7 +1251,7 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
 
         const content = prompt + (systemContext ? '\n\n' + systemContext : '');
         try {
-            return await this.chat({
+            return await this._withRetry(() => this.chat({
                 feature: 'ff-for-row',
                 provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
@@ -1226,7 +1262,7 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
                 refText: '',
                 apiKey: key,
                 responseFormat: 'text'
-            });
+            }));
         } catch {
             return '';
         }
@@ -1241,7 +1277,8 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
         aiProvider: string = '',
         azureEndpoint: string = '',
         powerAutomateUrl: string = '',
-        systemContext: string = ''
+        systemContext: string = '',
+        detailLevel: 'normal' | 'detailed' = 'detailed'
     ): Promise<Array<{ function: string; standard: string; snippet: string }>> {
         if (!funcDesc?.trim()) return [];
         if ((!key || key.length < 10) && aiProvider !== 'copilot') return [];
@@ -1249,6 +1286,22 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
         const contextLine = (subsystemName || projectName)
             ? `Subsystem: "${subsystemName}"${projectName ? ` within System: "${projectName}"` : ''}\n\n`
             : '';
+
+        // Detailed splits every compound condition into its own row (→ one FF each);
+        // Normal groups them so the breakdown stays at the level of distinct primary
+        // functions. This is the lever that controls how many functional failures the
+        // downstream step derives — not a "produce fewer" instruction bolted on.
+        const groupingRules = detailLevel === 'normal'
+            ? `4. GROUP COMPOUND CONDITIONS: keep each distinct primary function as ONE row with its single most important standard. Do NOT split a combined operating/safety clause into separate rows — e.g. "without vibration, leakage, or excessive temperature" becomes ONE row:
+   • { function: "operates within limits", standard: "within normal vibration, leakage and temperature limits", snippet: "without abnormal vibration, leakage, or excessive temperature" }
+5. NO DUPLICATES: every [function, standard] pair must be unique. If you would repeat a pair, merge or skip.
+6. Prefer the FEWEST rows that still cover the distinct primary functions — merge closely related conditions rather than enumerating each one.`
+            : `4. SPLIT COMPOUND CONDITIONS: if the source text says "without vibration, leakage, or excessive temperature" — create THREE separate rows, one per condition:
+   • { function: "operates without fault", standard: "no abnormal vibration", snippet: "without abnormal vibration" }
+   • { function: "operates without fault", standard: "no leakage", snippet: "leakage" }
+   • { function: "operates without fault", standard: "no excessive temperature", snippet: "excessive temperature" }
+5. NO DUPLICATES: every [function, standard] pair must be unique. If you would repeat a pair, merge or skip.
+6. Each row must represent exactly ONE condition — never combine "no vibration AND no leakage" into a single standard.`;
 
         const prompt = `You are a reliability engineer decomposing a subsystem Function description into a structured set of [function, standard, snippet] rows. Be deterministic — given the same input, always produce the same rows.
 
@@ -1259,34 +1312,32 @@ ${funcDesc}
 
 DECOMPOSITION RULES:
 1. function = verb + object (e.g. "delivers cooling water", "rotates shaft", "contains fluid")
-2. standard = one SINGLE specific operating value or qualitative condition (e.g. "400 GPM at 100 PSI", "no abnormal vibration", "no leakage", "no excessive temperature")
+2. standard = one specific operating value or qualitative condition (e.g. "400 GPM at 100 PSI", "no abnormal vibration", "no leakage", "no excessive temperature")
 3. snippet = the verbatim slice from the original description this row came from (15–80 chars)
-4. SPLIT COMPOUND CONDITIONS: if the source text says "without vibration, leakage, or excessive temperature" — create THREE separate rows, one per condition:
-   • { function: "operates without fault", standard: "no abnormal vibration", snippet: "without abnormal vibration" }
-   • { function: "operates without fault", standard: "no leakage", snippet: "leakage" }
-   • { function: "operates without fault", standard: "no excessive temperature", snippet: "excessive temperature" }
-5. NO DUPLICATES: every [function, standard] pair must be unique. If you would repeat a pair, merge or skip.
-6. Each row must represent exactly ONE condition — never combine "no vibration AND no leakage" into a single standard.
+${groupingRules}
 
 Return ONLY this JSON, no prose, no markdown:
 { "rows": [ { "function": "...", "standard": "...", "snippet": "..." } ] }`;
 
         const content = prompt + (systemContext ? '\n\n' + systemContext : '');
         try {
-            const res = await this.chat({
-                feature: 'function-decomposition',
-                provider: (aiProvider || inferProvider(key)) as any,
-                azureEndpoint: azureEndpoint || undefined,
-                powerAutomateUrl: powerAutomateUrl || undefined,
-                model: modelName,
-                messages: [{ role: 'user', content }],
-                mode: 'ai',
-                refText: '',
-                apiKey: key,
-                responseFormat: 'json'
+            const parsed = await this._withRetry(async () => {
+                const res = await this.chat({
+                    feature: 'function-decomposition',
+                    provider: (aiProvider || inferProvider(key)) as any,
+                    azureEndpoint: azureEndpoint || undefined,
+                    powerAutomateUrl: powerAutomateUrl || undefined,
+                    model: modelName,
+                    messages: [{ role: 'user', content }],
+                    mode: 'ai',
+                    refText: '',
+                    apiKey: key,
+                    responseFormat: 'json'
+                });
+                const p = this.extractJSON(res);
+                if (!p || !Array.isArray(p.rows)) throw new Error('decompose: bad shape');
+                return p;
             });
-            const parsed = this.extractJSON(res);
-            if (!parsed || !Array.isArray(parsed.rows)) return [];
             return parsed.rows
                 .map((r: any) => ({
                     function: String(r?.function ?? '').trim(),

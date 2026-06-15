@@ -91,6 +91,7 @@ const App = () => {
     const [modelsFetching, setModelsFetching] = useState(false);
     const [enableChatbot, setEnableChatbot] = useState(true);
     const [chatbotStyle, setChatbotStyle] = useState<ChatbotResponseStyle>("normal");
+    const [detailLevel, setDetailLevel] = useState<'normal' | 'detailed'>('normal');
     const [globalFileText, setGlobalFileText] = useState('');
     const [globalFileName, setGlobalFileName] = useState('');
     const [checklistText, setChecklistText] = useState('');
@@ -233,6 +234,7 @@ setProjects(
     setEnableChatbot(localStorage.getItem('rcm_enable_chatbot') !== 'false');
     const storedStyle = localStorage.getItem('rcm_chatbot_style');
     setChatbotStyle((storedStyle === 'one_sentence' ? 'tldr' : storedStyle as ChatbotResponseStyle) || 'normal');
+    setDetailLevel((localStorage.getItem('rcm_detail_level') as 'normal' | 'detailed') || 'normal');
     setGlobalFileText(localStorage.getItem('rcm_global_file_text') || '');
     setGlobalFileName(localStorage.getItem('rcm_global_file_name') || '');
     setChecklistText(localStorage.getItem('rcm_checklist_text') || '');
@@ -311,6 +313,7 @@ setProjects(
         localStorage.setItem('rcm_power_automate_url', powerAutomateUrl);
         localStorage.setItem('rcm_enable_chatbot', String(enableChatbot));
         localStorage.setItem('rcm_chatbot_style', chatbotStyle);
+        localStorage.setItem('rcm_detail_level', detailLevel);
         localStorage.setItem('rcm_global_file_text', globalFileText);
         localStorage.setItem('rcm_global_file_name', globalFileName);
         localStorage.setItem('rcm_checklist_text', checklistText);
@@ -318,7 +321,7 @@ setProjects(
         localStorage.setItem('rcm_system_type', systemType);
         localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
-    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, enableChatbot, chatbotStyle, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
+    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, enableChatbot, chatbotStyle, detailLevel, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
 
     const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic', 'openrouter'] as const;
     type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
@@ -816,7 +819,7 @@ render();
         setGeneratingRowId(null);
     };
 
-    const autoGen = async (sId: string, name: string, specs: string, func: string) => { setGenId(sId); if(activeProject) { const existingFFs = activeProject.subsystems.find(s => s.id === sId)?.failures.map(f => f.desc).filter(Boolean) || []; const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, existingFFs); if(res && res.failures) { setActiveProject(p => p ? ({ ...p, subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: [...s.failures, ...res.failures.map((f: any) => ({...f, id: generateId(), modes: f.modes.map((m: any) => ({...m, id: generateId()}))}))] }) }) : null); } } setGenId(null); };
+    const autoGen = async (sId: string, name: string, specs: string, func: string) => { setGenId(sId); if(activeProject) { const existingFFs = activeProject.subsystems.find(s => s.id === sId)?.failures.map(f => f.desc).filter(Boolean) || []; const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, existingFFs, detailLevel); if(res && res.failures) { setActiveProject(p => p ? ({ ...p, subsystems: p.subsystems.map(s => s.id !== sId ? s : { ...s, failures: [...s.failures, ...res.failures.map((f: any) => ({...f, id: generateId(), modes: f.modes.map((m: any) => ({...m, id: generateId()}))}))] }) }) : null); } } setGenId(null); };
     const genModes = async (sId: string, fId: string, name: string, specs: string, func: string, failDesc: string) => { setModeGenId(fId); if(activeProject) { const existingModes = activeProject.subsystems.find(s => s.id === sId)?.failures.flatMap(f => f.modes.map(m => m.mode)).filter(Boolean) || []; const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, existingModes); if(modes) setActiveProject(p => p ? ({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, ...modes.map(m => ({...m, id: generateId()}))]} : f)} : s)}) : null); } setModeGenId(null); };
     const masterGen = async () => {
         if (!apiKey && aiProvider !== 'copilot') return alert("API Key required.");
@@ -849,7 +852,7 @@ render();
         const completedSubs: any[] = await runPool(rawSubs, 2, (async (s: any) => {
             try {
                 // Step 2: Generate func using the same mechanism as the Function field magic wand.
-                const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: projectContext, subsystem: s.name, specs: s.specs }, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
+                const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: projectContext, subsystem: s.name, specs: s.specs, detailLevel }, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
                 const func = (funcDesc || s.func || '').trim();
 
                 // Step 3: Decompose the function into performance standards and derive one FF
@@ -857,7 +860,7 @@ render();
                 let breakdown: BreakdownRow[] = [];
                 const ffDescs: string[] = [];
                 if (func) {
-                    const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext);
+                    const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext, detailLevel);
                     breakdown = rows.map(r => ({ ...r, id: generateId() }));
                     for (const row of breakdown) {
                         const desc = await AIService.generateFFForRow(projectContext, s.name, func, row.snippet || row.function, row.standard, ffDescs, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext);
@@ -866,7 +869,7 @@ render();
                 }
                 // Fallback: free-form FF derivation when breakdown produced nothing.
                 if (ffDescs.length === 0) {
-                    const expanded = await AIService.generateCompleteSubsystem(s.name, s.specs, func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl);
+                    const expanded = await AIService.generateCompleteSubsystem(s.name, s.specs, func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, [], detailLevel);
                     (expanded?.failures || []).forEach((f: any) => { if (f.desc) ffDescs.push(f.desc); });
                 }
                 if (ffDescs.length === 0) issues.push(`${s.name}: no functional failures generated`);
@@ -1063,6 +1066,21 @@ render();
                                             </div>
                                         )}
                                     </div>
+                                </div>
+                                <div className="bg-white p-6 rounded border max-w-xl mt-4">
+                                    <h2 className="text-lg font-semibold mb-4">FMECA Generation</h2>
+                                    <label className="block text-xs font-semibold text-slate-500 mb-1">Detail Level</label>
+                                    <select
+                                        value={detailLevel}
+                                        onChange={(e) => setDetailLevel(e.target.value as 'normal' | 'detailed')}
+                                        className="w-full border border-slate-200 rounded px-3 py-2 text-sm outline-none focus:border-brand-500"
+                                    >
+                                        <option value="normal">Normal</option>
+                                        <option value="detailed">Detailed</option>
+                                    </select>
+                                    <p className="text-xs text-slate-500 mt-1">
+                                        Controls Auto-Generate output. Normal groups related operating conditions into fewer functional failures with concise descriptions. Detailed splits every condition into its own functional failure for exhaustive coverage (more FFs, longer to generate).
+                                    </p>
                                 </div>
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
                                     <h2 className="text-lg font-semibold mb-4">Chatbot</h2>
