@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Icon } from './Icon';
 import { AIService } from '../services/AIService';
 import { ContextData } from '../types';
@@ -63,7 +64,7 @@ export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value
                     {loading?"...":<Icon name="wand"/>}
                 </button>
             </div>
-            {expanded && (
+            {expanded && createPortal((
                 <div className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-6" onClick={(e) => { e.stopPropagation(); setExpanded(false); }}>
                     <div className="bg-white rounded-lg shadow-2xl w-full max-w-2xl p-4 animate-enter" onClick={e => e.stopPropagation()}>
                         <div className="flex items-center justify-between mb-2">
@@ -82,7 +83,7 @@ export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value
                         />
                     </div>
                 </div>
-            )}
+            ), document.body)}
         </div>
     );
 };
