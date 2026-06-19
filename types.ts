@@ -94,6 +94,10 @@ export interface ContextData {
   project?: string;
   subsystem?: string;
   specs?: string;
+  functionalFailure?: string;
+  failureMode?: string;
+  failureEffect?: string;
+  failureCause?: string;
   checklistText?: string;
   detectionScore?: number;
   /** Mode's existing controls — mitigation generation recommends only what these don't cover. */

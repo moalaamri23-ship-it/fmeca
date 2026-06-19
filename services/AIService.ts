@@ -493,15 +493,40 @@ export const AIService = {
         let corePrompt = "";
 
         const wordCount = currentText ? currentText.trim().split(/\s+/).filter(Boolean).length : 0;
+        const failureContext = `Context:
+- System: "${contextData.project || 'Unknown'}"
+- Subsystem: "${contextData.subsystem || 'Unknown'}"
+- Functional Failure: "${contextData.functionalFailure || 'Unknown'}"
+- Failure Mode: "${contextData.failureMode || 'Unknown'}"
+- Effect: "${contextData.failureEffect || 'Unknown'}"
+- Cause: "${contextData.failureCause || 'Unknown'}"`;
 
         // --- CURRENT CONTROLS SPECIALIST ---
-        // Checklist-evidence only: without a loaded PM checklist in File/Hybrid mode
-        // there is nothing to extract — leave the field untouched, no AI call.
+        // Evidence only: current controls are already deployed checklist tasks or
+        // instrument/protection controls from the loaded knowledge files.
         if (lowerLabel.includes("current controls")) {
             const checklistContent = (contextData.checklistText as string) ?? '';
-            if (!((mode === 'file' || mode === 'hybrid') && checklistContent.trim())) return currentText || '';
+            const hasKnowledge = (mode === 'file' || mode === 'hybrid') && (checklistContent.trim() || refText.trim());
+            if (!hasKnowledge) return currentText || '';
             const existingNote = currentText?.trim() ? `Current field text to revise against the checklist:\n"""${currentText}"""\n` : '';
-            const controlsPrompt = `PM CHECKLIST KNOWLEDGE (the plant's EXISTING PM program, organized by team and interval):\n"""\n${checklistContent.slice(0, 6000)}\n"""\n\nContext: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".\n${existingNote}Task: List ONLY the existing PM tasks from the checklist above that act as current controls (detection or prevention) relevant to this subsystem. Use the checklist section name as the team owner.\nRules:\n- Do NOT invent tasks that are not in the checklist.\n- Do NOT pull from any other source.\n- If nothing in the checklist applies, return an empty response.\nFormat: "1- Task (Team)" one per line. Return ONLY the list, no headers or explanations.`;
+            const checklistBlock = checklistContent.trim()
+                ? `PM CHECKLIST KNOWLEDGE (plant's EXISTING PM program, organized by team and interval):\n"""\n${checklistContent.slice(0, 6000)}\n"""\n\n`
+                : '';
+            const referenceBlock = refText.trim()
+                ? `REFERENCE DATA (deployed equipment, instruments, alarms, trips, interlocks, limits):\n"""\n${refText.slice(0, 7000)}\n"""\n\n`
+                : '';
+            const controlsPrompt = `${referenceBlock}${checklistBlock}${failureContext}
+${existingNote}Task: List ONLY existing controls that are currently deployed for THIS failure mode.
+Include:
+- Relevant PM/checklist tasks that detect or prevent this failure mode. Use the checklist section name as owner.
+- Deployed instrument/protection controls from the reference data, such as temperature, pressure, level, flow, vibration, speed, differential pressure, alarms, trips, interlocks, shutdowns, transmitters, switches, or monitoring points. Include tag numbers and alarm/trip limits when stated. Use (Instrument team) for instrument controls unless the source states another owner.
+Rules:
+- Match controls to THIS Functional Failure + Failure Mode + Cause + Effect only.
+- Do NOT include tasks for other failure modes in the checklist.
+- Do NOT invent controls, tags, setpoints, alarms, trips, or tasks.
+- Do NOT include recommendations, upgrades, "install", "add", or "consider" actions.
+- If nothing is evidenced for this failure mode, return an empty response.
+Format: "1- Existing control [Tag: TAGNO (limit if stated)] (Owner)" one per line. Return ONLY the list, no headers or explanations.`;
             return this.chat({
                 feature: 'field-generation',
                 provider: (aiProvider || inferProvider(key)) as any,
@@ -549,9 +574,27 @@ export const AIService = {
             if (mode === 'file' || mode === 'hybrid') {
                 const refSection = refText?.trim() ? `REFERENCE DATA (P&IDs, datasheets, safeguarding instruments with tag numbers and alarm limits):\n"""\n${refText.slice(0, 7000)}\n"""\n\n` : '';
                 const checkSection = checklistContent?.trim() ? `PM CHECKLIST KNOWLEDGE (organized by team and PM interval):\n"""\n${checklistContent.slice(0, 6000)}\n"""\n\n` : '';
-                mitigationPrompt = `${refSection}${checkSection}Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".\n${detectionNote}\n${controlsCovered}${existingNote}\nGenerate ${count} mitigation actions using this priority:\n1. Extract relevant PM tasks from CHECKLIST KNOWLEDGE that are NOT already listed in current controls — use the checklist section name as the team owner.\n2. From REFERENCE DATA, identify safeguarding instruments (tags like VXIT, PT, TT, LE, FIT, etc.) with their alarm limits; suggest utilizing or installing them for detection improvement.\n3. Add reliability-knowledge mitigations to further reduce Detection if D > 6.\nNever duplicate an action already covered by current controls.\n${ownerRules}\n${formatRule}`;
+                mitigationPrompt = `${refSection}${checkSection}${failureContext}
+Mitigation wand rule: File-only and Hybrid settings both act as Hybrid here: use loaded knowledge first, then add reliability-engineering actions for remaining gaps.
+${detectionNote}
+${controlsCovered}${existingNote}
+Generate ${count} mitigation actions for THIS failure mode using this priority:
+1. Extract PM tasks or controls recommended/evidenced in CHECKLIST KNOWLEDGE or REFERENCE DATA that are relevant to THIS failure mode and are NOT already listed in current controls.
+2. If reference data shows available safeguarding instruments (tags like VXIT, PT, TT, LT/LE, FIT, vibration, speed, pressure, temperature, level, flow), recommend using, alarming, testing, calibrating, or adding logic for them only when not already covered by current controls.
+3. Add reliability-knowledge mitigations only for remaining gaps, especially when D > 6.
+Rules:
+- Never duplicate an action already covered by current controls.
+- Do NOT bring tasks for other failure modes.
+- Mitigation is proposed work, not existing current controls.
+${ownerRules}
+${formatRule}`;
             } else {
-                mitigationPrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem || 'Unknown'}".\n${detectionNote}\n${controlsCovered}${existingNote}\nGenerate ${count} maintenance mitigation actions for this failure. Never duplicate an action already covered by current controls.\n${ownerRules}\n${formatRule}`;
+                mitigationPrompt = `${failureContext}
+${detectionNote}
+${controlsCovered}${existingNote}
+Generate ${count} maintenance mitigation actions for THIS failure mode using reliability engineering knowledge. Never duplicate an action already covered by current controls. Do NOT bring tasks for other failure modes.
+${ownerRules}
+${formatRule}`;
             }
             const mitigationContent = mitigationPrompt + (systemContext ? '\n\n' + systemContext : '');
             return this.chat({
@@ -689,6 +732,7 @@ export const AIService = {
         if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Local: Loss of integrity; End: Reduced system availability", cause: "Aging", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
             ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
+        const controlsKnowledgeAvailable = (mode === 'file' || mode === 'hybrid') && (Boolean(checklistText?.trim()) || Boolean(refText?.trim()));
         const existingBlock = existingFailures.length > 0
             ? `Existing Functional Failures already defined for this subsystem (DO NOT repeat or closely resemble):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n` : '';
         const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
@@ -701,10 +745,10 @@ export const AIService = {
         3. For each failure, generate Failure Modes, Effects, Causes, Current Controls and Mitigations. Failure modes must be unique across the whole subsystem — never repeat a mode under two failures.
         Field rules:
         - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
-        ${((mode === 'file' || mode === 'hybrid') && checklistText?.trim())
-            ? '- "currentControls": ONLY existing PM tasks evidenced in the PM CHECKLIST KNOWLEDGE above. Do NOT pull controls from reference data and do NOT assume typical industry practice — empty string if the checklist has no relevant task.'
-            : '- "currentControls": always return an empty string "" — current controls require PM checklist evidence, which is not available.'}
-        - "mitigation": RECOMMENDED actions (not yet implemented) that close the gaps NOT covered by currentControls — never duplicate a task already listed in currentControls.
+        ${controlsKnowledgeAvailable
+            ? '- "currentControls": ONLY controls currently deployed/evidenced for THIS failure mode in PM CHECKLIST KNOWLEDGE or REFERENCE DATA. Include relevant PM/checklist tasks plus deployed instrument/protection controls (temperature, pressure, level, flow, vibration, speed, alarms, trips, interlocks, transmitters/switches/tags and limits where stated). Do NOT include controls for other failure modes. Do NOT invent or recommend new controls here. Empty string if no evidence applies.'
+            : '- "currentControls": always return an empty string "" — current controls require checklist or reference evidence, which is not available.'}
+        - "mitigation": RECOMMENDED actions (not yet implemented) for THIS failure mode that close gaps NOT covered by currentControls. Use checklist/reference recommendations when present, then add reliability-knowledge tasks or controls for remaining gaps in Hybrid/AI generation. Never duplicate a task already listed in currentControls and never bring tasks for other failure modes.
         - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
         ${RPN_ANCHORS}
         ${LIBRARY_EXAMPLES}
@@ -726,9 +770,9 @@ export const AIService = {
                 responseFormat: 'json'
             });
             const parsed = this.extractJSON(res);
-            // currentControls requires PM checklist evidence — forced empty otherwise,
+            // currentControls require checklist/reference evidence — forced empty otherwise,
             // no matter what the model returned.
-            if (!((mode === 'file' || mode === 'hybrid') && checklistText?.trim())) {
+            if (!controlsKnowledgeAvailable) {
                 (parsed?.failures || []).forEach((f: any) => (f.modes || []).forEach((m: any) => { m.currentControls = ''; }));
             }
             return parsed;
@@ -741,6 +785,7 @@ export const AIService = {
         if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Local: Effect; End: System effect", cause: "Cause", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:6,o:4,d:3} }]; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
             ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
+        const controlsKnowledgeAvailable = (mode === 'file' || mode === 'hybrid') && (Boolean(checklistText?.trim()) || Boolean(refText?.trim()));
         const existingBlock = existingModes.length > 0
             ? `Failure Modes already defined in this subsystem (DO NOT repeat or closely resemble any of them):\n${existingModes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n` : '';
         // Retry with backoff — bulk generation can hit provider rate limits.
@@ -751,10 +796,10 @@ export const AIService = {
         Field rules per mode:
         - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
         - "cause": the dominant root cause of this mode.
-        ${((mode === 'file' || mode === 'hybrid') && checklistText?.trim())
-            ? '- "currentControls": ONLY existing PM tasks evidenced in the PM CHECKLIST KNOWLEDGE above. Do NOT pull controls from reference data and do NOT assume typical industry practice — empty string if the checklist has no relevant task.'
-            : '- "currentControls": always return an empty string "" — current controls require PM checklist evidence, which is not available.'}
-        - "mitigation": RECOMMENDED actions (not yet implemented) that close the gaps NOT covered by currentControls — never duplicate a task already listed in currentControls.
+        ${controlsKnowledgeAvailable
+            ? '- "currentControls": ONLY controls currently deployed/evidenced for THIS generated failure mode in PM CHECKLIST KNOWLEDGE or REFERENCE DATA. Include relevant PM/checklist tasks plus deployed instrument/protection controls (temperature, pressure, level, flow, vibration, speed, alarms, trips, interlocks, transmitters/switches/tags and limits where stated). Do NOT include controls for other failure modes. Do NOT invent or recommend new controls here. Empty string if no evidence applies.'
+            : '- "currentControls": always return an empty string "" — current controls require checklist or reference evidence, which is not available.'}
+        - "mitigation": RECOMMENDED actions (not yet implemented) for THIS generated failure mode that close gaps NOT covered by currentControls. Use checklist/reference recommendations when present, then add reliability-knowledge tasks or controls for remaining gaps in Hybrid/AI generation. Never duplicate a task already listed in currentControls and never bring tasks for other failure modes.
         - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
         ${RPN_ANCHORS}
         ${LIBRARY_EXAMPLES}
@@ -782,8 +827,8 @@ export const AIService = {
                 const modes = parsed?.modes ?? parsed?.failure_modes ?? (Array.isArray(parsed) ? parsed : []);
                 // Empty result is treated as a transient failure → retry (the prompt always asks for ≥1 mode).
                 if (!modes.length) throw new Error('mode-generation: empty result');
-                // currentControls requires PM checklist evidence — forced empty otherwise.
-                if (!((mode === 'file' || mode === 'hybrid') && checklistText?.trim())) modes.forEach((m: any) => { m.currentControls = ''; });
+                // currentControls require checklist/reference evidence — forced empty otherwise.
+                if (!controlsKnowledgeAvailable) modes.forEach((m: any) => { m.currentControls = ''; });
                 return modes;
             } catch(e) {
                 lastErr = e;
