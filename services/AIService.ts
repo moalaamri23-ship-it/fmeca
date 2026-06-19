@@ -481,6 +481,34 @@ export const AIService = {
         }
     },
 
+    cleanNumberedActionList(text: string): string {
+        const lines = (text || '')
+            .replace(/```[a-zA-Z]*\s*/g, '')
+            .replace(/```/g, '')
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(Boolean);
+
+        const actions: string[] = [];
+        let sawList = false;
+        for (const line of lines) {
+            const numbered = line.match(/^\d+\s*[-–.)]\s*(.+)$/);
+            const bulleted = line.match(/^[-*•]\s*(.+)$/);
+            if (numbered || bulleted) {
+                sawList = true;
+                actions.push((numbered?.[1] || bulleted?.[1] || '').trim());
+                continue;
+            }
+            if (sawList && actions.length) {
+                if (/^(based on|here(?:\s+are|\s+is)?|these|note|summary|in summary|from my|i found|the following)\b/i.test(line)) break;
+                actions[actions.length - 1] = `${actions[actions.length - 1]} ${line}`.trim();
+            }
+        }
+
+        if (!actions.length) return '';
+        return actions.map((action, i) => `${i + 1}- ${action.replace(/\s+/g, ' ')}`).join('\n');
+    },
+
     // -------------------------------------------------------------------------
     // FEATURE IMPLEMENTATIONS (Refactored to use contract)
     // -------------------------------------------------------------------------
@@ -526,18 +554,25 @@ Rules:
 - Do NOT invent controls, tags, setpoints, alarms, trips, or tasks.
 - Do NOT include recommendations, upgrades, "install", "add", or "consider" actions.
 - If nothing is evidenced for this failure mode, return an empty response.
-Format: "1- Existing control [Tag: TAGNO (limit if stated)] (Owner)" one per line. Return ONLY the list, no headers or explanations.`;
-            return this.chat({
+Output contract:
+- Return ONLY numbered lines in this exact form: "1- Existing control [Tag: TAGNO (limit if stated)] (Owner)".
+- No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
+            const controlsOutputContract = `FINAL OUTPUT CONTRACT:
+- Return ONLY numbered lines in this exact form: "1- Existing control [Tag: TAGNO (limit if stated)] (Owner)".
+- No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
+            const controlsContent = controlsPrompt + (systemContext ? '\n\n' + systemContext : '') + '\n\n' + controlsOutputContract;
+            const controlsRes = await this.chat({
                 feature: 'field-generation',
                 provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
                 powerAutomateUrl: powerAutomateUrl || undefined,
                 model: modelName,
-                messages: [{ role: 'user', content: controlsPrompt + (systemContext ? '\n\n' + systemContext : '') }],
+                messages: [{ role: 'user', content: controlsContent }],
                 mode: 'ai',
                 apiKey: key,
                 responseFormat: 'text'
             });
+            return this.cleanNumberedActionList(controlsRes);
         }
         // --- END CURRENT CONTROLS SPECIALIST ---
 
@@ -566,7 +601,9 @@ Format: "1- Existing control [Tag: TAGNO (limit if stated)] (Owner)" one per lin
                 ? `Detection is already good (D=${d}/10). Focus on preventive maintenance actions.`
                 : `Detection score is moderate (D=${d}/10). Balance preventive tasks with detection controls.`;
             const ownerRules = `Owner assignment (add team in parentheses after each action):\n- Sensor, transmitter, switch, monitor, level/pressure/vibration/flow tag → (Instrument team)\n- Lubrication, alignment, bearing, seal, coupling, mechanical inspection → (Mechanical team)\n- Control system, PLC, SCADA, interlock, delay, communication → (Automation team)\n- Operational round, manual monitoring, log, operator check → (Operation team)`;
-            const formatRule = `Format: "1- Action description [Tag: TAGNO (Hi: X unit, Hi-Hi: Y unit) if applicable] (Owner)"\nWrite each action on its own line. Return ONLY the numbered list, no headers or explanations.`;
+            const formatRule = `Output contract:
+- Return ONLY numbered lines in this exact form: "1- Action description [Tag: TAGNO (Hi: X unit, Hi-Hi: Y unit) if applicable] (Owner)".
+- No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const existingNote = currentText?.trim() ? `Existing mitigations to enhance and expand:\n"""${currentText}"""\n` : '';
             const controlsCovered = (contextData.currentControls as string)?.trim()
                 ? `CURRENT CONTROLS already in place (these failure aspects are COVERED — do NOT recommend them again; recommend only actions that close the remaining gaps):\n"""\n${(contextData.currentControls as string).trim()}\n"""\n` : '';
@@ -596,8 +633,8 @@ Generate ${count} maintenance mitigation actions for THIS failure mode using rel
 ${ownerRules}
 ${formatRule}`;
             }
-            const mitigationContent = mitigationPrompt + (systemContext ? '\n\n' + systemContext : '');
-            return this.chat({
+            const mitigationContent = mitigationPrompt + (systemContext ? '\n\n' + systemContext : '') + '\n\n' + formatRule.replace('Output contract:', 'FINAL OUTPUT CONTRACT:');
+            const mitigationRes = await this.chat({
                 feature: 'field-generation',
                 provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
@@ -610,6 +647,7 @@ ${formatRule}`;
                 apiKey: key,
                 responseFormat: 'text'
             });
+            return this.cleanNumberedActionList(mitigationRes);
         }
         // --- END MITIGATION SPECIALIST ---
 
