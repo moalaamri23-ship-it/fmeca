@@ -19,6 +19,29 @@ interface Chunk {
 }
 
 const norm = (s: string) => String(s || "").trim().toLowerCase().replace(/-/g, "_");
+const rpnTotal = (rpn: any): number | null => {
+    const vals = [rpn?.s, rpn?.o, rpn?.d];
+    if (vals.some(v => String(v ?? '').trim() === '' || Number.isNaN(Number(v)))) return null;
+    return Number(vals[0]) * Number(vals[1]) * Number(vals[2]);
+};
+const rpnText = (rpn: any) => {
+    const total = rpnTotal(rpn);
+    return total === null
+        ? 'RPN=Unscored (SUnscored OUnscored DUnscored)'
+        : `RPN=${total} (S${rpn.s} O${rpn.o} D${rpn.d})`;
+};
+const rpnImprovementText = (m: any) => {
+    const imp = m?.rpnImprovement;
+    if (!imp) return '';
+    const parts = [
+        imp.baselineRpn !== undefined ? `BaselineRPN=${imp.baselineRpn}` : '',
+        imp.mitigatedRpn !== undefined ? `MitigatedRPN=${imp.mitigatedRpn}` : '',
+        imp.detectionImprovement !== undefined ? `DImprovement=${imp.detectionImprovement}` : '',
+        imp.rpnReduction !== undefined ? `RPNReduction=${imp.rpnReduction}` : '',
+        imp.summary ? `ImprovementSummary="${imp.summary}"` : ''
+    ].filter(Boolean);
+    return parts.length ? ` | ${parts.join(' | ')}` : '';
+};
 
 export const RAGService = {
 
@@ -41,14 +64,9 @@ buildFailureModeIndex(project: Project): string {
   project.subsystems.forEach(sub => {
     sub.failures.forEach(f => {
       f.modes.forEach(m => {
-        const s = Number(m.rpn?.s) || 1;
-        const o = Number(m.rpn?.o) || 1;
-        const d = Number(m.rpn?.d) || 1;
-        const rpn = s * o * d;
-
-	        lines.push(
-	          `[FM-${m.id}] Sub="${sub.name}" | FF="${f.desc}" | Mode="${m.mode}" | CurrentControls="${m.currentControls || ''}" | RPN=${rpn} (S${s} O${o} D${d})${m.rpnReason ? ` | RPNReason="${m.rpnReason}"` : ''}`
-	        );
+		        lines.push(
+		          `[FM-${m.id}] Sub="${sub.name}" | FF="${f.desc}" | Mode="${m.mode}" | CurrentControls="${m.currentControls || ''}" | Mitigation="${m.mitigation || ''}" | ${rpnText(m.rpn)}${rpnImprovementText(m)}${m.rpnReason ? ` | RPNReason="${m.rpnReason}"` : ''}`
+		        );
       });
     });
   });
@@ -279,7 +297,7 @@ maxChars = Math.min(maxChars > 0 ? maxChars : estimatedNeed, HARD_CAP_CHARS);
   }
 
 // ---- Subsystems + FF + FM collections ----
-type FMRow = { sub: any; ff: any; fm: any; rpn: number; score: number };
+type FMRow = { sub: any; ff: any; fm: any; rpn: number | null; score: number };
 
 // Always-accurate counts (compact, budget-safe)
 const ffCountsBySubsystem = (project.subsystems || []).map(s => ({
@@ -302,14 +320,11 @@ const ffCountsBySubsystem = (project.subsystems || []).map(s => ({
       ffs.push({ sub, ff, score: ffScore });
 
       (ff.modes || []).forEach((fm: any) => {
-        const s = Number(fm?.rpn?.s) || 1;
-        const o = Number(fm?.rpn?.o) || 1;
-        const d = Number(fm?.rpn?.d) || 1;
-        const rpn = s * o * d;
+        const rpn = rpnTotal(fm?.rpn);
 
-        if (typeof rpnMin === "number" && rpn < rpnMin) return;
+        if (typeof rpnMin === "number" && (rpn === null || rpn < rpnMin)) return;
 
-	        const fmText = `${sub.name} ${ff.desc} ${fm.mode} ${fm.cause} ${fm.effect} ${fm.currentControls} ${fm.mitigation} ${fm.rpnReason || ''} RPN ${rpn}`;
+		        const fmText = `${sub.name} ${ff.desc} ${fm.mode} ${fm.cause} ${fm.effect} ${fm.currentControls} ${fm.mitigation} ${fm.rpnReason || ''} ${rpnImprovementText(fm)} RPN ${rpn ?? 'Unscored'}`;
         const score = termScore(fmText);
 
 
@@ -323,7 +338,7 @@ const ffCountsBySubsystem = (project.subsystems || []).map(s => ({
   });
 
   // Sort modes: term score then RPN (good default)
-  fms.sort((a, b) => (b.score - a.score) || (b.rpn - a.rpn));
+  fms.sort((a, b) => (b.score - a.score) || ((b.rpn ?? -1) - (a.rpn ?? -1)));
 
 
   // ---- Render helpers by level+fields ----
@@ -343,11 +358,7 @@ const ffCountsBySubsystem = (project.subsystems || []).map(s => ({
   };
 
   const fmtFM = (sub: any, ff: any, fm: any, fields: string[]) => {
-    const s = Number(fm?.rpn?.s) || 1;
-    const o = Number(fm?.rpn?.o) || 1;
-    const d = Number(fm?.rpn?.d) || 1;
-    const total = s * o * d;
-
+    const total = rpnTotal(fm?.rpn);
     const parts: string[] = [];
     if (fields.includes("subsystem")) parts.push(`Sub="${safe(sub.name, "(unnamed)")}"`);
     if (fields.includes("functional_failure")) parts.push(`FF="${safe(ff.desc)}"`);
@@ -357,7 +368,9 @@ const ffCountsBySubsystem = (project.subsystems || []).map(s => ({
 	    if (fields.includes("currentControls") || fields.includes("current_controls")) parts.push(`CurrentControls="${safe(fm.currentControls, "")}"`);
 	    if (fields.includes("mitigation")) parts.push(`Mitigation="${safe(fm.mitigation)}"`);
     if (fields.includes("rpn")) {
-        parts.push(`RPN=${total} (S${s} O${o} D${d})`);
+        parts.push(total === null ? 'RPN=Unscored' : `RPN=${total} (S${fm.rpn.s} O${fm.rpn.o} D${fm.rpn.d})`);
+        const improvement = rpnImprovementText(fm).replace(/^ \| /, '');
+        if (improvement) parts.push(improvement);
         if (fm.rpnReason) parts.push(`RPNReason="${safe(fm.rpnReason)}"`);
     }
     if ((fields.includes("rpnReason") || fields.includes("rpn_reason")) && fm.rpnReason) parts.push(`RPNReason="${safe(fm.rpnReason)}"`);
@@ -452,14 +465,16 @@ if (ffInc) {
 
                 // 4. Failure Mode Level
                 fail.modes.forEach(mode => {
-                    const rpnVal = (Number(mode.rpn.s)||1)*(Number(mode.rpn.o)||1)*(Number(mode.rpn.d)||1);
-		                    const modeText = `Subsystem: ${sub.name}. Functional Failure: ${fail.desc}. Failure Mode: ${mode.mode}. Effect: ${mode.effect || 'N/A'}. Cause: ${mode.cause || 'N/A'}. Current Controls: ${mode.currentControls || 'N/A'}. Mitigation/Control: ${mode.mitigation || 'N/A'}. RPN: S=${mode.rpn.s}, O=${mode.rpn.o}, D=${mode.rpn.d}, Total=${rpnVal}.${mode.rpnReason ? ` RPN Reason: ${mode.rpnReason}.` : ''}`;
+                    const vals = [mode.rpn?.s, mode.rpn?.o, mode.rpn?.d];
+                    const hasRpn = vals.every(v => String(v ?? '').trim() !== '' && !Number.isNaN(Number(v)));
+                    const rpnVal = hasRpn ? Number(vals[0]) * Number(vals[1]) * Number(vals[2]) : 'Unscored';
+		                    const modeText = `Subsystem: ${sub.name}. Functional Failure: ${fail.desc}. Failure Mode: ${mode.mode}. Effect: ${mode.effect || 'N/A'}. Cause: ${mode.cause || 'N/A'}. Current Controls: ${mode.currentControls || 'N/A'}. Mitigation/Control: ${mode.mitigation || 'N/A'}. RPN: S=${mode.rpn?.s || 'Unscored'}, O=${mode.rpn?.o || 'Unscored'}, D=${mode.rpn?.d || 'Unscored'}, Total=${rpnVal}.${rpnImprovementText(mode)}${mode.rpnReason ? ` RPN Reason: ${mode.rpnReason}.` : ''}`;
                     
                     chunks.push({
                         id: `mode-${mode.id}`,
                         text: modeText,
                         source: `Failure Mode in ${sub.name}`,
-		                        keywords: [sub.name, fail.desc, mode.mode, mode.cause, mode.effect, mode.currentControls, mode.mitigation, mode.rpnReason, 'failure mode', 'current controls', 'rpn', 'risk'],
+		                        keywords: [sub.name, fail.desc, mode.mode, mode.cause, mode.effect, mode.currentControls, mode.mitigation, mode.rpnReason, mode.rpnImprovement?.summary, 'failure mode', 'current controls', 'mitigation', 'rpn', 'risk'],
                         type: 'failure-mode'
                     });
                 });
@@ -532,9 +547,9 @@ if (ffInc) {
             return project.subsystems.map(sub => {
                 const modeCount = (sub.failures || []).reduce((a, f) => a + (f.modes || []).length, 0);
                 const rpns = (sub.failures || []).flatMap(f =>
-                    (f.modes || []).map(m => (Number(m.rpn?.s) || 1) * (Number(m.rpn?.o) || 1) * (Number(m.rpn?.d) || 1))
+                    (f.modes || []).map(m => rpnTotal(m.rpn)).filter((v): v is number => v !== null)
                 );
-                const topRpn = rpns.length ? Math.max(...rpns) : 0;
+                const topRpn = rpns.length ? String(Math.max(...rpns)) : 'Unscored';
                 return `Subsystem="${safe(sub.name)}" | FFs=${sub.failures.length} | Modes=${modeCount} | TopRPN=${topRpn}`;
             }).join('\n');
         }
@@ -567,9 +582,9 @@ if (ffInc) {
                 lines.push(`\nFunctional Failure: "${safe(ff.desc)}"`);
                 if (!(ff.modes || []).length) { lines.push('  (No failure modes defined)'); return; }
                 ff.modes.forEach((m: any) => {
-                    const s = Number(m.rpn?.s) || 1, o = Number(m.rpn?.o) || 1, d = Number(m.rpn?.d) || 1;
-		                    lines.push(`  Mode: ${safe(m.mode)} | RPN=${s * o * d} (S${s} O${o} D${d})`);
+		                    lines.push(`  Mode: ${safe(m.mode)} | ${rpnText(m.rpn)}`);
                             if (m.rpnReason) lines.push(`    RPN Reason: ${safe(m.rpnReason)}`);
+                            if (m.rpnImprovement) lines.push(`    RPN Improvement: ${rpnImprovementText(m).replace(/^ \| /, '')}`);
 	                    lines.push(`    Effect: ${safe(m.effect)}`);
 	                    lines.push(`    Cause: ${safe(m.cause)}`);
 	                    lines.push(`    Current Controls: ${safe(m.currentControls, 'None recorded')}`);
@@ -592,8 +607,9 @@ if (ffInc) {
                     (ff.modes || []).forEach((m: any) => {
 		                        const inMode = [m.mode, m.effect, m.cause, m.currentControls, m.mitigation, m.rpnReason].some(f => (f || '').toLowerCase().includes(q));
                         if (inMode) {
-                            const rpn = (Number(m.rpn?.s) || 1) * (Number(m.rpn?.o) || 1) * (Number(m.rpn?.d) || 1);
-                            results.push(`[Mode in "${safe(sub.name)}" / "${safe(ff.desc)}"] ${safe(m.mode)} | RPN=${rpn}`);
+	                            const vals = [m.rpn?.s, m.rpn?.o, m.rpn?.d];
+	                            const rpn = vals.every(v => String(v ?? '').trim() !== '' && !Number.isNaN(Number(v))) ? Number(vals[0]) * Number(vals[1]) * Number(vals[2]) : 'Unscored';
+	                            results.push(`[Mode in "${safe(sub.name)}" / "${safe(ff.desc)}"] ${safe(m.mode)} | RPN=${rpn}`);
                         }
                     });
                 });
@@ -602,7 +618,7 @@ if (ffInc) {
         }
 
         if (name === 'get_rpn_summary') {
-		            type Row = { sub: string; ff: string; mode: string; controls: string; reason: string; rpn: number; s: number; o: number; d: number };
+			            type Row = { sub: string; ff: string; mode: string; controls: string; reason: string; rpn: number | null; s: string; o: string; d: string };
             const rows: Row[] = [];
             (project.subsystems || []).forEach(sub => {
                 if (args.subsystem_name) {
@@ -611,16 +627,17 @@ if (ffInc) {
                 }
                 (sub.failures || []).forEach((ff: any) => {
                     (ff.modes || []).forEach((m: any) => {
-                        const s = Number(m.rpn?.s) || 1, o = Number(m.rpn?.o) || 1, d = Number(m.rpn?.d) || 1;
-                        const rpn = s * o * d;
-                        if (typeof args.min_rpn === 'number' && rpn < args.min_rpn) return;
-		                        rows.push({ sub: safe(sub.name), ff: safe(ff.desc), mode: safe(m.mode), controls: safe(m.currentControls, 'None recorded'), reason: safe(m.rpnReason, ''), rpn, s, o, d });
+	                        const vals = [m.rpn?.s, m.rpn?.o, m.rpn?.d];
+	                        const hasRpn = vals.every(v => String(v ?? '').trim() !== '' && !Number.isNaN(Number(v)));
+	                        const rpn = hasRpn ? Number(vals[0]) * Number(vals[1]) * Number(vals[2]) : null;
+	                        if (typeof args.min_rpn === 'number' && (rpn === null || rpn < args.min_rpn)) return;
+			                        rows.push({ sub: safe(sub.name), ff: safe(ff.desc), mode: safe(m.mode), controls: safe(m.currentControls, 'None recorded'), reason: safe(m.rpnReason, ''), rpn, s: hasRpn ? String(vals[0]) : 'Unscored', o: hasRpn ? String(vals[1]) : 'Unscored', d: hasRpn ? String(vals[2]) : 'Unscored' });
                     });
                 });
             });
-            rows.sort((a, b) => b.rpn - a.rpn);
-            return rows.length
-		                ? rows.map(r => `RPN=${r.rpn}(S${r.s} O${r.o} D${r.d}) | Sub="${r.sub}" | FF="${r.ff}" | Mode="${r.mode}" | CurrentControls="${r.controls}"${r.reason ? ` | RPNReason="${r.reason}"` : ''}`).join('\n')
+	            rows.sort((a, b) => (b.rpn ?? -1) - (a.rpn ?? -1));
+	            return rows.length
+			                ? rows.map(r => `RPN=${r.rpn ?? 'Unscored'}(S${r.s} O${r.o} D${r.d}) | Sub="${r.sub}" | FF="${r.ff}" | Mode="${r.mode}" | CurrentControls="${r.controls}"${r.reason ? ` | RPNReason="${r.reason}"` : ''}`).join('\n')
                 : 'No failure modes found.';
         }
 

@@ -133,8 +133,9 @@ function clamp(lines: number): React.CSSProperties {
 
 // ── RPN helper ────────────────────────────────────────────────────────────────
 function calcRpn(mode: Mode): string {
-  const v = Number(mode.rpn.s) * Number(mode.rpn.o) * Number(mode.rpn.d);
-  return isNaN(v) || v === 0 ? '' : String(v);
+  const vals = [mode.rpn?.s, mode.rpn?.o, mode.rpn?.d];
+  if (vals.some(v => String(v ?? '').trim() === '' || Number.isNaN(Number(v)))) return '';
+  return String(Number(vals[0]) * Number(vals[1]) * Number(vals[2]));
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────

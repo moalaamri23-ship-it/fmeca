@@ -9,11 +9,21 @@ export interface Mode {
   mode: string;
   effect: string;
   cause: string;
-  /** Controls already in place — Detection (D) is scored against these only. */
+  /** Controls already in place. */
   currentControls?: string;
-  /** Recommended actions — proposed, not yet implemented; never credited toward D. */
+  /** Recommended actions considered by the RPN robot as post-mitigation barriers. */
   mitigation: string;
   rpn: RPN;
+  rpnStatus?: "unscored" | "ai_scored" | "manual";
+  /** Baseline score before mitigation, using current controls only. */
+  rpnBaseline?: RPN;
+  rpnImprovement?: {
+    baselineRpn?: number;
+    mitigatedRpn?: number;
+    detectionImprovement?: number;
+    rpnReduction?: number;
+    summary?: string;
+  };
   /** Hidden audit note from AI RPN scoring; available to the chatbot. */
   rpnReason?: string;
   /** Optional source/provenance labels shown only when Hybrid labels are enabled. */
@@ -26,6 +36,8 @@ export interface Failure {
   modes: Mode[];
   collapsed?: boolean;
   sourceTags?: string[];
+  sourceBreakdownRowId?: string;
+  sourceSnippet?: string;
 }
 
 export interface BreakdownRow {
@@ -102,4 +114,6 @@ export interface ContextData {
   detectionScore?: number;
   /** Mode's existing controls — mitigation generation recommends only what these don't cover. */
   currentControls?: string;
+  /** Other modes in same functional failure/subsystem — used to exclude sibling-mode barriers. */
+  siblingFailureModes?: Array<Pick<Mode, 'mode' | 'cause' | 'effect'>>;
 }

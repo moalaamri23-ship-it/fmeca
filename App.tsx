@@ -19,6 +19,9 @@ import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
 // Utility functions
 const safeGet = (k: string, f: any) => { try { const i = localStorage.getItem(k); return i ? JSON.parse(i) : f; } catch (e) { return f; } };
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+const blankRpn = () => ({ s: "", o: "", d: "" });
+const hasCompleteRpn = (rpn: any) => [rpn?.s, rpn?.o, rpn?.d].every(v => String(v ?? '').trim() !== '' && !Number.isNaN(Number(v)));
+const rpnTotal = (rpn: any) => hasCompleteRpn(rpn) ? Number(rpn.s) * Number(rpn.o) * Number(rpn.d) : "";
 
 const nowIso = () => new Date().toISOString();
 
@@ -48,7 +51,14 @@ const sanitizeProject = (p: any): Project => {
                 const fId = ensureUnique(f.id);
                 const modes = f.modes ? f.modes.map((m: any) => {
                     const mId = ensureUnique(m.id);
-                    return { ...m, id: mId, effect: m.effect !== undefined ? m.effect : "" };
+                    const rpn = m.rpn || blankRpn();
+                    return {
+                        ...m,
+                        id: mId,
+                        effect: m.effect !== undefined ? m.effect : "",
+                        rpn,
+                        rpnStatus: m.rpnStatus || (hasCompleteRpn(rpn) ? "manual" : "unscored")
+                    };
                 }) : [];
                 return { ...f, id: fId, modes };
             }) : [];
@@ -59,6 +69,7 @@ const sanitizeProject = (p: any): Project => {
 };
 
 type ChatbotResponseStyle = "normal" | "concise" | "tldr";
+type AgentWorkflow = "fast" | "structured";
 type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter' | 'copilot';
 
 const PROVIDER_LABELS: Record<AIProvider, string> = { gemini: 'Gemini', openai: 'OpenAI', anthropic: 'Anthropic', azure: 'Azure', openrouter: 'OpenRouter', copilot: 'Copilot' };
@@ -91,7 +102,7 @@ const App = () => {
     const [modelsFetching, setModelsFetching] = useState(false);
     const [enableChatbot, setEnableChatbot] = useState(true);
     const [chatbotStyle, setChatbotStyle] = useState<ChatbotResponseStyle>("normal");
-    const [detailLevel, setDetailLevel] = useState<'normal' | 'detailed'>('normal');
+    const [agentWorkflow, setAgentWorkflow] = useState<AgentWorkflow>('fast');
     const [showHybridSourceLabels, setShowHybridSourceLabels] = useState(true);
     const [globalFileText, setGlobalFileText] = useState('');
     const [globalFileName, setGlobalFileName] = useState('');
@@ -261,7 +272,9 @@ setProjects(
     setEnableChatbot(localStorage.getItem('rcm_enable_chatbot') !== 'false');
     const storedStyle = localStorage.getItem('rcm_chatbot_style');
     setChatbotStyle((storedStyle === 'one_sentence' ? 'tldr' : storedStyle as ChatbotResponseStyle) || 'normal');
-    setDetailLevel((localStorage.getItem('rcm_detail_level') as 'normal' | 'detailed') || 'normal');
+    const storedWorkflow = localStorage.getItem('rcm_agent_workflow') as AgentWorkflow | null;
+    const oldDetailLevel = localStorage.getItem('rcm_detail_level');
+    setAgentWorkflow(storedWorkflow || (oldDetailLevel === 'detailed' ? 'structured' : 'fast'));
     setShowHybridSourceLabels(localStorage.getItem('rcm_show_hybrid_source_labels') !== 'false');
     setGlobalFileText(localStorage.getItem('rcm_global_file_text') || '');
     setGlobalFileName(localStorage.getItem('rcm_global_file_name') || '');
@@ -341,7 +354,7 @@ setProjects(
         localStorage.setItem('rcm_power_automate_url', powerAutomateUrl);
         localStorage.setItem('rcm_enable_chatbot', String(enableChatbot));
         localStorage.setItem('rcm_chatbot_style', chatbotStyle);
-        localStorage.setItem('rcm_detail_level', detailLevel);
+        localStorage.setItem('rcm_agent_workflow', agentWorkflow);
         localStorage.setItem('rcm_show_hybrid_source_labels', String(showHybridSourceLabels));
         localStorage.setItem('rcm_global_file_text', globalFileText);
         localStorage.setItem('rcm_global_file_name', globalFileName);
@@ -350,7 +363,7 @@ setProjects(
         localStorage.setItem('rcm_system_type', systemType);
         localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
-    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, enableChatbot, chatbotStyle, detailLevel, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
+    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, enableChatbot, chatbotStyle, agentWorkflow, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
 
     const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic', 'openrouter'] as const;
     type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
@@ -426,7 +439,7 @@ setProjects(
         activeProject.subsystems.forEach(sub => {
             const startRowSub = r;
             if(sub.failures.length === 0) { wsData.push([sub.name, sub.specs, sub.func, "", "", "", "", "", "", "", "", "", ""]); r++; }
-            else { sub.failures.forEach(fail => { const startRowFail = r; if(fail.modes.length === 0) { wsData.push([sub.name, sub.specs, sub.func, fail.desc, "", "", "", "", "", "", "", "", ""]); r++; } else { fail.modes.forEach(m => { const rpn = (Number(m.rpn.s)||1)*(Number(m.rpn.o)||1)*(Number(m.rpn.d)||1); wsData.push([sub.name, sub.specs, sub.func, fail.desc, m.mode, m.effect, m.cause, m.currentControls || "", m.mitigation, m.rpn.s, m.rpn.o, m.rpn.d, rpn]); r++; }); } if(r-1 > startRowFail) merges.push({s:{r:startRowFail, c:3}, e:{r:r-1, c:3}}); }); }
+            else { sub.failures.forEach(fail => { const startRowFail = r; if(fail.modes.length === 0) { wsData.push([sub.name, sub.specs, sub.func, fail.desc, "", "", "", "", "", "", "", "", ""]); r++; } else { fail.modes.forEach(m => { const rpn = rpnTotal(m.rpn); wsData.push([sub.name, sub.specs, sub.func, fail.desc, m.mode, m.effect, m.cause, m.currentControls || "", m.mitigation, m.rpn.s, m.rpn.o, m.rpn.d, rpn]); r++; }); } if(r-1 > startRowFail) merges.push({s:{r:startRowFail, c:3}, e:{r:r-1, c:3}}); }); }
             if(r-1 > startRowSub) { merges.push({s:{r:startRowSub, c:0}, e:{r:r-1, c:0}}); merges.push({s:{r:startRowSub, c:1}, e:{r:r-1, c:1}}); merges.push({s:{r:startRowSub, c:2}, e:{r:r-1, c:2}}); }
         });
         const ws = XLSX.utils.aoa_to_sheet(wsData); if(merges.length > 0) ws['!merges'] = merges;
@@ -589,7 +602,11 @@ function layout(){
 function conn(x,y,w,h){const d=document.createElement('div');d.className='ln';Object.assign(d.style,{left:x+'px',top:y+'px',width:w+'px',height:h+'px'});return d;}
 function hln(x1,y,x2){const x=Math.min(x1,x2),w=Math.abs(x2-x1);if(w<1)return null;return conn(x,Math.round(y)-1,w,CONN_W);}
 function vln(x,y1,y2){const y=Math.min(y1,y2),h=Math.abs(y2-y1);if(h<1)return null;return conn(Math.round(x)-1,y,CONN_W,h);}
-function rpnVal(m){const v=Number(m.rpn.s)*Number(m.rpn.o)*Number(m.rpn.d);return isNaN(v)||v===0?'':String(v);}
+function rpnVal(m){
+  const vals=[m?.rpn?.s,m?.rpn?.o,m?.rpn?.d];
+  if(vals.some(v=>String(v??'').trim()===''||Number.isNaN(Number(v))))return '';
+  return String(Number(vals[0])*Number(vals[1])*Number(vals[2]));
+}
 function esc(s){const d=document.createElement('div');d.textContent=String(s||'');return d.innerHTML;}
 let hoverTimer=null;
 let hideTimer=null;
@@ -756,8 +773,8 @@ render();
     const updateFail = (sId: string, fId: string, v: string) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, desc: v} : f)} : s)}) : null); };
     const deleteFail = (sId: string, fId: string) => {if (!activeProject) return; ask("Delete Failure?", () => {setActiveProject(p => p? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? { ...s, failures: s.failures.filter(f => f.id !== fId) } : s )}) : p ); }); };
     const toggleFail = (sId: string, fId: string) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: !f.collapsed} : f)} : s)}) : null); };
-    const addMode = (sId: string, fId: string, data?: Mode) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, data || {id: generateId(), mode:"", effect:"", cause:"", currentControls:"", mitigation:"", rpn:{s:5,o:5,d:5}}]} : f)} : s)}) : null); };
-    const updateMode = (sId: string, fId: string, mId: string, k: keyof Mode, v: any) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, modes: f.modes.map(m => m.id === mId ? {...m, [k]: v} : m)} : f)} : s)}) : null); };
+    const addMode = (sId: string, fId: string, data?: Mode) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, collapsed: false, modes: [...f.modes, data || {id: generateId(), mode:"", effect:"", cause:"", currentControls:"", mitigation:"", rpn: blankRpn(), rpnStatus: "unscored"}]} : f)} : s)}) : null); };
+    const updateMode = (sId: string, fId: string, mId: string, k: keyof Mode, v: any) => { if(activeProject) setActiveProject(p => p ? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId ? {...s, failures: s.failures.map(f => f.id === fId ? {...f, modes: f.modes.map(m => m.id === mId ? {...m, [k]: v, ...(k === 'rpn' ? { rpnStatus: hasCompleteRpn(v) ? "manual" : "unscored" } : {})} : m)} : f)} : s)}) : null); };
     const deleteMode = (sId: string, fId: string, mId: string) => {if (!activeProject) return; ask("Delete Mode?", () => {setActiveProject(p => p? touchProject({...p, subsystems: p.subsystems.map(s => s.id === sId? {...s, failures: s.failures.map(f => f.id === fId ? { ...f, modes: f.modes.filter(m => m.id !== mId) } : f ) }: s )}) : p ); }); };
     // const handleDragOver = (e: React.DragEvent) => e.preventDefault();
     const handleDrop=(e:React.DragEvent,dropIndex:number)=>{ e.preventDefault(); setDragId(null); setDragAllowed(null); };
@@ -813,11 +830,17 @@ render();
                     ...s,
                     failures: s.failures.map(f => String(f.id) !== fid ? f : ({
                         ...f,
-                        modes: f.modes.map(m => String(m.id) !== mid ? m : ({
-                            ...m,
-                            rpn: { ...m.rpn, s: r.s, o: r.o, d: r.d },
-                            rpnReason: r.reason || m.rpnReason || ""
-                        }))
+	                        modes: f.modes.map(m => String(m.id) !== mid ? m : ({
+	                            ...m,
+	                            rpn: { ...m.rpn, s: r.s, o: r.o, d: r.d },
+	                            rpnStatus: "ai_scored",
+	                            rpnBaseline: r.baseline || m.rpnBaseline,
+	                            rpnImprovement: r.improvement || m.rpnImprovement,
+	                            rpnReason: [
+	                                r.reason || m.rpnReason || "",
+	                                r.improvement?.summary ? `Improvement: ${r.improvement.summary} Baseline RPN ${r.improvement.baselineRpn}; mitigated RPN ${r.improvement.mitigatedRpn}; D improvement ${r.improvement.detectionImprovement}; RPN reduction ${r.improvement.rpnReduction}.` : ""
+	                            ].filter(Boolean).join("\n")
+	                        }))
                     }))
                 }))
             }));
@@ -839,7 +862,7 @@ render();
         setRedecomposingId(sId);
         const decomposed = await AIService.decomposeFunction(
             sub.func, sub.name, activeProject!.name,
-            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext, detailLevel
+            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext, agentWorkflow === 'structured' ? 'detailed' : 'normal'
         );
         const rows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
         if (rows.length > 0) {
@@ -897,7 +920,7 @@ render();
                         : [...prevMatches, { rowId: row.id, failureIds: [newId] }];
                     return {
                         ...s,
-                        failures: [...s.failures, { id: newId, desc: desc.trim(), modes: [], collapsed: false, sourceTags: tags }],
+                        failures: [...s.failures, { id: newId, desc: desc.trim(), modes: [], collapsed: false, sourceTags: tags, sourceBreakdownRowId: row.id, sourceSnippet: row.snippet || row.function }],
                         breakdownMatches: nextMatches,
                     };
                 }),
@@ -906,24 +929,121 @@ render();
         setGeneratingRowId(null);
     };
 
+    const normalizeGeneratedMode = (m: any, tags?: string[]): Mode => ({
+        ...m,
+        id: m.id || generateId(),
+        mode: m.mode || "",
+        effect: m.effect || "",
+        cause: m.cause || "",
+        currentControls: m.currentControls || "",
+        mitigation: m.mitigation || "",
+        rpn: blankRpn(),
+        rpnStatus: "unscored",
+        sourceTags: tags
+    });
+
     const autoGen = async (sId: string, name: string, specs: string, func: string) => {
         setGenId(sId);
         if (activeProject) {
-            const existingFFs = activeProject.subsystems.find(s => s.id === sId)?.failures.map(f => f.desc).filter(Boolean) || [];
-            const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, existingFFs, detailLevel);
+            const sub = activeProject.subsystems.find(s => s.id === sId);
+            if (!sub) { setGenId(null); return; }
             const tags = hybridSourceTags();
-            if (res && res.failures) {
+            const existingFFs = sub.failures.map(f => f.desc).filter(Boolean);
+            if (agentWorkflow === 'fast') {
+                const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, existingFFs, 'normal');
+                if (res && res.failures) {
+                    setActiveProject(p => p ? touchProject({
+                        ...p,
+                        subsystems: p.subsystems.map(s => s.id !== sId ? s : {
+                            ...s,
+                            failures: [
+                                ...s.failures,
+                                ...res.failures.map((f: any) => ({
+                                    ...f,
+                                    id: generateId(),
+                                    sourceTags: tags,
+                                    modes: (f.modes || []).map((m: any) => normalizeGeneratedMode(m, tags))
+                                }))
+                            ]
+                        })
+                    }) : null);
+                }
+            } else {
+                let workingFunc = (func || '').trim();
+                if (!workingFunc) {
+                    workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, subsystem: name, specs }, aiProvider, azureEndpoint, systemContext, powerAutomateUrl) || '').trim();
+                }
+                const rows = workingFunc
+                    ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext, 'detailed')).map(r => ({ ...r, id: generateId() }))
+                    : [];
+                if (!rows.length) {
+                    alert("Structured Auto-Fill could not decompose the function.");
+                    setGenId(null);
+                    return;
+                }
+                const ffBatch = await AIService.generateFFsForBreakdownRows({
+                    systemName: activeProject.name,
+                    subsystemName: name,
+                    subsystemSpecs: specs,
+                    funcDesc: workingFunc,
+                    rows,
+                    existingFailures: existingFFs,
+                    key: apiKey,
+                    modelName,
+                    aiProvider,
+                    azureEndpoint,
+                    powerAutomateUrl,
+                    systemContext
+                });
+                const generatedFailures = ffBatch.failures.map(f => ({
+                    id: generateId(),
+                    desc: f.desc,
+                    modes: [] as Mode[],
+                    collapsed: false,
+                    sourceTags: tags,
+                    sourceBreakdownRowId: f.rowId,
+                    sourceSnippet: f.sourceSnippet || rows.find(r => r.id === f.rowId)?.snippet || ''
+                }));
+                if (!generatedFailures.length) {
+                    alert("Structured Auto-Fill generated no functional failures.");
+                    setGenId(null);
+                    return;
+                }
+                const existingModes = sub.failures.flatMap(f => f.modes.map(m => m.mode)).filter(Boolean);
+                const modeBatch = await AIService.generateModesForFailuresBatch({
+                    project: activeProject.name,
+                    subName: name,
+                    subSpecs: specs,
+                    subFunc: workingFunc,
+                    failures: generatedFailures.map(f => ({ id: f.id, desc: f.desc })),
+                    key: apiKey,
+                    modelName,
+                    mode: aiSourceMode,
+                    refText: globalFileText,
+                    aiProvider,
+                    azureEndpoint,
+                    systemContext,
+                    checklistText,
+                    powerAutomateUrl,
+                    existingModes
+                });
+                const modesByFailure = new Map(modeBatch.failures.map(f => [f.failureId, f.modes || []]));
+                const breakdownMatches: BreakdownMatch[] = generatedFailures
+                    .filter(f => f.sourceBreakdownRowId)
+                    .map(f => ({ rowId: f.sourceBreakdownRowId as string, failureIds: [f.id] }));
                 setActiveProject(p => p ? ({
                     ...p,
                     subsystems: p.subsystems.map(s => s.id !== sId ? s : {
                         ...s,
+                        func: workingFunc || s.func,
+                        functionBreakdown: rows,
+                        breakdownMatches: [...(s.breakdownMatches || []), ...breakdownMatches],
+                        funcHashAtBreakdown: workingFunc ? String(workingFunc).split('').reduce((h, c) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0).toString(36) : s.funcHashAtBreakdown,
                         failures: [
                             ...s.failures,
-                            ...res.failures.map((f: any) => ({
+                            ...generatedFailures.map((f: any) => ({
                                 ...f,
-                                id: generateId(),
-                                sourceTags: tags,
-                                modes: f.modes.map((m: any) => ({ ...m, id: generateId(), sourceTags: tags }))
+                                modes: (modesByFailure.get(f.id) || []).map((m: any) => normalizeGeneratedMode(m, tags))
                             }))
                         ]
                     })
@@ -945,7 +1065,7 @@ render();
                     failures: s.failures.map(f => f.id === fId ? {
                         ...f,
                         collapsed: false,
-                        modes: [...f.modes, ...modes.map(m => ({ ...m, id: generateId(), sourceTags: tags }))]
+                        modes: [...f.modes, ...modes.map(m => normalizeGeneratedMode(m, tags))]
                     } : f)
                 } : s)
             }) : null);
@@ -978,7 +1098,7 @@ render();
                 ? `${activeProject.name}: ${activeProject.desc.substring(0, 800)}`
                 : activeProject.name;
             const tags = hybridSourceTags();
-            const progressTotal = 1 + rawSubs.length * 5;
+            const progressTotal = 1 + rawSubs.length * (agentWorkflow === 'fast' ? 2 : 5);
             let progressDone = 1;
             const mark = (step: string, subsystem = '', units = 0) => {
                 progressDone += units;
@@ -1003,59 +1123,90 @@ render();
                 if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                 try {
                     mark('Generating function', s.name);
-                    const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: projectContext, subsystem: s.name, specs: s.specs, detailLevel }, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
+                    const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: projectContext, subsystem: s.name, specs: s.specs }, aiProvider, azureEndpoint, systemContext, powerAutomateUrl);
                     if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                     const func = (funcDesc || s.func || '').trim();
                     mark('Function ready', s.name, 1);
 
+                    if (agentWorkflow === 'fast') {
+                        mark('Subsystem skeleton complete', s.name, 1);
+                        return { ...s, func, breakdown: [], failures: [], sourceTags: tags };
+                    }
+
                     let breakdown: BreakdownRow[] = [];
-                    const ffDescs: string[] = [];
                     if (func) {
-                        mark('Generating functional failures', s.name);
-                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext, detailLevel);
+                        mark('Decomposing function', s.name);
+                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext, 'detailed');
                         if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                         breakdown = rows.map(r => ({ ...r, id: generateId() }));
-                        for (const row of breakdown) {
-                            if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
-                            const desc = await AIService.generateFFForRow(projectContext, s.name, s.specs || '', func, row.snippet || row.function, row.standard, ffDescs, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, systemContext);
-                            if (desc?.trim()) ffDescs.push(desc.trim());
-                        }
-                    }
-                    if (ffDescs.length === 0 && !masterCancelRef.current) {
-                        const expanded = await AIService.generateCompleteSubsystem(s.name, s.specs, func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, [], detailLevel);
-                        (expanded?.failures || []).forEach((f: any) => { if (f.desc) ffDescs.push(f.desc); });
                     }
                     if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
-                    if (ffDescs.length === 0) issues.push(`${s.name}: no functional failures generated`);
+                    mark('Function breakdown ready', s.name, 1);
+
+                    let failures: any[] = [];
+                    let breakdownMatches: BreakdownMatch[] = [];
+                    if (breakdown.length) {
+                        mark('Generating functional failures', s.name);
+                        const ffBatch = await AIService.generateFFsForBreakdownRows({
+                            systemName: projectContext,
+                            subsystemName: s.name,
+                            subsystemSpecs: s.specs || '',
+                            funcDesc: func,
+                            rows: breakdown,
+                            existingFailures: [],
+                            key: apiKey,
+                            modelName,
+                            aiProvider,
+                            azureEndpoint,
+                            powerAutomateUrl,
+                            systemContext
+                        });
+                        failures = ffBatch.failures.map(f => ({
+                            id: generateId(),
+                            desc: f.desc,
+                            modes: [] as Mode[],
+                            sourceTags: tags,
+                            sourceBreakdownRowId: f.rowId,
+                            sourceSnippet: f.sourceSnippet || breakdown.find(r => r.id === f.rowId)?.snippet || ''
+                        }));
+                        breakdownMatches = failures
+                            .filter(f => f.sourceBreakdownRowId)
+                            .map(f => ({ rowId: f.sourceBreakdownRowId as string, failureIds: [f.id] }));
+                    }
+                    if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
+                    if (failures.length === 0) issues.push(`${s.name}: no functional failures generated`);
                     mark('Functional failures ready', s.name, 1);
 
-                    const seenModes: string[] = [];
-                    const failures: any[] = [];
-                    mark('Generating failure modes', s.name);
-                    for (const desc of ffDescs) {
-                        if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
-                        const modes = await AIService.generateModesForFailure(desc, s.name, s.specs, func, projectContext, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, systemContext, checklistText, powerAutomateUrl, seenModes);
-                        if (!modes || modes.length === 0) issues.push(`${s.name} / "${desc.slice(0, 60)}": no failure modes generated`);
-                        (modes || []).forEach((m: any) => { if (m.mode) seenModes.push(m.mode); });
-                        failures.push({ desc, sourceTags: tags, modes: (modes || []).map((m: any) => ({ ...m, sourceTags: tags })) });
+                    if (failures.length) {
+                        mark('Generating failure modes', s.name);
+                        const modeBatch = await AIService.generateModesForFailuresBatch({
+                            project: projectContext,
+                            subName: s.name,
+                            subSpecs: s.specs || '',
+                            subFunc: func,
+                            failures: failures.map(f => ({ id: f.id, desc: f.desc })),
+                            key: apiKey,
+                            modelName,
+                            mode: aiSourceMode,
+                            refText: globalFileText,
+                            aiProvider,
+                            azureEndpoint,
+                            systemContext,
+                            checklistText,
+                            powerAutomateUrl,
+                            existingModes: []
+                        });
+                        const modesByFailure = new Map(modeBatch.failures.map(f => [f.failureId, f.modes || []]));
+                        failures = failures.map(f => ({
+                            ...f,
+                            modes: (modesByFailure.get(f.id) || []).map((m: any) => normalizeGeneratedMode(m, tags))
+                        }));
+                        failures.forEach(f => { if (!f.modes.length) issues.push(`${s.name} / "${String(f.desc || '').slice(0, 60)}": no failure modes generated`); });
                     }
                     mark('Failure modes ready', s.name, 1);
-
-                    const allModes = failures.flatMap(f => f.modes.map((m: any) => ({ f, m })));
-                    mark('Scoring RPN', s.name);
-                    await runPool(allModes, 2, (async ({ f, m }: any) => {
-                        if (masterCancelRef.current) return;
-                        try {
-                            const r = await AIService.evaluateRpnFromText({ project: projectContext, subName: s.name, subSpecs: s.specs || '', subFunc: func, failDesc: f.desc, mode: m.mode || '', effect: m.effect || '', cause: m.cause || '', currentControls: m.currentControls || '', mitigation: m.mitigation || '', key: apiKey, modelName, modeSource: aiSourceMode as any, refText: globalFileText || '', aiProvider, azureEndpoint, systemContext, powerAutomateUrl });
-                            m.rpn = { s: r.s, o: r.o, d: r.d };
-                            m.rpnReason = r.reason || m.rpnReason || "";
-                        } catch { /* keep generation-time rpn on scoring failure */ }
-                    }));
-                    if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
-                    mark('RPN scored', s.name, 1);
                     mark('Subsystem complete', s.name, 1);
 
-                    return { ...s, func, breakdown, failures, sourceTags: tags };
+                    return { ...s, func, breakdown, breakdownMatches, failures, sourceTags: tags };
                 } catch (e: any) {
                     if (!masterCancelRef.current) issues.push(`${s.name}: ${e?.message || e}`);
                     return { ...s, func: s.func || '', breakdown: [], failures: [] };
@@ -1069,17 +1220,19 @@ render();
                 imageData: "", imageName: "", imageJson: "", showImageJson: false,
                 sourceTags: tags,
                 functionBreakdown: s.breakdown?.length ? s.breakdown : undefined,
+                breakdownMatches: s.breakdownMatches?.length ? s.breakdownMatches : undefined,
                 funcHashAtBreakdown: s.breakdown?.length ? String(s.func || '').split('').reduce((h: number, c: string) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0).toString(36) : undefined,
                 failures: (s.failures || []).map((f: any) => ({
-                    id: generateId(), desc: f.desc, sourceTags: f.sourceTags,
+                    id: f.id || generateId(), desc: f.desc, sourceTags: f.sourceTags, sourceBreakdownRowId: f.sourceBreakdownRowId, sourceSnippet: f.sourceSnippet,
                     modes: (f.modes || []).map((m: any) => ({
-                        id: generateId(),
+                        id: m.id || generateId(),
                         mode: m.mode,
                         effect: m.effect,
                         cause: m.cause,
                         currentControls: m.currentControls || "",
                         mitigation: m.mitigation,
-                        rpn: m.rpn || { s: 5, o: 5, d: 5 },
+                        rpn: blankRpn(),
+                        rpnStatus: "unscored",
                         rpnReason: m.rpnReason || "",
                         sourceTags: m.sourceTags
                     }))
@@ -1098,8 +1251,8 @@ render();
             masterCancelRef.current = false;
         }
     };
-    const injectLib = (item: LibraryItem) => { if(!activeProject) return; if(activeProject.subsystems.length === 0) return alert("Add Subsystem"); let targetSubId = activeSubId || activeProject.subsystems[0].id; const targetIndex = activeProject.subsystems.findIndex(s => s.id === targetSubId); if(targetIndex === -1) return; const nm: Mode = {id: generateId(), mode: item.mode, effect: item.effect || "", cause: item.cause, currentControls: "", mitigation: item.task, rpn:{s:5,o:5,d:5}}; const nf: Failure = {id: generateId(), desc: item.fail || `Failure`, modes: [nm]}; const newSubs = [...activeProject.subsystems]; newSubs[targetIndex] = {...newSubs[targetIndex], failures: [...newSubs[targetIndex].failures, nf]}; setActiveProject({...activeProject, subsystems: newSubs}); };
-    const getRpnColor = (r: number) => r >= 100 ? "bg-red-100 text-red-800" : r >= 40 ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800";
+    const injectLib = (item: LibraryItem) => { if(!activeProject) return; if(activeProject.subsystems.length === 0) return alert("Add Subsystem"); let targetSubId = activeSubId || activeProject.subsystems[0].id; const targetIndex = activeProject.subsystems.findIndex(s => s.id === targetSubId); if(targetIndex === -1) return; const nm: Mode = {id: generateId(), mode: item.mode, effect: item.effect || "", cause: item.cause, currentControls: "", mitigation: item.task, rpn: blankRpn(), rpnStatus: "unscored"}; const nf: Failure = {id: generateId(), desc: item.fail || `Failure`, modes: [nm]}; const newSubs = [...activeProject.subsystems]; newSubs[targetIndex] = {...newSubs[targetIndex], failures: [...newSubs[targetIndex].failures, nf]}; setActiveProject({...activeProject, subsystems: newSubs}); };
+    const getRpnColor = (r: number | "") => r === "" ? "bg-slate-100 text-slate-500" : r >= 100 ? "bg-red-100 text-red-800" : r >= 40 ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800";
     const getSubRowSpan = (sub: Subsystem) => { if (sub.failures.length === 0) return 1; return sub.failures.reduce((acc, f) => acc + (f.modes.length || 1), 0); };
     const getFailRowSpan = (fail: Failure) => fail.modes.length || 1;
 
@@ -1251,17 +1404,17 @@ render();
                                 </div>
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
                                     <h2 className="text-lg font-semibold mb-4">FMECA Generation</h2>
-                                    <label className="block text-xs font-semibold text-slate-500 mb-1">Detail Level</label>
+                                    <label className="block text-xs font-semibold text-slate-500 mb-1">Agent Workflow</label>
                                     <select
-                                        value={detailLevel}
-                                        onChange={(e) => setDetailLevel(e.target.value as 'normal' | 'detailed')}
+                                        value={agentWorkflow}
+                                        onChange={(e) => setAgentWorkflow(e.target.value as AgentWorkflow)}
                                         className="w-full border border-slate-200 rounded px-3 py-2 text-sm outline-none focus:border-brand-500"
                                     >
-                                        <option value="normal">Normal</option>
-                                        <option value="detailed">Detailed</option>
+                                        <option value="fast">Fast</option>
+                                        <option value="structured">Structured</option>
                                     </select>
                                     <p className="text-xs text-slate-500 mt-1">
-                                        Controls Auto-Generate output. Normal groups related operating conditions into fewer functional failures with concise descriptions. Detailed splits every condition into its own functional failure for exhaustive coverage (more FFs, longer to generate).
+                                        Fast uses fewer calls for quick drafts. Structured decomposes functions and batch-generates FFs/modes for better traceability. RPN is scored separately with the robot button.
                                     </p>
                                 </div>
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
@@ -1490,8 +1643,8 @@ render();
 	                                                                            <td className="p-2 border-r"><SmartInput label="Failure Mode" value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /><SourceBadges tags={mode.sourceTags} /></td>
                                                                             <td className="p-2 border-r"><SmartInput label="Failure Effect" value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
                                                                             <td className="p-2 border-r"><SmartInput label="Failure Cause" value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} /></td>
-                                                                            <td className="p-2 border-r"><div className="mb-2"><MitigationBuilder label="Current Controls" placeholder="Existing controls (D scored against these)..." value={mode.currentControls || ""} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'currentControls', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText}} /></div><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, detectionScore: Number(mode.rpn.d) || 5, currentControls: mode.currentControls || ""}} /></td>
-                                                                            {showRPN && <td className="p-2 text-center"><div className="flex justify-center gap-0.5 mb-1"><input className="w-5 text-center border text-xs" value={mode.rpn.s} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, s:e.target.value})}/><input className="w-5 text-center border text-xs" value={mode.rpn.o} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, o:e.target.value})}/><input className="w-5 text-center border text-xs" value={mode.rpn.d} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, d:e.target.value})}/></div><div className={`text-xs font-bold rounded py-1 border ${getRpnColor((Number(mode.rpn.s)||1)*(Number(mode.rpn.o)||1)*(Number(mode.rpn.d)||1))}`}>{(Number(mode.rpn.s)||1)*(Number(mode.rpn.o)||1)*(Number(mode.rpn.d)||1)}</div></td>}
+	                                                                            <td className="p-2 border-r"><div className="mb-2"><MitigationBuilder label="Current Controls" placeholder="Existing controls (D scored against these)..." value={mode.currentControls || ""} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'currentControls', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></div><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, detectionScore: Number(mode.rpn?.d) || 5, currentControls: mode.currentControls || "", siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
+                                                                            {showRPN && <td className="p-2 text-center"><div className="flex justify-center gap-0.5 mb-1"><input className="w-5 text-center border text-xs" value={mode.rpn.s} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, s:e.target.value})}/><input className="w-5 text-center border text-xs" value={mode.rpn.o} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, o:e.target.value})}/><input className="w-5 text-center border text-xs" value={mode.rpn.d} onChange={e=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, d:e.target.value})}/></div>{(() => { const total = rpnTotal(mode.rpn); return <div className={`text-xs font-bold rounded py-1 border ${getRpnColor(total)}`}>{total === "" ? "Unscored" : total}</div>; })()}</td>}
                                                                             <td className="p-2 text-center opacity-0 group-hover:opacity-100"><div className="flex flex-col items-center gap-1"><button onClick={(e)=>{e.stopPropagation();deleteMode(sub.id,fail.id,mode.id)}} className="text-red-500 mb-2"><Icon name="trash"/></button><button onClick={(e)=>{e.stopPropagation();aiScoreModeRpn(sub.id,fail.id,mode.id)}} className={`text-blue-500 text-sm ${rpnLoadingId===String(mode.id) ? "animate-pulse scale-110 drop-shadow-[0_0_6px_rgba(59,130,246,0.6)]" : ""}`} title="AI score S/O/D">🤖</button></div></td>
                                                                         </tr>
                                                                     ))}
@@ -1532,12 +1685,12 @@ render();
                                                         );
                                                     }
                                                     return fail.modes.map((mode, mIndex) => {
-                                                        const rpn = (Number(mode.rpn.s) || 1) * (Number(mode.rpn.o) || 1) * (Number(mode.rpn.d) || 1);
+                                                        const rpn = rpnTotal(mode.rpn);
                                                         return (
                                                             <tr key={mode.id}>
                                                                 {fIndex === 0 && mIndex === 0 && (<React.Fragment><td rowSpan={subRowSpan} className="font-bold">{sub.name}</td><td rowSpan={subRowSpan}>{sub.specs}</td><td rowSpan={subRowSpan}>{sub.func}</td></React.Fragment>)}
                                                                 {mIndex === 0 && (<td rowSpan={failRowSpan} className="font-medium text-slate-700">{fail.desc}</td>)}
-                                                                <td>{mode.mode}</td><td>{mode.effect}</td><td>{mode.cause}</td><td className="whitespace-pre-wrap">{mode.currentControls}</td><td className="whitespace-pre-wrap">{mode.mitigation}</td><td className="text-center">{mode.rpn.s}</td><td className="text-center">{mode.rpn.o}</td><td className="text-center">{mode.rpn.d}</td><td className="text-center font-bold">{rpn}</td>
+                                                                <td>{mode.mode}</td><td>{mode.effect}</td><td>{mode.cause}</td><td className="whitespace-pre-wrap">{mode.currentControls}</td><td className="whitespace-pre-wrap">{mode.mitigation}</td><td className="text-center">{mode.rpn.s}</td><td className="text-center">{mode.rpn.o}</td><td className="text-center">{mode.rpn.d}</td><td className="text-center font-bold">{rpn === "" ? "Unscored" : rpn}</td>
                                                             </tr>
                                                         );
                                                     });

@@ -49,7 +49,7 @@ Occurrence (O) — likelihood of this CAUSE producing the mode in typical indust
   5-6: Occasional — every 1-2 years.
   7-8: Frequent — several times per year.
   9-10: Persistent — monthly or continuous problem.
-Detection (D) — ability of the CURRENT controls to detect or prevent before impact:
+Detection (D) — ability of the controls credited in the scored state to detect or prevent before impact:
   1-2: Near-certain — online monitoring with alarm/trip on this mode.
   3-4: High — condition monitoring or frequent inspection catches onset.
   5-6: Moderate — periodic inspection might catch it in time.
@@ -65,6 +65,60 @@ const LIBRARY_EXAMPLES = (() => {
             lines.push(`- ${cat}: FF "${i.fail}" → Mode "${i.mode}" | Cause "${i.cause}" | Task "${i.task}"`)));
     return `VOCABULARY EXAMPLES (granularity/terminology reference only — adapt to the actual equipment, do not copy):\n${lines.join('\n')}`;
 })();
+
+const FAILURE_MODE_BARRIER_FILTER = `Failure-mode-specific barrier filter:
+- Use Functional Failure, Failure Mode, Cause, and Effect as hard anchors.
+- Keep only barriers that directly prevent the stated cause, detect the stated cause, detect the failure signature specific to this failure mode, or reduce/limit the stated effect.
+- Reject subsystem-generic tasks unless rewritten as a specific barrier for this exact failure mode.
+- Reject controls/actions that belong more strongly to sibling failure modes.
+Silent barrier test for every candidate line:
+- Which exact cause does this address?
+- Which exact failure signature does this detect?
+- Which exact effect does this reduce?
+- Does it belong more strongly to another failure mode?
+Keep the line only if it directly matches this failure mode's cause/effect chain.
+Sibling-exclusion examples for pump vibration:
+- Pump imbalance: keep impeller deposits/damage, dynamic balance, imbalance-specific 1x radial vibration trend, impeller cleaning/inspection.
+- Exclude laser alignment/coupling alignment unless failure mode/cause is misalignment.
+- Exclude bearing lubrication/bearing temperature unless failure mode/cause is bearing degradation.
+- Exclude suction pressure/NPSH unless failure mode/cause is cavitation or hydraulic starvation.
+- Exclude foundation/bolt looseness unless failure mode/cause is looseness.`;
+
+const buildSiblingFailureModeBlock = (siblings: any): string => {
+    if (!Array.isArray(siblings) || siblings.length === 0) return '';
+    const rows = siblings
+        .slice(0, 12)
+        .map((m: any, i: number) => {
+            const mode = String(m?.mode ?? m ?? '').trim();
+            const cause = String(m?.cause ?? '').trim();
+            const effect = String(m?.effect ?? '').trim();
+            const parts = [`Mode "${mode || 'Unknown'}"`];
+            if (cause) parts.push(`Cause "${cause}"`);
+            if (effect) parts.push(`Effect "${effect}"`);
+            return `${i + 1}. ${parts.join(' | ')}`;
+        })
+        .join('\n');
+    return `\nSibling failure modes in the same analysis context (exclude barriers that fit these better):\n${rows}`;
+};
+
+const buildModeFieldRules = (controlsKnowledgeAvailable: boolean, generatedLabel = 'THIS generated failure mode'): string => `Field rules per mode:
+- "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
+- "cause": the dominant root cause of this mode.
+${controlsKnowledgeAvailable
+    ? `- "currentControls": ONLY controls currently deployed/evidenced for ${generatedLabel} in PM CHECKLIST KNOWLEDGE or REFERENCE DATA, and only if they directly prevent the stated cause, detect the stated cause, detect this mode's specific failure signature, or limit the stated effect. Include relevant PM/checklist tasks plus deployed instrument/protection controls (temperature, pressure, level, flow, vibration, speed, alarms, trips, interlocks, transmitters/switches/tags and limits where stated). Reject subsystem-generic controls and controls for sibling failure modes. Do NOT invent or recommend new controls here. Empty string if no evidence applies. Never prefix a line with "Existing control".`
+    : '- "currentControls": always return an empty string "" — current controls require checklist or reference evidence, which is not available.'}
+- "mitigation": RECOMMENDED actions (not yet implemented) for ${generatedLabel} that close gaps NOT covered by currentControls in the same cause/effect chain. Use checklist/reference recommendations when present, then add reliability-knowledge tasks or controls for remaining gaps in Hybrid/AI generation. Never duplicate a task already listed in currentControls and never bring tasks for sibling failure modes.
+${LIBRARY_EXAMPLES}`;
+
+const MODE_ACTION_FORMAT_RULES = `Current controls format — return as a numbered string per mode without the words "Existing control":
+"1- [Tag: TAGNO (limit if stated)] (Owner)" or "1- Action [Tag: TAGNO (limit if stated)] (Owner)\\n2- ..."
+Mitigation format — return as a numbered string per mode:
+"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."
+Owner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)
+Use checklist knowledge for PM tasks and reference data for instrument tags and limits only when they pass the failure-mode-specific barrier filter.
+${FAILURE_MODE_BARRIER_FILTER}`;
+
+const blankGeneratedRpn = () => ({ s: "", o: "", d: "" });
 
 export interface AIMessage {
     role: string;
@@ -506,7 +560,13 @@ export const AIService = {
         }
 
         if (!actions.length) return '';
-        return actions.map((action, i) => `${i + 1}- ${action.replace(/\s+/g, ' ')}`).join('\n');
+        return actions.map((action, i) => {
+            const cleaned = action
+                .replace(/^(?:existing|current)\s+controls?\s*[:\-]?\s*/i, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            return `${i + 1}- ${cleaned}`;
+        }).join('\n');
     },
 
     // -------------------------------------------------------------------------
@@ -528,6 +588,7 @@ export const AIService = {
 - Failure Mode: "${contextData.failureMode || 'Unknown'}"
 - Effect: "${contextData.failureEffect || 'Unknown'}"
 - Cause: "${contextData.failureCause || 'Unknown'}"`;
+        const siblingBlock = buildSiblingFailureModeBlock((contextData as any).siblingFailureModes);
 
         // --- CURRENT CONTROLS SPECIALIST ---
         // Evidence only: current controls are already deployed checklist tasks or
@@ -543,22 +604,25 @@ export const AIService = {
             const referenceBlock = refText.trim()
                 ? `REFERENCE DATA (deployed equipment, instruments, alarms, trips, interlocks, limits):\n"""\n${refText.slice(0, 7000)}\n"""\n\n`
                 : '';
-            const controlsPrompt = `${referenceBlock}${checklistBlock}${failureContext}
+            const controlsPrompt = `${referenceBlock}${checklistBlock}${failureContext}${siblingBlock}
 ${existingNote}Task: List ONLY existing controls that are currently deployed for THIS failure mode.
 Include:
-- Relevant PM/checklist tasks that detect or prevent this failure mode. Use the checklist section name as owner.
+- Relevant PM/checklist tasks that directly prevent the stated cause, detect the stated cause, detect this mode's specific failure signature, or limit the stated effect. Use the checklist section name as owner.
 - Deployed instrument/protection controls from the reference data, such as temperature, pressure, level, flow, vibration, speed, differential pressure, alarms, trips, interlocks, shutdowns, transmitters, switches, or monitoring points. Include tag numbers and alarm/trip limits when stated. Use (Instrument team) for instrument controls unless the source states another owner.
 Rules:
 - Match controls to THIS Functional Failure + Failure Mode + Cause + Effect only.
-- Do NOT include tasks for other failure modes in the checklist.
+- Do NOT include tasks for sibling failure modes in the checklist.
 - Do NOT invent controls, tags, setpoints, alarms, trips, or tasks.
 - Do NOT include recommendations, upgrades, "install", "add", or "consider" actions.
 - If nothing is evidenced for this failure mode, return an empty response.
+${FAILURE_MODE_BARRIER_FILTER}
 Output contract:
-- Return ONLY numbered lines in this exact form: "1- Existing control [Tag: TAGNO (limit if stated)] (Owner)".
+- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
+- Never write the words "Existing control".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const controlsOutputContract = `FINAL OUTPUT CONTRACT:
-- Return ONLY numbered lines in this exact form: "1- Existing control [Tag: TAGNO (limit if stated)] (Owner)".
+- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
+- Never write the words "Existing control".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const controlsContent = controlsPrompt + (systemContext ? '\n\n' + systemContext : '') + '\n\n' + controlsOutputContract;
             const controlsRes = await this.chat({
@@ -611,25 +675,27 @@ Output contract:
             if (mode === 'file' || mode === 'hybrid') {
                 const refSection = refText?.trim() ? `REFERENCE DATA (P&IDs, datasheets, safeguarding instruments with tag numbers and alarm limits):\n"""\n${refText.slice(0, 7000)}\n"""\n\n` : '';
                 const checkSection = checklistContent?.trim() ? `PM CHECKLIST KNOWLEDGE (organized by team and PM interval):\n"""\n${checklistContent.slice(0, 6000)}\n"""\n\n` : '';
-                mitigationPrompt = `${refSection}${checkSection}${failureContext}
+                mitigationPrompt = `${refSection}${checkSection}${failureContext}${siblingBlock}
 Mitigation wand rule: File-only and Hybrid settings both act as Hybrid here: use loaded knowledge first, then add reliability-engineering actions for remaining gaps.
 ${detectionNote}
 ${controlsCovered}${existingNote}
 Generate ${count} mitigation actions for THIS failure mode using this priority:
-1. Extract PM tasks or controls recommended/evidenced in CHECKLIST KNOWLEDGE or REFERENCE DATA that are relevant to THIS failure mode and are NOT already listed in current controls.
-2. If reference data shows available safeguarding instruments (tags like VXIT, PT, TT, LT/LE, FIT, vibration, speed, pressure, temperature, level, flow), recommend using, alarming, testing, calibrating, or adding logic for them only when not already covered by current controls.
+1. Extract PM tasks or controls recommended/evidenced in CHECKLIST KNOWLEDGE or REFERENCE DATA that close gaps in THIS failure mode's stated cause/effect chain and are NOT already listed in current controls.
+2. If reference data shows available safeguarding instruments (tags like VXIT, PT, TT, LT/LE, FIT, vibration, speed, pressure, temperature, level, flow), recommend using, alarming, testing, calibrating, or adding logic for them only when they detect/prevent this exact cause, detect this mode's signature, or limit this effect, and only when not already covered by current controls.
 3. Add reliability-knowledge mitigations only for remaining gaps, especially when D > 6.
 Rules:
 - Never duplicate an action already covered by current controls.
-- Do NOT bring tasks for other failure modes.
+- Do NOT bring tasks for sibling failure modes.
 - Mitigation is proposed work, not existing current controls.
+${FAILURE_MODE_BARRIER_FILTER}
 ${ownerRules}
 ${formatRule}`;
             } else {
-                mitigationPrompt = `${failureContext}
+                mitigationPrompt = `${failureContext}${siblingBlock}
 ${detectionNote}
 ${controlsCovered}${existingNote}
 Generate ${count} maintenance mitigation actions for THIS failure mode using reliability engineering knowledge. Never duplicate an action already covered by current controls. Do NOT bring tasks for other failure modes.
+${FAILURE_MODE_BARRIER_FILTER}
 ${ownerRules}
 ${formatRule}`;
             }
@@ -663,7 +729,7 @@ ${formatRule}`;
                 4. Include key operating values from Specs if available.
                 ${((contextData as any)?.detailLevel === 'normal')
                     ? '5. State the primary operating expectation concisely; do not enumerate every fault-free condition.'
-                    : '5. Clearly state normal expectations (e.g., continuous operation, no abnormal vibration, leakage, or temperature).'}
+                    : '5. Include key fault-free operating expectations when relevant, such as abnormal vibration, leakage, overheating, or abnormal noise. Do not force them when not applicable.'}
                 6. Preserve the user's core meaning and any specific values they provided.
                 Output strictly the description text only.`;
             } else if (lowerLabel.includes("spec")) {
@@ -695,7 +761,7 @@ ${formatRule}`;
                 4. Include key operating values from Specs (e.g., flow, pressure, RPM) if available.
                 ${((contextData as any)?.detailLevel === 'normal')
                     ? '5. State the primary operating expectation concisely; do not enumerate every fault-free condition.'
-                    : '5. Clearly state normal expectations (e.g., continuous operation, no abnormal vibration, leakage, or temperature).'}
+                    : '5. Include key fault-free operating expectations when relevant, such as abnormal vibration, leakage, overheating, or abnormal noise. Do not force them when not applicable.'}
                 Output strictly the description text only.`;
             } else if (lowerLabel.includes("spec")) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}".
@@ -767,30 +833,23 @@ ${formatRule}`;
     async generateCompleteSubsystem(name: string, specs: string, funcDesc: string, projectContext: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingFailures: string[] = [], detailLevel: 'normal' | 'detailed' = 'detailed'): Promise<any> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-        if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Local: Loss of integrity; End: Reduced system availability", cause: "Aging", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:5,o:5,d:5} }] }] }; }
+        if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Local: Loss of integrity; End: Reduced system availability", cause: "Aging", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: blankGeneratedRpn(), rpnStatus: "unscored" }] }] }; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
             ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
         const controlsKnowledgeAvailable = (mode === 'file' || mode === 'hybrid') && (Boolean(checklistText?.trim()) || Boolean(refText?.trim()));
         const existingBlock = existingFailures.length > 0
             ? `Existing Functional Failures already defined for this subsystem (DO NOT repeat or closely resemble):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n` : '';
-        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
+        const mitigationInstruction = `\n${MODE_ACTION_FORMAT_RULES}`;
         const corePrompt = `${checklistBlock}${existingBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".
         Task:
         1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
         ${detailLevel === 'normal'
             ? '2. Derive distinct Functional Failures strictly from the Function (negation of each stated expectation). Scale the count to complexity (simple component: 2, complex subsystem: up to 3). Cover the most credible loss modes — do not enumerate every theoretical variant.'
             : '2. Derive distinct Functional Failures strictly from the Function (negation of each stated expectation). Scale the count to the subsystem\'s complexity and criticality (simple component: 2, critical complex subsystem: up to 5). Cover total loss, partial loss, intermittent operation and over-function where the function supports them.'}
-        3. For each failure, generate Failure Modes, Effects, Causes, Current Controls and Mitigations. Failure modes must be unique across the whole subsystem — never repeat a mode under two failures.
-        Field rules:
-        - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
-        ${controlsKnowledgeAvailable
-            ? '- "currentControls": ONLY controls currently deployed/evidenced for THIS failure mode in PM CHECKLIST KNOWLEDGE or REFERENCE DATA. Include relevant PM/checklist tasks plus deployed instrument/protection controls (temperature, pressure, level, flow, vibration, speed, alarms, trips, interlocks, transmitters/switches/tags and limits where stated). Do NOT include controls for other failure modes. Do NOT invent or recommend new controls here. Empty string if no evidence applies.'
-            : '- "currentControls": always return an empty string "" — current controls require checklist or reference evidence, which is not available.'}
-        - "mitigation": RECOMMENDED actions (not yet implemented) for THIS failure mode that close gaps NOT covered by currentControls. Use checklist/reference recommendations when present, then add reliability-knowledge tasks or controls for remaining gaps in Hybrid/AI generation. Never duplicate a task already listed in currentControls and never bring tasks for other failure modes.
-        - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
-        ${RPN_ANCHORS}
-        ${LIBRARY_EXAMPLES}
-        Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "currentControls": "string", "mitigation": "string", "rpn": {"s": <int 1-10>, "o": <int 1-10>, "d": <int 1-10>} } ] } ] }${mitigationInstruction}`;
+        3. For each failure, generate Failure Modes, Effects, Causes, Current Controls and Mitigations. Failure modes must be unique across the whole subsystem — never repeat a mode under two failures. Treat other generated modes as siblings; do not share generic controls or actions across them.
+        ${buildModeFieldRules(controlsKnowledgeAvailable, 'THIS failure mode')}
+        Do NOT generate or include RPN/S/O/D values. RPN is scored later by the dedicated RPN scorer.
+        Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "currentControls": "string", "mitigation": "string" } ] } ] }${mitigationInstruction}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 
@@ -813,6 +872,7 @@ ${formatRule}`;
             if (!controlsKnowledgeAvailable) {
                 (parsed?.failures || []).forEach((f: any) => (f.modes || []).forEach((m: any) => { m.currentControls = ''; }));
             }
+            (parsed?.failures || []).forEach((f: any) => (f.modes || []).forEach((m: any) => { m.rpn = blankGeneratedRpn(); m.rpnStatus = 'unscored'; }));
             return parsed;
         } catch(e) { console.warn('[generateCompleteSubsystem] failed:', e); return null; }
     },
@@ -820,28 +880,20 @@ ${formatRule}`;
     async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingModes: string[] = []): Promise<any[]> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-        if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Local: Effect; End: System effect", cause: "Cause", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: {s:6,o:4,d:3} }]; }
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Local: Effect; End: System effect", cause: "Cause", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: blankGeneratedRpn(), rpnStatus: "unscored" }]; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
             ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
         const controlsKnowledgeAvailable = (mode === 'file' || mode === 'hybrid') && (Boolean(checklistText?.trim()) || Boolean(refText?.trim()));
         const existingBlock = existingModes.length > 0
-            ? `Failure Modes already defined in this subsystem (DO NOT repeat or closely resemble any of them):\n${existingModes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n` : '';
+            ? `Failure Modes already defined in this subsystem (DO NOT repeat or closely resemble any of them; reject controls/mitigations that belong more strongly to these sibling modes):\n${existingModes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n` : '';
         // Retry with backoff — bulk generation can hit provider rate limits.
         const MODE_ATTEMPTS = 5;
-        const mitigationInstruction = `\nMitigation format — return as a numbered string per mode:\n"1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."\nOwner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)\nUse checklist knowledge for PM tasks and reference data for instrument tags and limits.`;
+        const mitigationInstruction = `\n${MODE_ACTION_FORMAT_RULES}`;
         const corePrompt = `${checklistBlock}${existingBlock}Context: System "${project}", Subsystem "${subName}", Specs "${subSpecs}". Function: "${subFunc}". Functional Failure: "${failDesc}".
         Task: Generate 2-3 specific Failure Modes that result in this Functional Failure. Fewer is acceptable if the failure only has one or two credible modes — do not invent filler modes.
-        Field rules per mode:
-        - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
-        - "cause": the dominant root cause of this mode.
-        ${controlsKnowledgeAvailable
-            ? '- "currentControls": ONLY controls currently deployed/evidenced for THIS generated failure mode in PM CHECKLIST KNOWLEDGE or REFERENCE DATA. Include relevant PM/checklist tasks plus deployed instrument/protection controls (temperature, pressure, level, flow, vibration, speed, alarms, trips, interlocks, transmitters/switches/tags and limits where stated). Do NOT include controls for other failure modes. Do NOT invent or recommend new controls here. Empty string if no evidence applies.'
-            : '- "currentControls": always return an empty string "" — current controls require checklist or reference evidence, which is not available.'}
-        - "mitigation": RECOMMENDED actions (not yet implemented) for THIS generated failure mode that close gaps NOT covered by currentControls. Use checklist/reference recommendations when present, then add reliability-knowledge tasks or controls for remaining gaps in Hybrid/AI generation. Never duplicate a task already listed in currentControls and never bring tasks for other failure modes.
-        - "rpn": integers per the rating anchors below. Score "d" against currentControls only — recommended mitigations do NOT count.
-        ${RPN_ANCHORS}
-        ${LIBRARY_EXAMPLES}
-        Return JSON object: { "modes": [ { "mode": "string", "effect": "string", "cause": "string", "currentControls": "string", "mitigation": "string", "rpn": {"s": <int 1-10>, "o": <int 1-10>, "d": <int 1-10>} } ] }${mitigationInstruction}`;
+        ${buildModeFieldRules(controlsKnowledgeAvailable)}
+        Do NOT generate or include RPN/S/O/D values. RPN is scored later by the dedicated RPN scorer.
+        Return JSON object: { "modes": [ { "mode": "string", "effect": "string", "cause": "string", "currentControls": "string", "mitigation": "string" } ] }${mitigationInstruction}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 
@@ -867,6 +919,7 @@ ${formatRule}`;
                 if (!modes.length) throw new Error('mode-generation: empty result');
                 // currentControls require checklist/reference evidence — forced empty otherwise.
                 if (!controlsKnowledgeAvailable) modes.forEach((m: any) => { m.currentControls = ''; });
+                modes.forEach((m: any) => { m.rpn = blankGeneratedRpn(); m.rpnStatus = 'unscored'; });
                 return modes;
             } catch(e) {
                 lastErr = e;
@@ -878,6 +931,159 @@ ${formatRule}`;
         }
         console.warn('[generateModesForFailure] failed after retries:', lastErr);
         return [];
+    },
+
+    async generateFFsForBreakdownRows(args: {
+        systemName: string;
+        subsystemName: string;
+        subsystemSpecs: string;
+        funcDesc: string;
+        rows: Array<{ id: string; function: string; standard: string; snippet: string }>;
+        existingFailures: string[];
+        key: string;
+        modelName: string;
+        aiProvider?: string;
+        azureEndpoint?: string;
+        powerAutomateUrl?: string;
+        systemContext?: string;
+    }): Promise<{ failures: Array<{ rowId: string; desc: string; sourceSnippet?: string }> }> {
+        const { systemName, subsystemName, subsystemSpecs, funcDesc, rows, existingFailures, key, modelName, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', systemContext = '' } = args;
+        if (!rows.length) return { failures: [] };
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') {
+            return { failures: rows.map(r => ({ rowId: r.id, desc: `Fails to ${r.function} ${r.standard}`.replace(/\s+/g, ' ').trim(), sourceSnippet: r.snippet })) };
+        }
+        const existingBlock = existingFailures.length > 0
+            ? `Existing Functional Failures already defined (DO NOT repeat or closely resemble):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n`
+            : '';
+        const prompt = `Context: System "${systemName}", Subsystem "${subsystemName}".
+Subsystem Specs: "${subsystemSpecs || 'N/A'}"
+Subsystem Function: "${funcDesc}"
+
+Function breakdown rows:
+${JSON.stringify(rows.map(r => ({ rowId: r.id, function: r.function, standard: r.standard, snippet: r.snippet })), null, 2)}
+
+${existingBlock}Task: Generate ONE Functional Failure for each breakdown row.
+Use each row's function label and performance/condition standard as the primary source. The standard defines what "failed" means; do not ignore it.
+Use the full subsystem function only to resolve ambiguity, not to add extra details.
+Write short failure states, not narratives.
+Length per failure: 8-16 words.
+Preferred form: "Fails to [verb/object] [standard breach]."
+Do NOT include causes, effects, consequences, tags, equipment IDs, mitigation, downstream narrative, or explanatory clauses.
+Do NOT generate duplicate or closely similar failures. If two rows would produce the same failure, return the clearer one and omit the duplicate row.
+
+Return ONLY strict JSON:
+{ "failures": [ { "rowId": "same rowId from input", "desc": "Functional Failure", "sourceSnippet": "source snippet from row" } ] }`;
+        const content = prompt + (systemContext ? '\n\n' + systemContext : '');
+        try {
+            const parsed = await this._withRetry(async () => {
+                const res = await this.chat({
+                    feature: 'ff-batch-generation',
+                    provider: (aiProvider || inferProvider(key)) as any,
+                    azureEndpoint: azureEndpoint || undefined,
+                    powerAutomateUrl: powerAutomateUrl || undefined,
+                    model: modelName,
+                    messages: [{ role: 'user', content }],
+                    mode: 'ai',
+                    refText: '',
+                    apiKey: key,
+                    responseFormat: 'json'
+                });
+                return this.extractJSON(res);
+            });
+            const failures = Array.isArray(parsed?.failures) ? parsed.failures : [];
+            const validRowIds = new Set(rows.map(r => r.id));
+            return {
+                failures: failures
+                    .map((f: any) => ({
+                        rowId: String(f?.rowId ?? f?.row_id ?? '').trim(),
+                        desc: String(f?.desc ?? f?.failure ?? f?.functionalFailure ?? '').trim(),
+                        sourceSnippet: String(f?.sourceSnippet ?? f?.source_snippet ?? '').trim(),
+                    }))
+                    .filter((f: any) => validRowIds.has(f.rowId) && f.desc)
+            };
+        } catch (e) {
+            console.warn('[generateFFsForBreakdownRows] failed:', e);
+            return { failures: [] };
+        }
+    },
+
+    async generateModesForFailuresBatch(args: {
+        project: string;
+        subName: string;
+        subSpecs: string;
+        subFunc: string;
+        failures: Array<{ id: string; desc: string }>;
+        key: string;
+        modelName: string;
+        mode?: string;
+        refText?: string;
+        aiProvider?: string;
+        azureEndpoint?: string;
+        systemContext?: string;
+        checklistText?: string;
+        powerAutomateUrl?: string;
+        existingModes?: string[];
+    }): Promise<{ failures: Array<{ failureId: string; modes: any[] }> }> {
+        const { project, subName, subSpecs, subFunc, failures, key, modelName, mode = 'ai', refText = '', aiProvider = '', azureEndpoint = '', systemContext = '', checklistText = '', powerAutomateUrl = '', existingModes = [] } = args;
+        if (!failures.length) return { failures: [] };
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') {
+            return { failures: failures.map(f => ({ failureId: f.id, modes: [{ mode: "Simulated", effect: "Local: Effect; End: System effect", cause: "Cause", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: blankGeneratedRpn(), rpnStatus: "unscored" }] })) };
+        }
+        const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
+            ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText.slice(0, 6000)}\n"""\n\n` : '';
+        const controlsKnowledgeAvailable = (mode === 'file' || mode === 'hybrid') && (Boolean(checklistText?.trim()) || Boolean(refText?.trim()));
+        const existingBlock = existingModes.length > 0
+            ? `Failure Modes already defined in this subsystem (DO NOT repeat or closely resemble any of them; reject controls/mitigations that belong more strongly to these sibling modes):\n${existingModes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n` : '';
+        const prompt = `${checklistBlock}${existingBlock}Context: System "${project}", Subsystem "${subName}", Specs "${subSpecs}". Function: "${subFunc}".
+
+Functional Failures to expand:
+${JSON.stringify(failures.map(f => ({ failureId: f.id, desc: f.desc })), null, 2)}
+
+Task: For each Functional Failure, generate 2-3 specific Failure Modes that result in that failure. Fewer is acceptable if the failure only has one or two credible modes — do not invent filler modes.
+Failure modes must be unique across the whole subsystem. Treat all generated modes as siblings; do not share generic controls or actions across them.
+${buildModeFieldRules(controlsKnowledgeAvailable, 'EACH generated failure mode')}
+Do NOT generate or include RPN/S/O/D values. RPN is scored later by the dedicated RPN scorer.
+${MODE_ACTION_FORMAT_RULES}
+
+Return ONLY strict JSON:
+{ "failures": [ { "failureId": "same failureId from input", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "currentControls": "string", "mitigation": "string" } ] } ] }`;
+        const content = prompt + (systemContext ? '\n\n' + systemContext : '');
+        try {
+            const parsed = await this._withRetry(async () => {
+                const res = await this.chat({
+                    feature: 'mode-batch-generation',
+                    provider: (aiProvider || inferProvider(key)) as any,
+                    azureEndpoint: azureEndpoint || undefined,
+                    powerAutomateUrl: powerAutomateUrl || undefined,
+                    model: modelName,
+                    messages: [{ role: 'user', content }],
+                    mode: mode as 'ai'|'file'|'hybrid',
+                    refText,
+                    apiKey: key,
+                    responseFormat: 'json'
+                });
+                return this.extractJSON(res);
+            });
+            const validFailureIds = new Set(failures.map(f => f.id));
+            const rows = Array.isArray(parsed?.failures) ? parsed.failures : [];
+            return {
+                failures: rows
+                    .map((row: any) => {
+                        const failureId = String(row?.failureId ?? row?.failure_id ?? '').trim();
+                        const modes = Array.isArray(row?.modes) ? row.modes : [];
+                        modes.forEach((m: any) => {
+                            if (!controlsKnowledgeAvailable) m.currentControls = '';
+                            m.rpn = blankGeneratedRpn();
+                            m.rpnStatus = 'unscored';
+                        });
+                        return { failureId, modes };
+                    })
+                    .filter((row: any) => validFailureIds.has(row.failureId))
+            };
+        } catch (e) {
+            console.warn('[generateModesForFailuresBatch] failed:', e);
+            return { failures: [] };
+        }
     },
 
 async evaluateRpnFromText(
@@ -901,7 +1107,7 @@ async evaluateRpnFromText(
     systemContext?: string;
     powerAutomateUrl?: string;
   }
-): Promise<{ s: number; o: number; d: number; reason?: string }> {
+): Promise<{ s: number; o: number; d: number; reason?: string; baseline?: { s: number; o: number; d: number }; improvement?: { baselineRpn: number; mitigatedRpn: number; detectionImprovement: number; rpnReduction: number; summary: string } }> {
   const {
     project, subName, subSpecs, subFunc, failDesc,
     mode, effect, cause, currentControls = '', mitigation,
@@ -912,7 +1118,14 @@ async evaluateRpnFromText(
   if ((!key || key.length < 10) && aiProvider !== 'copilot') {
     // Safe offline fallback (keeps app usable)
     await new Promise(r => setTimeout(r, 600));
-    return { s: 5, o: 5, d: 5, reason: "Simulated scoring (no API key)." };
+    return {
+      s: 5,
+      o: 5,
+      d: 5,
+      baseline: { s: 5, o: 5, d: 8 },
+      improvement: { baselineRpn: 200, mitigatedRpn: 125, detectionImprovement: 3, rpnReduction: 75, summary: "Simulated mitigation improves detection and reduces RPN." },
+      reason: "Simulated scoring (no API key)."
+    };
   }
 
   const corePrompt = `
@@ -920,6 +1133,8 @@ Act strictly as a Senior Reliability Engineer performing formal FMECA.
 You must behave conservatively, consistently, and logically.
 Your task is to assign Severity (S), Occurrence (O), and Detection (D) ratings on a 1–10 scale
 based ONLY on the provided information and standard industrial reliability practice.
+The main returned S/O/D score is the post-mitigation score after the mitigation actions are added to the system.
+You must also estimate a baseline score before mitigation, using current controls only.
 
 Context:
 - System: "${project}"
@@ -933,7 +1148,7 @@ Failure Details:
 - Effect: "${effect}"
 - Root Cause: "${cause}"
 - CURRENT Controls (already in place): "${currentControls || 'None stated'}"
-- RECOMMENDED Actions (proposed, NOT yet implemented): "${mitigation}"
+- MITIGATION Actions to be added to the system: "${mitigation || 'None stated'}"
 
 ${RPN_ANCHORS}
 
@@ -954,11 +1169,13 @@ Occurrence (O):
 - If no frequency indicators exist, choose a MID-RANGE value (4–6), not extremes.
 
 Detection (D):
-- Score D against the CURRENT Controls ONLY. RECOMMENDED Actions are not yet implemented and MUST NOT improve D.
-- Better current detection → LOWER D value.
-- Poor, reactive, or absent current controls → HIGHER D value (8-10).
-- If current controls include condition monitoring, alarms, trips, inspections, or diagnostics, D decreases accordingly.
-- Never assign low Detection unless detection capability is explicitly stated in CURRENT Controls.
+- Main returned "d": score Detection using BOTH CURRENT Controls and MITIGATION Actions, assuming mitigation is added to the system.
+- Also provide "baseline.d" using CURRENT Controls only, before mitigation.
+- Better current controls or mitigation detection barriers → LOWER D value.
+- Poor, reactive, or absent controls/mitigations → HIGHER D value (8-10).
+- If current controls or mitigation include condition monitoring, alarms, trips, inspections, diagnostics, proof testing, or specific detection tasks, D decreases accordingly.
+- Never assign low Detection unless detection capability is explicitly stated in CURRENT Controls or MITIGATION Actions.
+- Do not credit vague mitigation text; only concrete barriers should improve Detection.
 
 Consistency Rules:
 - Mild effects must NEVER result in high Severity.
@@ -968,13 +1185,27 @@ Consistency Rules:
 Output Requirements:
 - Return strictly valid JSON only.
 - Values must be integers from 1 to 10.
-- Include a short, professional justification referencing effect severity, failure likelihood, and detection strength.
+- Main "s", "o", "d" are post-mitigation scores using current controls plus mitigation.
+- Include "baseline" S/O/D using current controls only.
+- Calculate baselineRpn = baseline.s * baseline.o * baseline.d.
+- Calculate mitigatedRpn = s * o * d.
+- Calculate detectionImprovement = baseline.d - d.
+- Calculate rpnReduction = baselineRpn - mitigatedRpn.
+- Include a short, professional justification referencing effect severity, failure likelihood, baseline detection strength, mitigation detection strength, and RPN improvement.
 
 Output format:
 {
   "s": <1–10>,
   "o": <1–10>,
   "d": <1–10>,
+  "baseline": { "s": <1–10>, "o": <1–10>, "d": <1–10> },
+  "improvement": {
+    "baselineRpn": <number>,
+    "mitigatedRpn": <number>,
+    "detectionImprovement": <number>,
+    "rpnReduction": <number>,
+    "summary": "One sentence describing how mitigation improves D and RPN."
+  },
   "reason": "Brief justification (1–3 sentences)."
 }
 `.trim();
@@ -1000,10 +1231,26 @@ Output format:
   // Normalize and clamp
   const clamp = (n: any) => Math.min(10, Math.max(1, Math.round(Number(n) || 5)));
 
+  const s = clamp(parsed.s);
+  const o = clamp(parsed.o);
+  const d = clamp(parsed.d);
+  const baseline = {
+    s: clamp(parsed?.baseline?.s ?? parsed?.baseline_s ?? s),
+    o: clamp(parsed?.baseline?.o ?? parsed?.baseline_o ?? o),
+    d: clamp(parsed?.baseline?.d ?? parsed?.baseline_d ?? d)
+  };
+  const baselineRpn = Number(parsed?.improvement?.baselineRpn ?? parsed?.improvement?.baseline_rpn ?? baseline.s * baseline.o * baseline.d);
+  const mitigatedRpn = Number(parsed?.improvement?.mitigatedRpn ?? parsed?.improvement?.mitigated_rpn ?? s * o * d);
+  const detectionImprovement = Number(parsed?.improvement?.detectionImprovement ?? parsed?.improvement?.detection_improvement ?? baseline.d - d);
+  const rpnReduction = Number(parsed?.improvement?.rpnReduction ?? parsed?.improvement?.rpn_reduction ?? baselineRpn - mitigatedRpn);
+  const summary = typeof parsed?.improvement?.summary === 'string' ? parsed.improvement.summary : '';
+
   return {
-    s: clamp(parsed.s),
-    o: clamp(parsed.o),
-    d: clamp(parsed.d),
+    s,
+    o,
+    d,
+    baseline,
+    improvement: { baselineRpn, mitigatedRpn, detectionImprovement, rpnReduction, summary },
     reason: typeof parsed.reason === 'string' ? parsed.reason : ''
   };
 },
@@ -1324,15 +1571,19 @@ Output format:
         const existingBlock = existingFailures.length > 0
             ? `Existing Functional Failures already defined (DO NOT repeat or closely resemble):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n`
             : '';
-        const standardNote = breakdownStandard ? ` (standard: "${breakdownStandard}")` : '';
         const prompt = `Context: System "${systemName}", Subsystem "${subsystemName}".
 Subsystem Specs: "${subsystemSpecs || 'N/A'}"
 Subsystem Function: "${funcDesc}"
-Specific functional aspect to address: "${breakdownSnippet}"${standardNote}
+Function label (black text): "${breakdownSnippet}"
+Performance/condition standard (grey text): "${breakdownStandard || 'N/A'}"
 
 ${existingBlock}Task: Generate ONE Functional Failure that specifically addresses the loss or degradation of this functional aspect.
-Use the System, Subsystem, Specs, and complete Function as controlling context; do not make the failure generic if the context supports a more specific failure statement.
-Express it naturally as a reliability engineer would — a negation or reduction of that specific aspect.
+Use the function label and performance/condition standard as the primary source. The standard defines what "failed" means; do not ignore it.
+Use the full subsystem function only to resolve ambiguity, not to add extra details.
+Write a short failure state, not a narrative.
+Length: 8-16 words.
+Preferred form: "Fails to [verb/object] [standard breach]."
+Do NOT include causes, effects, consequences, tags, equipment IDs, mitigation, downstream narrative, or explanatory clauses.
 Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
 
         const content = prompt + (systemContext ? '\n\n' + systemContext : '');
@@ -1373,37 +1624,47 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
             ? `Subsystem: "${subsystemName}"${projectName ? ` within System: "${projectName}"` : ''}\n\n`
             : '';
 
-        // Detailed splits every compound condition into its own row (→ one FF each);
-        // Normal groups them so the breakdown stays at the level of distinct primary
-        // functions. This is the lever that controls how many functional failures the
-        // downstream step derives — not a "produce fewer" instruction bolted on.
-	        const groupingRules = detailLevel === 'normal'
-	            ? `5. GROUP COMPOUND CONDITIONS: keep each distinct primary function as ONE row with its single most important standard. Do NOT split a combined operating/safety clause into separate rows — e.g. "without vibration, leakage, or excessive temperature" becomes ONE row:
-	   • { function: "operates within limits", standard: "within normal vibration, leakage and temperature limits", snippet: "without abnormal vibration, leakage, or excessive temperature" }
-	6. SKIP TRIVIAL EXPECTATIONS: do not create rows for generic adjectives or goals such as "reliable", "efficient", "safe", "available", "continuous", "properly", or "as required" unless tied to a measurable value, containment/protection duty, operating envelope, or clearly distinct reliability consequence.
-	7. NO DUPLICATES: every [function, standard] pair must be unique. If you would repeat a pair, merge or skip.
-	8. Prefer the FEWEST rows that still cover the distinct primary functions — merge closely related conditions rather than enumerating each one.`
-	            : `5. SPLIT COMPOUND CONDITIONS: if the source text says "without vibration, leakage, or excessive temperature" — create THREE separate rows, one per condition:
-	   • { function: "operates without fault", standard: "no abnormal vibration", snippet: "without abnormal vibration" }
-	   • { function: "operates without fault", standard: "no leakage", snippet: "leakage" }
-	   • { function: "operates without fault", standard: "no excessive temperature", snippet: "excessive temperature" }
-	6. SKIP TRIVIAL EXPECTATIONS: do not create rows for generic adjectives or goals such as "reliable", "efficient", "safe", "available", "continuous", "properly", or "as required" unless tied to a measurable value, containment/protection duty, operating envelope, or clearly distinct reliability consequence.
-	7. NO DUPLICATES: every [function, standard] pair must be unique. If you would repeat a pair, merge or skip.
-	8. Each row must represent exactly ONE non-trivial condition — never combine "no vibration AND no leakage" into a single standard.`;
+        const detailRule = detailLevel === 'normal'
+            ? 'Return 3-6 rows. Include each present seed type separately; prefer fewer rows only within the same seed type.'
+            : 'Return up to 7 rows. Split only genuinely distinct failure consequences or seed types, not values, tags, safeguards, or sentence parts.';
 
-        const prompt = `You are a reliability engineer decomposing a subsystem Function description into a structured set of [function, standard, snippet] rows. Be deterministic — given the same input, always produce the same rows.
+        const prompt = `Role: You are a senior FMECA facilitator. Your task is not text splitting. Your task is to identify Functional Failure seeds from a subsystem Function description. Be deterministic: given the same input, always produce the same rows.
 
 ${contextLine}Function description:
 """
 ${funcDesc}
 """
 
-DECOMPOSITION RULES:
-1. function = verb + object (e.g. "delivers cooling water", "rotates shaft", "contains fluid")
-2. standard = one specific operating value or qualitative condition (e.g. "400 GPM at 100 PSI", "no abnormal vibration", "no leakage", "no excessive temperature")
-	3. snippet = the verbatim slice from the original description this row came from (15–80 chars)
-	4. Keep only rows whose failure would justify a distinct Functional Failure in an FMECA. Skip soft wording that would only produce vague FFs.
-	${groupingRules}
+Use this method silently:
+1. Read the whole description as one subsystem duty.
+2. Identify subsystem mission: value, service, containment, conversion, movement, protection, storage, or support it must provide.
+3. Identify controlled performance: variables, states, sequences, capacities, demand response, standby behavior, or operating targets that must be maintained.
+4. Identify operating envelope: measurable ranges, boundaries, or limits within which operation must remain acceptable.
+5. Identify equipment-health expectations: integrity or condition requirements needed for acceptable operation.
+6. Treat design facts, protection devices, monitoring references, control architecture, locations, identifiers, and personnel instructions as supporting context only unless they are the subsystem mission.
+7. Merge clauses within the same seed type when they would fail in the same way or produce the same Functional Failure.
+8. Keep a row only if its loss or degradation would produce a distinct Functional Failure statement.
+9. Before final answer, audit silently:
+   - Did I over-split one duty into many rows?
+   - Did I over-skip measurable limits, control behavior, operating envelope, or equipment-health expectations?
+   - Did I create standalone rows for context-only facts?
+   - Would every row become a useful Functional Failure?
+
+Output rows only for these seed types, but do not include the type name in the JSON:
+- mission
+- performance_control
+- operating_envelope
+- equipment_health
+
+Do not combine different seed types into one row. If mission, performance_control, operating_envelope, and equipment_health are all present, output separate rows for each present type.
+
+Decompose by failure consequence, not by grammar, sentence boundaries, individual values, tags, safeguards, or equipment parts.
+${detailRule}
+
+JSON field rules:
+- function = concise verb + object.
+- standard = FMECA-worthy performance standard, control requirement, operating envelope, or condition requirement.
+- snippet = verbatim source slice from the original description, 15-80 characters.
 
 Return ONLY this JSON, no prose, no markdown:
 { "rows": [ { "function": "...", "standard": "...", "snippet": "..." } ] }`;
@@ -1427,21 +1688,164 @@ Return ONLY this JSON, no prose, no markdown:
                 if (!p || !Array.isArray(p.rows)) throw new Error('decompose: bad shape');
                 return p;
             });
-	            const seen = new Set<string>();
-	            const weakOnly = /^(reliable|efficient|safe|available|continuous|proper|properly|as required|normal|normal operation|good condition|acceptable|adequate)$/i;
-	            return parsed.rows
-	                .map((r: any) => ({
-	                    function: String(r?.function ?? '').trim(),
-	                    standard: String(r?.standard ?? '').trim(),
-	                    snippet: String(r?.snippet ?? '').trim(),
-	                }))
-	                .filter((r: any) => {
-	                    if (!r.function || !r.standard) return false;
-	                    const key = `${r.function.toLowerCase()}|${r.standard.toLowerCase()}`.replace(/\s+/g, ' ');
-	                    if (seen.has(key)) return false;
-	                    seen.add(key);
-	                    return !weakOnly.test(r.standard.trim());
-	                });
+            type BreakdownRow = { function: string; standard: string; snippet: string };
+            const rawRows: BreakdownRow[] = parsed.rows
+                .map((r: any) => ({
+                    function: String(r?.function ?? '').trim(),
+                    standard: String(r?.standard ?? '').trim(),
+                    snippet: String(r?.snippet ?? '').trim(),
+                }))
+                .filter((r: any) => r.function && r.standard);
+
+            const isControlSubsystem = /transmitter|sensor|instrument|control|panel|plc|ucp|pcs|sgs|logic|controller/i.test(`${subsystemName} ${projectName}`);
+            const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+            const textOf = (r: BreakdownRow) => compact(`${r.function} ${r.standard} ${r.snippet}`);
+            const includesAny = (text: string, terms: RegExp[]) => terms.some(re => re.test(text));
+            const rows: BreakdownRow[] = [];
+            const usedKeys = new Set<string>();
+            const maxRows = detailLevel === 'normal' ? 6 : 8;
+            const rowKey = (row: BreakdownRow) => `${compact(row.function)}|${compact(row.standard)}`
+                .replace(/\b(leaks?|leakage)\b/g, 'leak')
+                .replace(/\b(properly|correctly|adequately|reliably)\b/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            const addRow = (row: BreakdownRow) => {
+                const cleaned = {
+                    function: row.function.trim(),
+                    standard: row.standard.trim(),
+                    snippet: (row.snippet || row.function).trim(),
+                };
+                const key = rowKey(cleaned);
+                if (!cleaned.function || !cleaned.standard || usedKeys.has(key)) return;
+                usedKeys.add(key);
+                rows.push(cleaned);
+            };
+
+            const weakOnly = /^(reliable|efficient|safe|available|continuous|proper|properly|as required|normal|normal operation|good condition|acceptable|adequate|within limits|per design)$/i;
+            const controlTerms = [/\b(control|regulate|maintain|stabilize|modulate|sequence|start|stop|load|unload|setpoint|set point|feedback|demand response)\b/];
+            const envelopeTerms = [/\b(operating envelope|envelope|range|limit|rated|design|maximum|minimum|temperature|pressure|flow|speed|capacity|level)\b/];
+            const conditionTerms = [/\b(abnormal|condition|integrity|vibration|leak|overheat|overheating|temperature rise|thermal|noise|sound|wear|corrosion)\b/];
+            const serviceFunctionTerms = [/\b(deliver|supply|provide|pump|transfer|convert|heat|cool|filter|separate|store|contain|generate)\b/];
+            const ppeTerms = [/\b(hearing protection|ppe|personnel|operator exposure|protective equipment)\b/];
+            const safeguardTerms = [/\b(safety valve|relief valve|rupture disc|interlock|trip|alarm|shutdown|protection device|overpressure protection|set pressure)\b/];
+            const monitoringTerms = [/\b(transmitter|sensor|indicator|feedback|monitored|monitoring|control panel|plc|dcs|scada|ucp|pcs|sgs)\b/];
+            const designOnlyTerms = [/\b(material|construction|casing|housing|frame|skid|designed for)\b/];
+
+            const isNoiseExposureOnly = (text: string) =>
+                /\b(noise|sound)\b/.test(text) && /\b(db|decibel|hearing|personnel|operator|meter|metre)\b/.test(text);
+            const isFunctionalVerb = (fn: string) =>
+                /\b(operate|run|maintain|deliver|supply|provide|contain|control|regulate|protect|store|transfer|generate)\b/.test(compact(fn));
+            const conditionLabels = (text: string) => {
+                const source = compact(text);
+                const labels = [
+                    [/\bvibration\b/, 'abnormal vibration'],
+                    [/\bleak/, 'leakage'],
+                    [/\b(overheat|overheating|temperature rise|excessive temperature|thermal)\b/, 'abnormal temperature'],
+                    [/\b(unusual noise|abnormal noise)\b/, 'abnormal noise'],
+                    [/\bwear\b/, 'abnormal wear'],
+                    [/\bcorrosion\b/, 'corrosion'],
+                ].filter(([re]) => (re as RegExp).test(source)).map(([, label]) => label as string);
+                return Array.from(new Set(labels));
+            };
+            const joinList = (items: string[]) => {
+                if (items.length <= 2) return items.join(' or ');
+                return `${items.slice(0, -1).join(', ')}, or ${items[items.length - 1]}`;
+            };
+            const shouldSkip = (row: BreakdownRow) => {
+                const text = textOf(row);
+                if (weakOnly.test(row.standard.trim())) return true;
+                if (includesAny(text, ppeTerms)) return true;
+                if (!/noise|sound|acoustic/i.test(`${subsystemName} ${projectName}`) && isNoiseExposureOnly(text)) return true;
+                if (!isControlSubsystem && includesAny(text, safeguardTerms)) return true;
+                if (!isControlSubsystem && includesAny(text, monitoringTerms)) return true;
+                if (includesAny(text, designOnlyTerms) && !isFunctionalVerb(row.function)) return true;
+                return false;
+            };
+
+            const candidateRows: BreakdownRow[] = [];
+            rawRows.forEach(row => {
+                if (shouldSkip(row)) return;
+                const text = textOf(row);
+                const hasEnvelope = includesAny(text, envelopeTerms);
+                const labels = conditionLabels(`${row.function} ${row.standard} ${row.snippet}`);
+                if (hasEnvelope && labels.length) {
+                    candidateRows.push({
+                        function: row.function,
+                        standard: 'within the specified operating envelope',
+                        snippet: row.snippet || row.function,
+                    });
+                    candidateRows.push({
+                        function: 'operates within equipment condition limits',
+                        standard: `without ${joinList(labels)}`,
+                        snippet: row.snippet || row.standard || row.function,
+                    });
+                    return;
+                }
+                candidateRows.push(row);
+            });
+
+            const hasConditionCandidate = candidateRows.some(row => includesAny(textOf(row), conditionTerms));
+            const sourceConditionLabels = conditionLabels(funcDesc);
+            if (!hasConditionCandidate && sourceConditionLabels.length) {
+                candidateRows.push({
+                    function: 'operates within equipment condition limits',
+                    standard: `without ${joinList(sourceConditionLabels)}`,
+                    snippet: funcDesc.match(/(?:without|no|abnormal|excessive|unusual)[^.]{15,160}/i)?.[0]?.slice(0, 160) || 'equipment condition limits',
+                });
+            }
+
+            const bucketOf = (row: BreakdownRow) => {
+                if (shouldSkip(row)) return '';
+                const text = textOf(row);
+                const fn = compact(row.function);
+                if (includesAny(text, conditionTerms)) return 'condition';
+                if (includesAny(text, controlTerms)) return 'control';
+                if (includesAny(text, envelopeTerms) && !includesAny(fn, serviceFunctionTerms)) return 'envelope';
+                return `row:${rowKey(row)}`;
+            };
+            const mergeBucket = (bucket: string, group: BreakdownRow[]): BreakdownRow => {
+                const first = group[0];
+                if (group.length === 1) return first;
+                const joined = group.map(textOf).join(' ');
+                if (bucket === 'condition') {
+                    const conditions = conditionLabels(joined);
+                    return {
+                        function: isFunctionalVerb(first.function) ? first.function : 'operates within equipment condition limits',
+                        standard: conditions.length ? `without ${joinList(conditions)}` : first.standard,
+                        snippet: first.snippet || first.function,
+                    };
+                }
+                if (bucket === 'control') {
+                    return {
+                        function: first.function,
+                        standard: 'to the specified control target, band, sequence, or demand response',
+                        snippet: first.snippet || first.function,
+                    };
+                }
+                if (bucket === 'envelope') {
+                    return {
+                        function: first.function,
+                        standard: 'within the specified operating envelope',
+                        snippet: first.snippet || first.function,
+                    };
+                }
+                return first;
+            };
+
+            const bucketOrder: string[] = [];
+            const buckets = new Map<string, BreakdownRow[]>();
+            candidateRows.forEach(row => {
+                const bucket = bucketOf(row);
+                if (!bucket) return;
+                if (!buckets.has(bucket)) {
+                    buckets.set(bucket, []);
+                    bucketOrder.push(bucket);
+                }
+                buckets.get(bucket)!.push(row);
+            });
+
+            bucketOrder.forEach(bucket => addRow(mergeBucket(bucket, buckets.get(bucket)!)));
+            return rows.slice(0, maxRows);
         } catch {
             return [];
         }
