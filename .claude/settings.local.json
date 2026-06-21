@@ -3,7 +3,22 @@
     "allow": [
       "Bash(git init:*)",
       "Bash(git remote:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(ls -la /Users/mohammedalaamri/Downloads/Projects/fmeca-studio/.env*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(npm run:*)",
+      "Bash(ls /Users/mohammedalaamri/Downloads/Projects/fmeca-studio/dist/icon*.png)",
+      "Bash(git rm:*)",
+      "Bash(curl -s -i \"https://fmeca.moalaamri23.workers.dev\")",
+      "Bash(curl -s \"https://fmeca.moalaamri23.workers.dev\")",
+      "Bash(curl -s -o /dev/null -w \"Status: %{http_code} | Size: %{size_download} bytes | Content-Type: %{content_type}\\\\n\" \"https://fmeca.moalaamri23.workers.dev/assets/index-D7lHXwMC.js\")",
+      "Bash(curl -s -o /dev/null -w \"Status: %{http_code} | Size: %{size_download} bytes | Content-Type: %{content_type}\\\\n\" \"https://fmeca.moalaamri23.workers.dev/index.css\")",
+      "Bash(curl -s -o /dev/null -w \"Status: %{http_code} | Size: %{size_download} bytes | Content-Type: %{content_type}\\\\n\" \"https://fmeca.moalaamri23.workers.dev/index.tsx\")",
+      "Bash(curl -s -o /dev/null -w \"Status: %{http_code} | Size: %{size_download} bytes | Content-Type: %{content_type}\\\\n\" \"https://fmeca.moalaamri23.workers.dev/icon-192.png\")",
+      "Bash(curl -s -o /dev/null -w \"Status: %{http_code} | Size: %{size_download} bytes | Content-Type: %{content_type}\\\\n\" \"https://fmeca.moalaamri23.workers.dev/icon-512.png\")",
+      "Bash(curl:*)",
+      "Bash(python3 -c \":*)"
     ]
   }
 }

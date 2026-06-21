@@ -106,6 +106,7 @@ export interface ContextData {
   project?: string;
   subsystem?: string;
   specs?: string;
+  subsystemFunction?: string;
   functionalFailure?: string;
   failureMode?: string;
   failureEffect?: string;

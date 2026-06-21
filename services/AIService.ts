@@ -66,6 +66,55 @@ const LIBRARY_EXAMPLES = (() => {
     return `VOCABULARY EXAMPLES (granularity/terminology reference only — adapt to the actual equipment, do not copy):\n${lines.join('\n')}`;
 })();
 
+const FMECA_HIERARCHY_RULES = `FMECA hierarchy and field separation:
+- System -> Subsystem -> Subsystem Function Description -> Functional Failure -> Failure Mode -> Cause / Effect / Current Controls / Mitigation.
+- Subsystem Function Description = intended role of the subsystem only.
+- Decomposed Function = smaller intended action derived from the subsystem function, when this workflow uses decomposition.
+- Functional Failure = inability to meet the required function or performance standard.
+- Failure Mode = specific failed state, degraded condition, or physical mechanism that results in the functional failure.
+- Cause = why the failure mode occurs.
+- Effect = consequence after the failure mode occurs.
+- Current Controls / Mitigation = detection, control, prevention, safeguard, or consequence-reduction content using the existing required format.
+- Keep all generated content inside the subsystem boundary. Avoid parent-system, upstream, downstream, or component details unless the input clearly includes them.
+- Do not move causes, effects, controls, mitigations, inspections, recommendations, or maintenance tasks into the function, functional failure, failure mode, cause, or effect fields.
+- Do not invent design values, operating limits, component names, causes, controls, or operating conditions. Use exact specifications only when provided in the Specs, system description, reference data, or checklist knowledge. Otherwise use "required", "specified", or "operating range".`;
+
+const FMECA_CONCISE_WORDING_RULES = `Professional FMECA wording:
+- Return concise, direct engineering statements. Prefer 6-14 words for functional failures, 2-7 words for failure modes, and 2-8 words for causes.
+- Avoid explanatory clauses, narratives, stacked adjectives, and long comma chains.
+- Do not write generic words such as "failed", "problem", "malfunction", "issue", or "not working" unless a specific failed condition is also stated.
+- Never include internal reasoning, uncertainty, self-correction, reviewer notes, or conversational text such as "wait", "let me", "I think", "reconsider", "analysis", or "reasoning".
+- Do not add labels, prefixes, numbering, bullets, markdown, or commentary unless the output contract requires them.`;
+
+const FUNCTION_DESCRIPTION_TECHNICAL_RULES = `Function description rules:
+- Describe intended operation only: what the subsystem provides, controls, transfers, supports, protects, measures, contains, or conditions for the parent system.
+- Start with the subsystem name where natural.
+- Use exact values from Specs only when Specs provides them. If Specs is empty or generic, do not invent numbers; use "required", "specified", or "operating range".
+- Do not include functional failures, failure modes, causes, effects, alarms, trips, inspections, PM tasks, controls, mitigations, recommendations, or maintenance wording.
+- Output one concise sentence only.`;
+
+const FUNCTION_BREAKDOWN_TECHNICAL_RULES = `Function breakdown rules:
+- Break the subsystem function into reasonable smaller intended actions only when decomposition is part of this workflow.
+- Each row must use one functional verb plus one object plus a required performance boundary or purpose.
+- Rewrite source text into compact engineering function labels; do not copy long clauses from the function description.
+- Do not start function labels with "to", gerunds such as "maintaining/filtering/limiting", or vague nouns.
+- Include only functions inside the subsystem boundary and supported by the function description/specs.
+- Do not create rows from causes, effects, alarms, trips, safeguards, controls, mitigations, inspections, repairs, tests, tags, values, personnel instructions, or maintenance tasks.
+- Stop at useful FMECA functions. Do not split into bolts, gaskets, fasteners, individual values, or sentence fragments unless the subsystem scope requires it.`;
+
+const FUNCTIONAL_FAILURE_TECHNICAL_RULES = `Functional failure rules:
+- Describe required performance not achieved, not a physical mechanism.
+- Link directly to the subsystem function or decomposed function.
+- Use concise patterns such as "Fails to ...", "Unable to ...", "Does not ...", "Provides insufficient ...", "Provides excessive ...", "Operates intermittently ...", or "Operates when not required".
+- Do not include causes, effects, failure modes, controls, mitigations, maintenance tasks, tags, equipment IDs, downstream narrative, or invented values.`;
+
+const FAILURE_MODE_TECHNICAL_RULES = `Failure mode / cause / effect rules:
+- "mode": concise failed-state wording only, such as no flow, low pressure, high temperature, intermittent signal, external leakage, internal leakage, blocked path, restricted path, stuck open, stuck closed, seized, worn, cracked, ruptured, corroded, eroded, contaminated, misaligned, signal lost, signal drifted, false high reading, or false low reading.
+- "mode" must be more specific than the functional failure and must not include cause wording: due to, because of, caused by, resulting from, as a result of.
+- "mode" must not include effect/control wording: equipment shutdown, production loss, trip, alarm, inspection, PM, maintenance, mitigation, recommendation, or monitoring action.
+- "cause": why the mode occurs; do not repeat the mode unless no deeper cause is available; do not write an effect or mitigation.
+- "effect": consequence after the mode occurs; preserve the required Local/End format; do not write a cause, control, or mitigation.`;
+
 const FAILURE_MODE_BARRIER_FILTER = `Failure-mode-specific barrier filter:
 - Use Functional Failure, Failure Mode, Cause, and Effect as hard anchors.
 - Keep only barriers that directly prevent the stated cause, detect the stated cause, detect the failure signature specific to this failure mode, or reduce/limit the stated effect.
@@ -102,6 +151,11 @@ const buildSiblingFailureModeBlock = (siblings: any): string => {
 };
 
 const buildModeFieldRules = (controlsKnowledgeAvailable: boolean, generatedLabel = 'THIS generated failure mode'): string => `Field rules per mode:
+- Apply these shared rules to every generated row:
+${FMECA_HIERARCHY_RULES}
+${FMECA_CONCISE_WORDING_RULES}
+${FAILURE_MODE_TECHNICAL_RULES}
+- "mode": specific failed state or mechanism for ${generatedLabel}; keep it short and do not include cause, effect, control, mitigation, alarm, trip, or maintenance wording.
 - "effect": format "Local: <effect at this subsystem>; End: <effect at system level>".
 - "cause": the dominant root cause of this mode.
 ${controlsKnowledgeAvailable
@@ -161,6 +215,18 @@ export interface AIRequestPayload {
     responseFormat?: 'json' | 'text';
     apiKey: string;
 }
+
+type SystemModeRow = { mode: string; count: number };
+
+type SystemModeOccurrenceEvidence = {
+    mode: string;
+    count: number;
+    rank: number;
+    totalModes: number;
+    maxCount: number;
+    occurrenceScore: number;
+    matchType: 'exact' | 'contains' | 'token-overlap';
+};
 
 // Vision-specific payload extension (handled via contextData or standardized logic in contract)
 // The contract requires a unified interface. We will map vision specific fields into the payload structure.
@@ -535,6 +601,189 @@ export const AIService = {
         }
     },
 
+    cleanSingleFieldText(text: string): string {
+        return String(text || '')
+            .replace(/```[a-zA-Z]*\s*/g, '')
+            .replace(/```/g, '')
+            .replace(/\*\*(.*?)\*\*/g, '$1')
+            .replace(/__(.*?)__/g, '$1')
+            .replace(/^\s*(?:Function(?: Description)?|Functional Failure|Failure Mode|Failure Effect|Failure Cause|Cause|Effect)\s*:\s*/i, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    },
+
+    normalizeFunctionPhraseForFailure(text: string): string {
+        let s = this.cleanSingleFieldText(text)
+            .replace(/^(?:to|and)\s+/i, '')
+            .replace(/\bwithin\b.*$/i, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const replacements: Record<string, string> = {
+            supplies: 'supply',
+            supply: 'supply',
+            supplying: 'supply',
+            delivers: 'deliver',
+            delivering: 'deliver',
+            transfers: 'transfer',
+            transferring: 'transfer',
+            circulates: 'circulate',
+            circulating: 'circulate',
+            conditions: 'condition',
+            conditioning: 'condition',
+            maintains: 'maintain',
+            maintaining: 'maintain',
+            filters: 'filter',
+            filtering: 'filter',
+            limits: 'limit',
+            limiting: 'limit',
+            lubricates: 'lubricate',
+            lubricating: 'lubricate',
+            cools: 'cool',
+            cooling: 'cool',
+            seals: 'seal',
+            sealing: 'seal',
+            protects: 'protect',
+            protecting: 'protect',
+            controls: 'control',
+            controlling: 'control',
+            measures: 'measure',
+            measuring: 'measure'
+        };
+        s = s.replace(/\b(supplies|supplying|delivers|delivering|transfers|transferring|circulates|circulating|conditions|conditioning|maintains|maintaining|filters|filtering|limits|limiting|lubricates|lubricating|cools|cooling|seals|sealing|protects|protecting|controls|controlling|measures|measuring)\b/gi, m => replacements[m.toLowerCase()] || m);
+        return s.replace(/\s+/g, ' ').trim();
+    },
+
+    fallbackFunctionalFailure(row?: { function?: string; standard?: string }): string {
+        const fn = this.normalizeFunctionPhraseForFailure(row?.function || 'perform required function');
+        const standard = this.cleanSingleFieldText(row?.standard || '');
+        const combined = standard && !fn.toLowerCase().includes(standard.toLowerCase())
+            ? `${fn} ${standard}`
+            : fn;
+        return `Fails to ${combined}`.replace(/\s+/g, ' ').trim();
+    },
+
+    cleanFunctionalFailureText(text: string, row?: { function?: string; standard?: string }): string {
+        let s = this.cleanSingleFieldText(text);
+        const leakPattern = /\b(?:wait|let me|i need|i should|i think|i will|reconsider|analysis|reasoning|scratchpad|thought process|internal note|actually)\b/i;
+        if (leakPattern.test(s)) {
+            const candidates = Array.from(s.matchAll(/\b(?:Fails to|Unable to|Does not|Provides insufficient|Provides excessive|Operates intermittently|Operates when not required|Performs [^.;!?]+)\b[^.;!?]*/gi))
+                .map(m => this.cleanSingleFieldText(m[0]))
+                .filter(Boolean);
+            s = candidates.length ? candidates[candidates.length - 1] : '';
+        }
+        s = s
+            .replace(/^(?:here(?:'s| is)|the functional failure is|functional failure)\s*[:\-]?\s*/i, '')
+            .replace(/\b(?:wait|let me|i need|i should|i think|i will|reconsider|analysis|reasoning|scratchpad|thought process|internal note|actually)\b.*$/i, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        const words = s.split(/\s+/).filter(Boolean);
+        const startsLikeFailure = /^(Fails to|Unable to|Does not|Provides insufficient|Provides excessive|Operates intermittently|Operates when not required|Performs\b)/i.test(s);
+        const invalid = !s || !startsLikeFailure || words.length > 22 || leakPattern.test(s);
+        return invalid ? this.fallbackFunctionalFailure(row) : s;
+    },
+
+    cleanBreakdownRow(row: { function: string; standard: string; snippet: string }): { function: string; standard: string; snippet: string } {
+        const fn = this.normalizeFunctionPhraseForFailure(row.function);
+        const standard = this.cleanSingleFieldText(row.standard)
+            .replace(/^(?:to|and)\s+/i, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        return {
+            function: fn,
+            standard,
+            snippet: this.cleanSingleFieldText(row.snippet || row.function),
+        };
+    },
+
+    normalizeFailureModeKey(text: string): string {
+        return String(text || '')
+            .toLowerCase()
+            .replace(/["'`]/g, '')
+            .replace(/\b(?:failure|mode|fault|issue|problem|the|a|an|of|to|from|with|and|or|system|subsystem)\b/g, ' ')
+            .replace(/[^a-z0-9]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    },
+
+    occurrenceScoreFromSystemModeCount(count: number, maxCount: number, rank: number, totalModes: number): number {
+        let score = count >= 100 ? 10
+            : count >= 50 ? 9
+            : count >= 21 ? 8
+            : count >= 11 ? 7
+            : count >= 6 ? 6
+            : count >= 4 ? 5
+            : count >= 2 ? 4
+            : count >= 1 ? 3
+            : 2;
+        const topQuintileRank = Math.max(1, Math.ceil(totalModes * 0.2));
+        if (rank === 1 && count >= 5) score = Math.max(score, 7);
+        if (rank <= topQuintileRank && count >= 3) score = Math.max(score, 6);
+        if (maxCount > 0 && count / maxCount >= 0.75 && count >= 5) score = Math.max(score, 7);
+        return Math.min(10, Math.max(1, score));
+    },
+
+    findSystemModeOccurrenceEvidence(failureMode: string, cause: string, systemModes?: SystemModeRow[]): SystemModeOccurrenceEvidence | null {
+        if (!Array.isArray(systemModes) || systemModes.length === 0) return null;
+        const sorted = systemModes
+            .map(row => ({ mode: String(row?.mode || '').trim(), count: Number(row?.count) || 0 }))
+            .filter(row => row.mode)
+            .sort((a, b) => b.count - a.count);
+        if (!sorted.length) return null;
+
+        const target = this.normalizeFailureModeKey(failureMode);
+        const causeKey = this.normalizeFailureModeKey(cause);
+        const targetTokens = new Set(target.split(' ').filter(t => t.length > 2));
+        const maxCount = sorted[0]?.count || 0;
+        let best: { row: SystemModeRow; rank: number; score: number; matchType: SystemModeOccurrenceEvidence['matchType'] } | null = null;
+
+        sorted.forEach((row, idx) => {
+            const key = this.normalizeFailureModeKey(row.mode);
+            if (!key || !target) return;
+            let score = 0;
+            let matchType: SystemModeOccurrenceEvidence['matchType'] = 'token-overlap';
+            if (key === target) {
+                score = 100;
+                matchType = 'exact';
+            } else if (key.includes(target) || target.includes(key)) {
+                score = 80;
+                matchType = 'contains';
+            } else {
+                const modeTokens = key.split(' ').filter(t => t.length > 2);
+                const overlap = modeTokens.filter(t => targetTokens.has(t)).length;
+                const causeOverlap = causeKey ? modeTokens.filter(t => causeKey.includes(t)).length : 0;
+                const denom = Math.max(1, Math.min(modeTokens.length, targetTokens.size));
+                score = Math.round((overlap / denom) * 60) + Math.min(causeOverlap * 5, 15);
+            }
+            if (score < 35) return;
+            if (!best || score > best.score || (score === best.score && row.count > best.row.count)) {
+                best = { row, rank: idx + 1, score, matchType };
+            }
+        });
+
+        if (!best) return null;
+        return {
+            mode: best.row.mode,
+            count: best.row.count,
+            rank: best.rank,
+            totalModes: sorted.length,
+            maxCount,
+            occurrenceScore: this.occurrenceScoreFromSystemModeCount(best.row.count, maxCount, best.rank, sorted.length),
+            matchType: best.matchType,
+        };
+    },
+
+    confidenceFromRpnInputs(effect: string, cause: string, currentControls: string, mitigation: string, systemModeEvidence: SystemModeOccurrenceEvidence | null): 'high' | 'medium' | 'low' {
+        let points = 0;
+        if (/Local:\s*.+;\s*End:\s*.+/i.test(effect)) points += 2;
+        else if (effect.trim()) points += 1;
+        if (cause.trim() && !/^(unknown|n\/a|none|aging|wear|failure)$/i.test(cause.trim())) points += 1;
+        if (currentControls.trim()) points += 1;
+        if (mitigation.trim()) points += 1;
+        if (systemModeEvidence) points += 2;
+        return points >= 6 ? 'high' : points >= 3 ? 'medium' : 'low';
+    },
+
     cleanNumberedActionList(text: string): string {
         const lines = (text || '')
             .replace(/```[a-zA-Z]*\s*/g, '')
@@ -581,9 +830,17 @@ export const AIService = {
         let corePrompt = "";
 
         const wordCount = currentText ? currentText.trim().split(/\s+/).filter(Boolean).length : 0;
+        const isFunctionalFailureField = lowerLabel.includes("functional failure");
+        const isFailureModeField = lowerLabel.includes("failure mode") || lowerLabel === "mode";
+        const isEffectField = lowerLabel.includes("effect");
+        const isCauseField = lowerLabel.includes("cause");
+        const isFunctionDescriptionField = lowerLabel.includes("function") && !isFunctionalFailureField;
+        const isFMECAContentField = isFunctionDescriptionField || isFunctionalFailureField || isFailureModeField || isEffectField || isCauseField;
         const failureContext = `Context:
 - System: "${contextData.project || 'Unknown'}"
 - Subsystem: "${contextData.subsystem || 'Unknown'}"
+- Specs: "${contextData.specs || 'N/A'}"
+- Subsystem Function: "${(contextData as any).subsystemFunction || (contextData as any).function || 'Unknown'}"
 - Functional Failure: "${contextData.functionalFailure || 'Unknown'}"
 - Failure Mode: "${contextData.failureMode || 'Unknown'}"
 - Effect: "${contextData.failureEffect || 'Unknown'}"
@@ -606,6 +863,8 @@ export const AIService = {
                 : '';
             const controlsPrompt = `${referenceBlock}${checklistBlock}${failureContext}${siblingBlock}
 ${existingNote}Task: List ONLY existing controls that are currently deployed for THIS failure mode.
+${FMECA_HIERARCHY_RULES}
+${FMECA_CONCISE_WORDING_RULES}
 Include:
 - Relevant PM/checklist tasks that directly prevent the stated cause, detect the stated cause, detect this mode's specific failure signature, or limit the stated effect. Use the checklist section name as owner.
 - Deployed instrument/protection controls from the reference data, such as temperature, pressure, level, flow, vibration, speed, differential pressure, alarms, trips, interlocks, shutdowns, transmitters, switches, or monitoring points. Include tag numbers and alarm/trip limits when stated. Use (Instrument team) for instrument controls unless the source states another owner.
@@ -640,7 +899,7 @@ Output contract:
         }
         // --- END CURRENT CONTROLS SPECIALIST ---
 
-        if (currentText && wordCount > 0 && wordCount <= 5) {
+        if (!isFMECAContentField && currentText && wordCount > 0 && wordCount <= 5) {
             return this.chat({
                 feature: 'field-generation',
                 provider: (aiProvider || inferProvider(key)) as any,
@@ -677,6 +936,8 @@ Output contract:
                 const checkSection = checklistContent?.trim() ? `PM CHECKLIST KNOWLEDGE (organized by team and PM interval):\n"""\n${checklistContent.slice(0, 6000)}\n"""\n\n` : '';
                 mitigationPrompt = `${refSection}${checkSection}${failureContext}${siblingBlock}
 Mitigation wand rule: File-only and Hybrid settings both act as Hybrid here: use loaded knowledge first, then add reliability-engineering actions for remaining gaps.
+${FMECA_HIERARCHY_RULES}
+${FMECA_CONCISE_WORDING_RULES}
 ${detectionNote}
 ${controlsCovered}${existingNote}
 Generate ${count} mitigation actions for THIS failure mode using this priority:
@@ -692,6 +953,8 @@ ${ownerRules}
 ${formatRule}`;
             } else {
                 mitigationPrompt = `${failureContext}${siblingBlock}
+${FMECA_HIERARCHY_RULES}
+${FMECA_CONCISE_WORDING_RULES}
 ${detectionNote}
 ${controlsCovered}${existingNote}
 Generate ${count} maintenance mitigation actions for THIS failure mode using reliability engineering knowledge. Never duplicate an action already covered by current controls. Do NOT bring tasks for other failure modes.
@@ -717,28 +980,57 @@ ${formatRule}`;
         }
         // --- END MITIGATION SPECIALIST ---
 
-        if (currentText && wordCount > 5) {
-            if (lowerLabel.includes("function")) {
+        if (currentText && (wordCount > 5 || isFMECAContentField)) {
+            if (isFunctionDescriptionField) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
                 The user wrote this Function Description: """${currentText}"""
                 Task: Rewrite and enhance it as a proper Function Description.
-                Requirements:
-                1. Start directly with the verb/action (e.g., "Pumps", "Delivers", "Regulates").
-                2. NO introductory phrases like "The function is" or "Description:".
-                3. State what the subsystem does within the System.
-                4. Include key operating values from Specs if available.
-                ${((contextData as any)?.detailLevel === 'normal')
-                    ? '5. State the primary operating expectation concisely; do not enumerate every fault-free condition.'
-                    : '5. Include key fault-free operating expectations when relevant, such as abnormal vibration, leakage, overheating, or abnormal noise. Do not force them when not applicable.'}
-                6. Preserve the user's core meaning and any specific values they provided.
+                ${FMECA_HIERARCHY_RULES}
+                ${FMECA_CONCISE_WORDING_RULES}
+                ${FUNCTION_DESCRIPTION_TECHNICAL_RULES}
+                Preserve the user's core meaning and any specific values they provided.
                 Output strictly the description text only.`;
+            } else if (isFunctionalFailureField) {
+                corePrompt = `${failureContext}
+                The user wrote this Functional Failure: """${currentText}"""
+                Task: Rewrite it as ONE professional Functional Failure.
+                ${FMECA_HIERARCHY_RULES}
+                ${FMECA_CONCISE_WORDING_RULES}
+                ${FUNCTIONAL_FAILURE_TECHNICAL_RULES}
+                If the user's text is a physical mechanism, cause, effect, alarm, trip, or task, convert it to the required performance not achieved when context supports that conversion.
+                Output strictly the Functional Failure text only.`;
+            } else if (isFailureModeField) {
+                corePrompt = `${failureContext}
+                The user wrote this Failure Mode: """${currentText}"""
+                Task: Rewrite it as ONE concise Failure Mode.
+                ${FMECA_HIERARCHY_RULES}
+                ${FMECA_CONCISE_WORDING_RULES}
+                ${FAILURE_MODE_TECHNICAL_RULES}
+                Output strictly the Failure Mode text only.`;
+            } else if (isEffectField) {
+                corePrompt = `${failureContext}
+                The user wrote this Effect: """${currentText}"""
+                Task: Rewrite it as ONE concise Failure Effect.
+                ${FMECA_HIERARCHY_RULES}
+                ${FMECA_CONCISE_WORDING_RULES}
+                ${FAILURE_MODE_TECHNICAL_RULES}
+                Format exactly: "Local: <subsystem consequence>; End: <system consequence>".
+                Output strictly the Failure Effect text only.`;
+            } else if (isCauseField) {
+                corePrompt = `${failureContext}
+                The user wrote this Cause: """${currentText}"""
+                Task: Rewrite it as ONE concise Failure Cause.
+                ${FMECA_HIERARCHY_RULES}
+                ${FMECA_CONCISE_WORDING_RULES}
+                ${FAILURE_MODE_TECHNICAL_RULES}
+                Output strictly the Failure Cause text only.`;
             } else if (lowerLabel.includes("spec")) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}".
                 The user wrote these specifications: """${currentText}"""
                 Task: Rewrite and enhance them in the correct format.
                 Format: Comma-separated list of "Key: Value Unit".
                 Example: Power: 400 W, Voltage: 415 V, Speed: 3590 RPM, Material: SS316, Protection: IP55.
-                Requirements: Preserve all values the user provided. Keep it technical and concise. Do not include the word "Specs:" at the start.
+                Requirements: Preserve all values the user provided. Do not add values, ratings, materials, limits, or equipment details not present in the user's text. Keep it technical and concise. Do not include the word "Specs:" at the start.
                 Output strictly the specifications text only.`;
             } else {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}".
@@ -751,24 +1043,47 @@ ${formatRule}`;
                 Output strictly the field value only.`;
             }
         } else {
-            if (lowerLabel.includes("function")) {
+            if (isFunctionDescriptionField) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
                 Task: Write a Function Description for this subsystem.
-                Requirements:
-                1. Start directly with the verb/action (e.g., "Pumps", "Delivers", "Regulates").
-                2. NO introductory phrases like "The function is" or "Description:".
-                3. State what the subsystem does within the System.
-                4. Include key operating values from Specs (e.g., flow, pressure, RPM) if available.
-                ${((contextData as any)?.detailLevel === 'normal')
-                    ? '5. State the primary operating expectation concisely; do not enumerate every fault-free condition.'
-                    : '5. Include key fault-free operating expectations when relevant, such as abnormal vibration, leakage, overheating, or abnormal noise. Do not force them when not applicable.'}
+                ${FMECA_HIERARCHY_RULES}
+                ${FMECA_CONCISE_WORDING_RULES}
+                ${FUNCTION_DESCRIPTION_TECHNICAL_RULES}
                 Output strictly the description text only.`;
+            } else if (isFunctionalFailureField) {
+                corePrompt = `${failureContext}
+                Task: Write ONE Functional Failure for this subsystem context.
+                ${FMECA_HIERARCHY_RULES}
+                ${FMECA_CONCISE_WORDING_RULES}
+                ${FUNCTIONAL_FAILURE_TECHNICAL_RULES}
+                Output strictly the Functional Failure text only.`;
+            } else if (isFailureModeField) {
+                corePrompt = `${failureContext}
+                Task: Write ONE Failure Mode that results in this Functional Failure.
+                ${FMECA_HIERARCHY_RULES}
+                ${FMECA_CONCISE_WORDING_RULES}
+                ${FAILURE_MODE_TECHNICAL_RULES}
+                Output strictly the Failure Mode text only.`;
+            } else if (isEffectField) {
+                corePrompt = `${failureContext}
+                Task: Write ONE concise Failure Effect for this Failure Mode.
+                ${FMECA_HIERARCHY_RULES}
+                ${FMECA_CONCISE_WORDING_RULES}
+                ${FAILURE_MODE_TECHNICAL_RULES}
+                Format exactly: "Local: <subsystem consequence>; End: <system consequence>".
+                Output strictly the Failure Effect text only.`;
+            } else if (isCauseField) {
+                corePrompt = `${failureContext}
+                Task: Write ONE concise Failure Cause for this Failure Mode.
+                ${FMECA_HIERARCHY_RULES}
+                ${FMECA_CONCISE_WORDING_RULES}
+                ${FAILURE_MODE_TECHNICAL_RULES}
+                Output strictly the Failure Cause text only.`;
             } else if (lowerLabel.includes("spec")) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}".
                 Task: Generate technical specifications.
                 Format: Comma-separated list of "Key: Value Unit".
-                Example: Power: 400 W, Voltage: 415 V, Speed: 3590 RPM, Material: SS316, Protection: IP55.
-                Requirements: Keep it technical and concise. Do not include the word "Specs:" at the start.`;
+                Requirements: Use only values, ratings, materials, limits, or equipment details already present in the project context or reference data. If no specifications are provided, return an empty response. Keep it technical and concise. Do not include the word "Specs:" at the start.`;
             } else if (lowerLabel.includes("subsystem")) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}".
                 Task: Suggest a Subsystem Name logically related to this System (e.g., if System is Boiler, Subsystem could be Feed Water Pump).
@@ -782,7 +1097,7 @@ ${formatRule}`;
 
         const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
 
-        return this.chat({
+        const generated = await this.chat({
             feature: 'field-generation',
             provider: (aiProvider || inferProvider(key)) as any,
             azureEndpoint: azureEndpoint || undefined,
@@ -795,6 +1110,9 @@ ${formatRule}`;
             apiKey: key,
             responseFormat: 'text'
         });
+        if (isFunctionalFailureField) return this.cleanFunctionalFailureText(generated, { function: (contextData as any).subsystemFunction || (contextData as any).function || '', standard: '' });
+        if (isFMECAContentField) return this.cleanSingleFieldText(generated);
+        return generated;
     },
 
     async generateMasterStructure(sysName: string, sysDesc: string, key: string, modelName: string, mode: string, refText: string, aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', powerAutomateUrl: string = ''): Promise<any> {
@@ -802,8 +1120,10 @@ ${formatRule}`;
         // Skeletons only — function, failures and modes are generated by the
         // dedicated downstream steps in masterGen; anything more here is discarded.
         const corePrompt = `Act as Senior Reliability Engineer. Analyze System "${sysName}" (${sysDesc}).
+        ${FMECA_HIERARCHY_RULES}
+        ${FMECA_CONCISE_WORDING_RULES}
         Identify the critical Subsystems for a formal FMECA. Scale the count to the system's complexity and criticality (simple package: 3-4, complex train: up to 8).
-        For each subsystem, generate 'specs' using format "Key: Value Unit, Key: Value Unit" with realistic values for this class of equipment.
+        For each subsystem, generate 'specs' using format "Key: Value Unit, Key: Value Unit" only when exact specs are present in the system description or reference data. Do not invent realistic values. If no exact specs are available for a subsystem, return an empty string for specs.
         Output strictly valid JSON object:
         { "subsystems": [ {
             "name": "string (Subsystem Name)",
@@ -841,12 +1161,18 @@ ${formatRule}`;
             ? `Existing Functional Failures already defined for this subsystem (DO NOT repeat or closely resemble):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n` : '';
         const mitigationInstruction = `\n${MODE_ACTION_FORMAT_RULES}`;
         const corePrompt = `${checklistBlock}${existingBlock}Context: System "${projectContext}", Subsystem "${name}". Specs: "${specs}". Function Provided: "${funcDesc}".
+        ${FMECA_HIERARCHY_RULES}
+        ${FMECA_CONCISE_WORDING_RULES}
+        ${FUNCTION_DESCRIPTION_TECHNICAL_RULES}
+        ${FUNCTIONAL_FAILURE_TECHNICAL_RULES}
+        ${FAILURE_MODE_TECHNICAL_RULES}
         Task:
-        1. If "Function Provided" is empty, generate it first: Action + Specs + Normal Expectations.
+        1. If "Function Provided" is empty, infer the subsystem function internally using intended-operation wording, then derive failures from that inferred function. Do not add a function field to the JSON. Use exact values from Specs only when provided; otherwise do not invent values.
         ${detailLevel === 'normal'
-            ? '2. Derive distinct Functional Failures strictly from the Function (negation of each stated expectation). Scale the count to complexity (simple component: 2, complex subsystem: up to 3). Cover the most credible loss modes — do not enumerate every theoretical variant.'
-            : '2. Derive distinct Functional Failures strictly from the Function (negation of each stated expectation). Scale the count to the subsystem\'s complexity and criticality (simple component: 2, critical complex subsystem: up to 5). Cover total loss, partial loss, intermittent operation and over-function where the function supports them.'}
+            ? '2. Derive distinct Functional Failures strictly from the Function. Scale the count to complexity (simple component: 2, complex subsystem: up to 3). Cover the most credible loss modes; do not enumerate every theoretical variant.'
+            : '2. Derive distinct Functional Failures strictly from the Function. Scale the count to the subsystem\'s complexity and criticality (simple component: 2, critical complex subsystem: up to 5). Cover total loss, partial loss, intermittent operation, incorrect operation, and over-function only where the function supports them.'}
         3. For each failure, generate Failure Modes, Effects, Causes, Current Controls and Mitigations. Failure modes must be unique across the whole subsystem — never repeat a mode under two failures. Treat other generated modes as siblings; do not share generic controls or actions across them.
+        4. Internally validate every row before final JSON: function = intended operation; functional failure = required performance not achieved; mode = specific failed state; cause = why mode occurs; effect = what happens after mode; controls/mitigation = barriers only.
         ${buildModeFieldRules(controlsKnowledgeAvailable, 'THIS failure mode')}
         Do NOT generate or include RPN/S/O/D values. RPN is scored later by the dedicated RPN scorer.
         Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "currentControls": "string", "mitigation": "string" } ] } ] }${mitigationInstruction}`;
@@ -963,12 +1289,13 @@ Function breakdown rows:
 ${JSON.stringify(rows.map(r => ({ rowId: r.id, function: r.function, standard: r.standard, snippet: r.snippet })), null, 2)}
 
 ${existingBlock}Task: Generate ONE Functional Failure for each breakdown row.
+${FMECA_HIERARCHY_RULES}
+${FMECA_CONCISE_WORDING_RULES}
+${FUNCTIONAL_FAILURE_TECHNICAL_RULES}
 Use each row's function label and performance/condition standard as the primary source. The standard defines what "failed" means; do not ignore it.
 Use the full subsystem function only to resolve ambiguity, not to add extra details.
-Write short failure states, not narratives.
-Length per failure: 8-16 words.
-Preferred form: "Fails to [verb/object] [standard breach]."
-Do NOT include causes, effects, consequences, tags, equipment IDs, mitigation, downstream narrative, or explanatory clauses.
+Write short professional FMECA failure states, not narratives.
+Length per failure: 6-14 words.
 Do NOT generate duplicate or closely similar failures. If two rows would produce the same failure, return the clearer one and omit the duplicate row.
 
 Return ONLY strict JSON:
@@ -996,7 +1323,10 @@ Return ONLY strict JSON:
                 failures: failures
                     .map((f: any) => ({
                         rowId: String(f?.rowId ?? f?.row_id ?? '').trim(),
-                        desc: String(f?.desc ?? f?.failure ?? f?.functionalFailure ?? '').trim(),
+                        desc: this.cleanFunctionalFailureText(
+                            String(f?.desc ?? f?.failure ?? f?.functionalFailure ?? '').trim(),
+                            rows.find(r => r.id === String(f?.rowId ?? f?.row_id ?? '').trim())
+                        ),
                         sourceSnippet: String(f?.sourceSnippet ?? f?.source_snippet ?? '').trim(),
                     }))
                     .filter((f: any) => validRowIds.has(f.rowId) && f.desc)
@@ -1105,14 +1435,16 @@ async evaluateRpnFromText(
     aiProvider?: string;
     azureEndpoint?: string;
     systemContext?: string;
+    systemType?: string;
+    systemModes?: SystemModeRow[];
     powerAutomateUrl?: string;
   }
-): Promise<{ s: number; o: number; d: number; reason?: string; baseline?: { s: number; o: number; d: number }; improvement?: { baselineRpn: number; mitigatedRpn: number; detectionImprovement: number; rpnReduction: number; summary: string } }> {
+): Promise<{ s: number; o: number; d: number; reason?: string; confidence?: 'high' | 'medium' | 'low'; baseline?: { s: number; o: number; d: number }; improvement?: { baselineRpn: number; mitigatedRpn: number; detectionImprovement: number; rpnReduction: number; summary: string } }> {
   const {
     project, subName, subSpecs, subFunc, failDesc,
     mode, effect, cause, currentControls = '', mitigation,
     key, modelName, modeSource = 'ai', refText = '',
-    aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = ''
+    aiProvider = '', azureEndpoint = '', systemContext = '', systemType = '', systemModes = [], powerAutomateUrl = ''
   } = args;
 
   if ((!key || key.length < 10) && aiProvider !== 'copilot') {
@@ -1124,9 +1456,28 @@ async evaluateRpnFromText(
       d: 5,
       baseline: { s: 5, o: 5, d: 8 },
       improvement: { baselineRpn: 200, mitigatedRpn: 125, detectionImprovement: 3, rpnReduction: 75, summary: "Simulated mitigation improves detection and reduces RPN." },
-      reason: "Simulated scoring (no API key)."
+      confidence: 'low',
+      reason: "S: 5 because simulated moderate end effect. O: 5 because no system mode count was scored in demo mode. Baseline D: 8 because current controls are unknown. Mitigated D: 5 because simulated mitigation improves detection. Confidence: low."
     };
   }
+
+  const systemModeEvidence = this.findSystemModeOccurrenceEvidence(mode, cause, systemModes);
+  const inputConfidence = this.confidenceFromRpnInputs(effect, cause, currentControls, mitigation, systemModeEvidence);
+  const systemModeBlock = systemModeEvidence
+    ? `Operational Failure Data Match:
+- System Type: "${systemType || 'N/A'}"
+- Matched System Mode: "${systemModeEvidence.mode}"
+- Match Type: ${systemModeEvidence.matchType}
+- Failure Mode Count: ${systemModeEvidence.count}
+- Rank: ${systemModeEvidence.rank} of ${systemModeEvidence.totalModes}
+- Max Count in uploaded system modes: ${systemModeEvidence.maxCount}
+- Count-based Occurrence Score: ${systemModeEvidence.occurrenceScore}
+Use this matched system mode count as the primary evidence for baseline Occurrence (O).`
+    : `Operational Failure Data Match:
+- System Type: "${systemType || 'N/A'}"
+- Matched System Mode: none
+- Count-based Occurrence Score: unavailable
+No uploaded system mode matched this Failure Mode; use mode/cause likelihood and standard industrial practice for Occurrence.`;
 
   const corePrompt = `
 Act strictly as a Senior Reliability Engineer performing formal FMECA.
@@ -1150,6 +1501,8 @@ Failure Details:
 - CURRENT Controls (already in place): "${currentControls || 'None stated'}"
 - MITIGATION Actions to be added to the system: "${mitigation || 'None stated'}"
 
+${systemModeBlock}
+
 ${RPN_ANCHORS}
 
 Mandatory Scoring Logic (DO NOT VIOLATE):
@@ -1162,11 +1515,12 @@ Severity (S):
 - High Severity (8–10) is allowed ONLY if the effect clearly implies safety risk, regulatory breach, or major system outage.
 
 Occurrence (O):
-- Estimate likelihood using typical industrial experience for the stated FAILURE MODE and CAUSE.
-- Do NOT assume rare failures are frequent.
-- Wear, fouling, leakage, misalignment → moderate occurrence unless stated otherwise.
-- Random catastrophic failures should have LOW occurrence unless explicitly frequent.
-- If no frequency indicators exist, choose a MID-RANGE value (4–6), not extremes.
+- If Operational Failure Data has a matched system mode, baseline Occurrence MUST be driven by the matched Failure Mode Count and Count-based Occurrence Score.
+- If matched count exists, set baseline.o equal to the Count-based Occurrence Score unless a severe contradiction exists in the field text.
+- Main returned "o" is post-mitigation occurrence. Keep it equal to baseline.o unless mitigation contains concrete preventive actions that reduce the stated cause likelihood.
+- Do NOT reduce Occurrence for detection-only actions such as alarms, monitoring, trips, inspections, proof tests, or diagnostics; those affect Detection only.
+- If no matched system mode exists, estimate likelihood using typical industrial experience for the stated FAILURE MODE and CAUSE.
+- Mention the matched system mode and count in the O reasoning whenever available.
 
 Detection (D):
 - Main returned "d": score Detection using BOTH CURRENT Controls and MITIGATION Actions, assuming mitigation is added to the system.
@@ -1181,6 +1535,10 @@ Consistency Rules:
 - Mild effects must NEVER result in high Severity.
 - When genuinely uncertain between two adjacent bands, choose the HIGHER-RISK band (higher S or D) — but never jump bands beyond what the stated information supports.
 - Avoid clustering all values at 5 unless justified.
+- Main S should equal baseline S unless mitigation clearly reduces the end consequence severity.
+- Main O should not be lower than baseline O unless mitigation prevents or reduces the stated cause.
+- Main D should not be lower than baseline D unless mitigation adds concrete detection/prevention controls.
+- If mitigation is absent or vague, main S/O/D should equal baseline S/O/D except where current controls already justify baseline detection.
 
 Output Requirements:
 - Return strictly valid JSON only.
@@ -1191,7 +1549,9 @@ Output Requirements:
 - Calculate mitigatedRpn = s * o * d.
 - Calculate detectionImprovement = baseline.d - d.
 - Calculate rpnReduction = baselineRpn - mitigatedRpn.
-- Include a short, professional justification referencing effect severity, failure likelihood, baseline detection strength, mitigation detection strength, and RPN improvement.
+- Include structured reasoning in exactly this format:
+  S: [score] because [end effect] plus, if applicable, production + safety + asset + cost impacts. O: [score] because [mode/cause likelihood] plus the system mode failure count. Baseline D: [score] because [current controls]. Mitigated D: [score] because [credited mitigation]. Confidence: [high|medium|low].
+- Confidence should reflect input quality and evidence: use "${inputConfidence}" unless the scoring evidence clearly supports another level.
 
 Output format:
 {
@@ -1199,6 +1559,7 @@ Output format:
   "o": <1–10>,
   "d": <1–10>,
   "baseline": { "s": <1–10>, "o": <1–10>, "d": <1–10> },
+  "confidence": "high" | "medium" | "low",
   "improvement": {
     "baselineRpn": <number>,
     "mitigatedRpn": <number>,
@@ -1206,7 +1567,7 @@ Output format:
     "rpnReduction": <number>,
     "summary": "One sentence describing how mitigation improves D and RPN."
   },
-  "reason": "Brief justification (1–3 sentences)."
+  "reason": "S: ... O: ... Baseline D: ... Mitigated D: ... Confidence: ..."
 }
 `.trim();
 
@@ -1231,27 +1592,50 @@ Output format:
   // Normalize and clamp
   const clamp = (n: any) => Math.min(10, Math.max(1, Math.round(Number(n) || 5)));
 
-  const s = clamp(parsed.s);
-  const o = clamp(parsed.o);
-  const d = clamp(parsed.d);
+  const hasConcreteMitigation = mitigation.trim() && !/^(none|n\/a|unknown|improve maintenance|regular maintenance|inspect regularly|monitor condition)$/i.test(mitigation.trim());
+  const preventiveMitigation = /\b(replace|redesign|upgrade|modify|prevent|eliminate|filter|clean|balance|align|lubricat|seal|tighten|torque|calibrat|flush|change oil|oil analysis|contamination control|root cause)\b/i.test(mitigation);
+  const detectionMitigation = /\b(alarm|trip|monitor|sensor|transmitter|switch|inspect|inspection|test|proof|diagnostic|vibration|temperature|pressure|flow|level|analysis|sample|trend|detect)\b/i.test(mitigation);
+  const severityMitigation = /\b(relief|contain|secondary containment|shutdown|trip|isolate|interlock|protect|fire|blast|spill|consequence)\b/i.test(mitigation);
+
+  const parsedS = clamp(parsed.s);
+  const parsedO = clamp(parsed.o);
+  const parsedD = clamp(parsed.d);
   const baseline = {
-    s: clamp(parsed?.baseline?.s ?? parsed?.baseline_s ?? s),
-    o: clamp(parsed?.baseline?.o ?? parsed?.baseline_o ?? o),
-    d: clamp(parsed?.baseline?.d ?? parsed?.baseline_d ?? d)
+    s: clamp(parsed?.baseline?.s ?? parsed?.baseline_s ?? parsedS),
+    o: systemModeEvidence ? systemModeEvidence.occurrenceScore : clamp(parsed?.baseline?.o ?? parsed?.baseline_o ?? parsedO),
+    d: clamp(parsed?.baseline?.d ?? parsed?.baseline_d ?? parsedD)
   };
-  const baselineRpn = Number(parsed?.improvement?.baselineRpn ?? parsed?.improvement?.baseline_rpn ?? baseline.s * baseline.o * baseline.d);
-  const mitigatedRpn = Number(parsed?.improvement?.mitigatedRpn ?? parsed?.improvement?.mitigated_rpn ?? s * o * d);
-  const detectionImprovement = Number(parsed?.improvement?.detectionImprovement ?? parsed?.improvement?.detection_improvement ?? baseline.d - d);
-  const rpnReduction = Number(parsed?.improvement?.rpnReduction ?? parsed?.improvement?.rpn_reduction ?? baselineRpn - mitigatedRpn);
-  const summary = typeof parsed?.improvement?.summary === 'string' ? parsed.improvement.summary : '';
+
+  const s = (hasConcreteMitigation && severityMitigation) ? Math.min(parsedS, baseline.s) : baseline.s;
+  const o = (hasConcreteMitigation && preventiveMitigation) ? Math.min(parsedO, baseline.o) : baseline.o;
+  const d = (hasConcreteMitigation && (detectionMitigation || preventiveMitigation)) ? Math.min(parsedD, baseline.d) : baseline.d;
+  const confidence = (['high', 'medium', 'low'].includes(String(parsed?.confidence || '').toLowerCase())
+    ? String(parsed.confidence).toLowerCase()
+    : inputConfidence) as 'high' | 'medium' | 'low';
+  const baselineRpn = baseline.s * baseline.o * baseline.d;
+  const mitigatedRpn = s * o * d;
+  const detectionImprovement = baseline.d - d;
+  const rpnReduction = baselineRpn - mitigatedRpn;
+  const summary = typeof parsed?.improvement?.summary === 'string' && parsed.improvement.summary.trim()
+    ? this.cleanSingleFieldText(parsed.improvement.summary)
+    : `RPN changes from ${baselineRpn} to ${mitigatedRpn} based on credited mitigation.`;
+  const systemModeReason = systemModeEvidence
+    ? `matched system mode "${systemModeEvidence.mode}" has ${systemModeEvidence.count} occurrence(s), rank ${systemModeEvidence.rank}/${systemModeEvidence.totalModes}`
+    : 'no matching uploaded system mode count was available';
+  const fallbackReason = `S: ${s} because ${this.cleanSingleFieldText(effect || 'end effect is not clearly stated')} with production, safety, asset, and cost impact reflected where stated. O: ${o} because ${this.cleanSingleFieldText(mode || 'failure mode')} / ${this.cleanSingleFieldText(cause || 'cause not stated')} likelihood is anchored by ${systemModeReason}. Baseline D: ${baseline.d} because ${this.cleanSingleFieldText(currentControls || 'current controls are not stated')}. Mitigated D: ${d} because ${this.cleanSingleFieldText(hasConcreteMitigation ? mitigation : 'no concrete mitigation is credited')}. Confidence: ${confidence}.`;
+  const rawReason = typeof parsed.reason === 'string' ? this.cleanSingleFieldText(parsed.reason) : '';
+  const reason = /^S:\s*\d+.*\bO:\s*\d+.*Baseline D:\s*\d+.*Mitigated D:\s*\d+.*Confidence:\s*(high|medium|low)/i.test(rawReason)
+    ? rawReason
+    : fallbackReason;
 
   return {
     s,
     o,
     d,
+    confidence,
     baseline,
     improvement: { baselineRpn, mitigatedRpn, detectionImprovement, rpnReduction, summary },
-    reason: typeof parsed.reason === 'string' ? parsed.reason : ''
+    reason
   };
 },
 
@@ -1578,17 +1962,18 @@ Function label (black text): "${breakdownSnippet}"
 Performance/condition standard (grey text): "${breakdownStandard || 'N/A'}"
 
 ${existingBlock}Task: Generate ONE Functional Failure that specifically addresses the loss or degradation of this functional aspect.
+${FMECA_HIERARCHY_RULES}
+${FMECA_CONCISE_WORDING_RULES}
+${FUNCTIONAL_FAILURE_TECHNICAL_RULES}
 Use the function label and performance/condition standard as the primary source. The standard defines what "failed" means; do not ignore it.
 Use the full subsystem function only to resolve ambiguity, not to add extra details.
-Write a short failure state, not a narrative.
-Length: 8-16 words.
-Preferred form: "Fails to [verb/object] [standard breach]."
-Do NOT include causes, effects, consequences, tags, equipment IDs, mitigation, downstream narrative, or explanatory clauses.
+Write a short professional FMECA failure state, not a narrative.
+Length: 6-14 words.
 Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
 
         const content = prompt + (systemContext ? '\n\n' + systemContext : '');
         try {
-            return await this._withRetry(() => this.chat({
+            const res = await this._withRetry(() => this.chat({
                 feature: 'ff-for-row',
                 provider: (aiProvider || inferProvider(key)) as any,
                 azureEndpoint: azureEndpoint || undefined,
@@ -1600,6 +1985,7 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
                 apiKey: key,
                 responseFormat: 'text'
             }));
+            return this.cleanFunctionalFailureText(res, { function: breakdownSnippet, standard: breakdownStandard });
         } catch {
             return '';
         }
@@ -1625,10 +2011,13 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
             : '';
 
         const detailRule = detailLevel === 'normal'
-            ? 'Return 3-6 rows. Include each present seed type separately; prefer fewer rows only within the same seed type.'
-            : 'Return up to 7 rows. Split only genuinely distinct failure consequences or seed types, not values, tags, safeguards, or sentence parts.';
+            ? 'Return 2-5 rows. Include each present seed type separately; prefer fewer rows when rows would be similar.'
+            : 'Return up to 6 rows. Split only genuinely distinct intended functions or failure consequences, not values, tags, safeguards, or sentence parts.';
 
         const prompt = `Role: You are a senior FMECA facilitator. Your task is not text splitting. Your task is to identify Functional Failure seeds from a subsystem Function description. Be deterministic: given the same input, always produce the same rows.
+${FMECA_HIERARCHY_RULES}
+${FMECA_CONCISE_WORDING_RULES}
+${FUNCTION_BREAKDOWN_TECHNICAL_RULES}
 
 ${contextLine}Function description:
 """
@@ -1662,8 +2051,8 @@ Decompose by failure consequence, not by grammar, sentence boundaries, individua
 ${detailRule}
 
 JSON field rules:
-- function = concise verb + object.
-- standard = FMECA-worthy performance standard, control requirement, operating envelope, or condition requirement.
+- function = concise functional verb + object, 2-7 words.
+- standard = required performance standard, control requirement, operating envelope, or condition requirement, 3-10 words.
 - snippet = verbatim source slice from the original description, 15-80 characters.
 
 Return ONLY this JSON, no prose, no markdown:
@@ -1690,7 +2079,7 @@ Return ONLY this JSON, no prose, no markdown:
             });
             type BreakdownRow = { function: string; standard: string; snippet: string };
             const rawRows: BreakdownRow[] = parsed.rows
-                .map((r: any) => ({
+                .map((r: any) => this.cleanBreakdownRow({
                     function: String(r?.function ?? '').trim(),
                     standard: String(r?.standard ?? '').trim(),
                     snippet: String(r?.snippet ?? '').trim(),
@@ -1703,7 +2092,7 @@ Return ONLY this JSON, no prose, no markdown:
             const includesAny = (text: string, terms: RegExp[]) => terms.some(re => re.test(text));
             const rows: BreakdownRow[] = [];
             const usedKeys = new Set<string>();
-            const maxRows = detailLevel === 'normal' ? 6 : 8;
+            const maxRows = detailLevel === 'normal' ? 5 : 6;
             const rowKey = (row: BreakdownRow) => `${compact(row.function)}|${compact(row.standard)}`
                 .replace(/\b(leaks?|leakage)\b/g, 'leak')
                 .replace(/\b(properly|correctly|adequately|reliably)\b/g, '')

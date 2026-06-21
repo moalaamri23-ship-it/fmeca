@@ -48,7 +48,7 @@ Every app must implement a provider-agnostic AI layer. The pattern:
 
 ```typescript
 // Provider routing based on API key prefix or user selection
-type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter';
+type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter' | 'copilot';
 
 async function callAI(provider, messages, tools?, systemPrompt?): Promise<AIResponse>
 ```
@@ -56,12 +56,12 @@ async function callAI(provider, messages, tools?, systemPrompt?): Promise<AIResp
 **Provider constants — define these at module level in App.tsx:**
 
 ```typescript
-type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter';
+type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter' | 'copilot';
 
 // Human-readable tab labels
 const PROVIDER_LABELS: Record<AIProvider, string> = {
     gemini: 'Gemini', openai: 'OpenAI', anthropic: 'Anthropic',
-    azure: 'Azure', openrouter: 'OpenRouter'
+    azure: 'Azure', openrouter: 'OpenRouter', copilot: 'Copilot'
 };
 
 // Hardcoded fallback models — shown when live fetch has not run yet or fails
@@ -69,19 +69,19 @@ const PROVIDER_MODELS: Record<string, string[]> = {
     gemini:    ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
     openai:    ['gpt-4o-mini', 'gpt-4o', 'o3-mini'],
     anthropic: ['claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001', 'claude-opus-4-6'],
-    // Azure and OpenRouter have no fallback list — they use text inputs
+    // Azure, OpenRouter, and Copilot have no fallback list — they use text inputs
 };
 
 // Default model selected when switching to a provider
 const DEFAULT_MODELS: Record<AIProvider, string> = {
     gemini: 'gemini-2.0-flash', openai: 'gpt-4o-mini',
-    anthropic: 'claude-sonnet-4-20250514', azure: '', openrouter: ''
+    anthropic: 'claude-sonnet-4-20250514', azure: '', openrouter: '', copilot: ''
 };
 
 // Placeholder text for API key input per provider
 const API_KEY_PLACEHOLDERS: Record<AIProvider, string> = {
     gemini: 'AIzaSy...', openai: 'sk-...', anthropic: 'sk-ant-...',
-    azure: 'Azure API key', openrouter: 'sk-or-...'
+    azure: 'Azure API key', openrouter: 'sk-or-...', copilot: 'Not required'
 };
 ```
 
@@ -93,6 +93,7 @@ const API_KEY_PLACEHOLDERS: Record<AIProvider, string> = {
 - Anthropic — live fetch; default `claude-sonnet-*`; fallback list in `PROVIDER_MODELS`
 - Azure — no live fetch; user types deployment name; no fallback list
 - OpenRouter — no live fetch; user builds own model list via `ModelSelector` with `allowCustomList`
+- **Copilot** — no live fetch; no API key; user provides a Power Automate HTTP trigger URL; model selection managed by Copilot Studio
 
 **Do not hardcode model lists as the final truth.** `PROVIDER_MODELS` is only a fallback for when live fetch has not run yet or failed. Models are fetched live and cached in `localStorage` with a 24h TTL.
 
@@ -202,6 +203,206 @@ useEffect(() => {
 ```
 
 Always implement a **mock/demo mode** that works without API keys for demos and onboarding.
+
+---
+
+## Copilot / Power Automate Provider
+
+This is a **compliance-grade pass-through provider** for organisations that must route all AI traffic through Microsoft Power Platform (Power Automate → Copilot Studio) rather than calling OpenAI/Gemini directly. It is a first-class provider alongside the others — not a special case.
+
+### Design principle
+Phase 1 is a generic pass-through: the app sends a flat prompt to a Power Automate HTTP trigger; the flow forwards it to Copilot Studio and returns the plain-text response. No model selection, no API key — just a URL.
+
+### AIRequestPayload additions
+
+```typescript
+export interface AIRequestPayload {
+    // ...existing fields...
+    provider: 'openai' | 'gemini' | 'anthropic' | 'azure' | 'openrouter' | 'copilot';
+    powerAutomateUrl?: string;  // HTTP trigger URL — required when provider === 'copilot'
+}
+```
+
+### Copilot interceptor in chat()
+
+Add this as the **very first statement** in `AIService.chat()`, before the remote/direct fallback logic:
+
+```typescript
+async chat(req: AIRequestPayload): Promise<string> {
+    if (req.provider === 'copilot') {
+        return this._powerAutomateRequest(req);
+    }
+    // ...existing baseUrl / _directChat logic unchanged...
+}
+```
+
+### _powerAutomateRequest transport method
+
+Place this in the **internal transport section** of `AIService`, alongside `_remoteRequest`:
+
+```typescript
+async _powerAutomateRequest(req: AIRequestPayload): Promise<string> {
+    // 1. Validate URL
+    if (!req.powerAutomateUrl) {
+        throw new Error('Power Automate URL is required for Copilot provider.');
+    }
+
+    // 2. Flatten last user message
+    const lastUserMessage = [...req.messages].reverse().find(m => m.role === 'user');
+    const rawPrompt = typeof lastUserMessage?.content === 'string'
+        ? lastUserMessage.content
+        : '';
+
+    // 3. Attach context (reference file / hybrid mode) via existing helper
+    const fullPrompt = this.attachContext(rawPrompt, req.mode, req.refText ?? '');
+
+    // 4. Build payload
+    const payload = {
+        sessionId: req.sessionId ?? crypto.randomUUID(),  // maintains chat state in Copilot Studio
+        prompt: fullPrompt,
+        responseFormat: req.responseFormat ?? 'text',
+    };
+
+    // 5. POST to Power Automate HTTP trigger
+    const res = await fetch(req.powerAutomateUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+
+    // 6. Error handling — read raw text body for useful error messages
+    if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Power Automate Error: ${res.statusText}${errText ? ` — ${errText}` : ''}`);
+    }
+
+    // 7. Return raw text — Power Automate flow returns plain string, not JSON
+    return res.text();
+},
+```
+
+> **Important:** The flow returns a **raw text string**, not `{ content: string }`. Always use `res.text()`, never `res.json()`.
+
+### Feature method signatures
+
+Every feature method (`generate`, `generateMasterStructure`, `generateCompleteSubsystem`, `generateModesForFailure`, `evaluateRpnFromText`) must accept and forward `powerAutomateUrl`:
+
+```typescript
+// Add as last optional param to each method signature
+async generate(..., systemContext: string = '', powerAutomateUrl: string = ''): Promise<string>
+
+// Pass through to every internal this.chat() call
+return this.chat({
+    ...
+    powerAutomateUrl: powerAutomateUrl || undefined,
+});
+```
+
+### App.tsx state & persistence
+
+```typescript
+// State
+const [powerAutomateUrl, setPowerAutomateUrl] = useState('');
+
+// Load from localStorage
+setPowerAutomateUrl(localStorage.getItem('rcm_power_automate_url') || '');
+
+// Save — add to the localStorage useEffect dependency array alongside azureEndpoint
+localStorage.setItem('rcm_power_automate_url', powerAutomateUrl);
+```
+
+### Settings UI rules for Copilot
+
+```tsx
+{/* 1. Hide API Key field entirely when Copilot is selected */}
+{aiProvider !== 'copilot' && (
+    <div>
+        <label>API Key</label>
+        <input type="password" value={apiKey} ... />
+    </div>
+)}
+
+{/* 2. Show Power Automate URL input instead */}
+{aiProvider === 'copilot' && (
+    <div>
+        <label>Power Automate URL</label>
+        <input type="text" value={powerAutomateUrl}
+               onChange={e => setPowerAutomateUrl(e.target.value)}
+               placeholder="https://prod-xx.westus.logic.azure.com/workflows/..." />
+    </div>
+)}
+
+{/* 3. No model selector for Copilot — replace with info text */}
+{aiProvider === 'copilot' ? (
+    <p className="text-xs text-slate-400 mt-1">
+        Model selection is managed by Copilot Studio. No model ID is required here.
+    </p>
+) : aiProvider === 'azure' ? (
+    // ...deployment name input...
+) : (
+    // ...ModelSelector...
+)}
+```
+
+### API key guard bypass
+
+All key-length guards throughout `AIService` and `App.tsx` must be bypassed when provider is `copilot`. Apply the pattern consistently:
+
+```typescript
+// AIService feature methods — change every guard from:
+if (!key || key.length < 10) { /* fallback */ }
+// to:
+if ((!key || key.length < 10) && aiProvider !== 'copilot') { /* fallback */ }
+
+// App.tsx alert guards
+if (!apiKey && aiProvider !== 'copilot') return alert("API Key required.");
+
+// Chatbot handleSend
+if (!input.trim() || (!apiKey && aiProvider !== 'copilot')) return;
+```
+
+### Prop threading
+
+Pass `powerAutomateUrl` alongside `azureEndpoint` everywhere the latter already flows:
+
+| Component | Prop to add |
+|-----------|-------------|
+| `<Chatbot>` | `powerAutomateUrl={powerAutomateUrl}` |
+| `<SmartInput>` | `powerAutomateUrl?: string` — forward to `AIService.generate()` |
+| `<MitigationBuilder>` | `powerAutomateUrl?: string` — forward to `<SmartInput>` |
+| Every `AIService.*` call site | append `powerAutomateUrl` as last argument |
+
+---
+
+## Spell-check Optimisation (generate() fast path)
+
+The `generate()` method dispatches on word count. The **1–5 word spell-check branch** must short-circuit before the shared `chat()` call to avoid sending the reference file and system context for a simple typo fix:
+
+```typescript
+if (currentText && wordCount > 0 && wordCount <= 5) {
+    // Early return — no refText, no systemContext, mode forced to 'ai'
+    return this.chat({
+        feature: 'field-generation',
+        provider: (aiProvider || (key.startsWith('sk-') ? 'openai' : 'gemini')) as any,
+        azureEndpoint: azureEndpoint || undefined,
+        powerAutomateUrl: powerAutomateUrl || undefined,
+        model: modelName,
+        messages: [{ role: 'user', content:
+            `Fix only the grammar and spelling of the following text. ` +
+            `Return only the corrected text with no explanations or changes to meaning. ` +
+            `Original: """${currentText}"""` }],
+        mode: 'ai',   // skips attachContext — no 15 000-char reference file prepended
+        apiKey: key,
+        responseFormat: 'text'
+    });
+}
+// 6+ words and from-scratch branches continue to the shared chat() call below
+// which does receive refText, systemContext, contextData, etc.
+```
+
+**Why this matters:** without the early return the shared call appends `systemContext` and lets `_directChat → attachContext()` prepend up to 15 000 characters of reference file to every spell-check request, making it as expensive as a full generation call.
+
+---
 
 ## Chatbot Building Patterns
 
