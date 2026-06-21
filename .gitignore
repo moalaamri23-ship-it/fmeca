@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+.claude/worktrees/
+check_braces.js
+parse2.cjs
 
 # Editor directories and files
 .vscode/*
