@@ -1,6 +1,7 @@
 import React, { useMemo, useState, useRef } from 'react';
 import ReactDOM from 'react-dom';
 import { Project, Subsystem, Failure, Mode } from '../types';
+import { combineControlsAndMitigation } from './MitigationBuilder';
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 const SYS_W = 320;
@@ -284,11 +285,12 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
       })() : (() => {
         const m = tooltip.data as Mode;
         const rpn = calcRpn(m);
+        const actions = combineControlsAndMitigation(m.currentControls, m.mitigation);
         return <>
           <div className="font-bold text-slate-800 text-sm mb-2 leading-snug">{m.mode}</div>
-          {m.effect     && <div className="text-xs text-red-500 font-bold mb-1 leading-snug">{m.effect}</div>}
-          {m.cause      && <div className="text-xs text-slate-500 italic mb-2 leading-snug">{m.cause}</div>}
-          {m.mitigation && <div className="text-xs bg-green-50 text-green-700 px-2 py-1.5 rounded border border-green-100 font-semibold mb-2 leading-snug">{m.mitigation}</div>}
+          {m.effect  && <div className="text-xs text-red-500 font-bold mb-1 leading-snug">{m.effect}</div>}
+          {m.cause   && <div className="text-xs text-slate-500 italic mb-2 leading-snug">{m.cause}</div>}
+          {actions   && <div className="text-xs bg-green-50 text-green-700 px-2 py-1.5 rounded border border-green-100 font-semibold mb-2 leading-snug whitespace-pre-line">{actions}</div>}
           {rpn          && <div className="text-xs text-slate-400">RPN: <span className="font-bold text-slate-600 text-sm">{rpn}</span></div>}
         </>;
       })()}
@@ -368,6 +370,7 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
             if (!ml) return null;
             const isSel = treeSelected === mode.id;
             const rpn = calcRpn(mode);
+            const actions = combineControlsAndMitigation(mode.currentControls, mode.mitigation);
             return (
               <div key={mode.id}
                 style={{ position:'absolute', left:ml.x, top:ml.y, width:FM_W, height:FM_H, zIndex:20 }}
@@ -381,7 +384,7 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
                 </div>
                 {mode.effect     && <div className="text-[10px] text-red-500 font-bold mb-1 leading-tight" style={clamp(1)}>{mode.effect}</div>}
                 {mode.cause      && <div className="text-[10px] text-slate-500 italic mb-1 leading-tight" style={clamp(1)}>{mode.cause}</div>}
-                {mode.mitigation && <div className="text-[10px] bg-green-50 text-green-700 px-2 py-1 rounded border border-green-100 font-bold leading-tight" style={clamp(2)}>{mode.mitigation}</div>}
+                {actions && <div className="text-[10px] bg-green-50 text-green-700 px-2 py-1 rounded border border-green-100 font-bold leading-tight whitespace-pre-line" style={clamp(2)}>{actions}</div>}
                 {rpn             && <div className="text-[10px] text-slate-400 mt-1">RPN: <span className="font-bold text-slate-600">{rpn}</span></div>}
               </div>
             );

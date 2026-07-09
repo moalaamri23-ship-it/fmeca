@@ -608,6 +608,7 @@ function rpnVal(m){
   return String(Number(vals[0])*Number(vals[1])*Number(vals[2]));
 }
 function esc(s){const d=document.createElement('div');d.textContent=String(s||'');return d.innerHTML;}
+function combineMit(m){const t=[m.currentControls,m.mitigation].filter(Boolean).join('\\n');if(!t)return '';return t.split('\\n').map(function(l){return l.trim()}).filter(Boolean).map(function(l){return l.replace(/^\\d+\\s*[-–.)]\\s*/,'')}).map(function(l,i){return (i+1)+'- '+l}).join('\\n');}
 let hoverTimer=null;
 let hideTimer=null;
 function startHover(e,type,data){
@@ -658,7 +659,8 @@ function showTip(r,type,data){
     h='<div style="font-weight:700;color:#1e293b;font-size:13px;margin-bottom:8px">'+esc(data.mode)+'</div>';
     if(data.effect)h+='<div style="font-size:11px;color:#ef4444;font-weight:700;margin-bottom:4px">'+esc(data.effect)+'</div>';
     if(data.cause)h+='<div style="font-size:11px;color:#64748b;font-style:italic;margin-bottom:4px">'+esc(data.cause)+'</div>';
-    if(data.mitigation)h+='<div style="font-size:11px;background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:4px 8px;border-radius:4px;font-weight:600;margin-bottom:6px">'+esc(data.mitigation)+'</div>';
+    const cm=combineMit(data);
+    if(cm)h+='<div style="font-size:11px;background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:4px 8px;border-radius:4px;font-weight:600;margin-bottom:6px;white-space:pre-line">'+esc(cm)+'</div>';
     const rv=rpnVal(data);if(rv)h+='<div style="font-size:11px;color:#94a3b8">RPN: <b style="color:#475569;font-size:13px">'+rv+'</b></div>';
   }
   tip.innerHTML=h;
@@ -731,13 +733,14 @@ function render(){
         const m=map[mode.id];if(!m)return;
         const mc=hln(fmBX,m.y+FM_H/2,m.x);if(mc)mel.appendChild(mc);
         const rv=rpnVal(mode);
+        const cm=combineMit(mode);
         // FM card — exact same classes as React app
         const mcard=mk('c bg-white border border-slate-200 border-l-[5px] border-l-red-500 rounded-lg p-2 shadow-sm',
           {left:m.x+'px',top:m.y+'px',width:FM_W+'px',height:FM_H+'px',zIndex:20},
           '<div class="font-bold text-slate-700 mb-1 leading-tight clamp2" style="font-size:11px">'+esc(mode.mode||'Unnamed')+'</div>'+
           (mode.effect?'<div class="font-bold mb-1 leading-tight clamp1" style="font-size:10px;color:#ef4444">'+esc(mode.effect)+'</div>':'')+
           (mode.cause?'<div class="italic mb-1 leading-tight clamp1" style="font-size:10px;color:#64748b">'+esc(mode.cause)+'</div>':'')+
-          (mode.mitigation?'<div class="font-bold leading-tight clamp2" style="font-size:10px;background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:3px 6px;border-radius:4px;margin-top:3px">'+esc(mode.mitigation)+'</div>':'')+
+          (cm?'<div class="font-bold leading-tight clamp2" style="font-size:10px;background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:3px 6px;border-radius:4px;margin-top:3px;white-space:pre-line">'+esc(cm)+'</div>':'')+
           (rv?'<div style="font-size:10px;color:#94a3b8;margin-top:4px">RPN: <span style="font-weight:700;color:#475569">'+rv+'</span></div>':''));
         mcard.addEventListener('mouseenter',e=>startHover(e,'fm',mode));
         mcard.addEventListener('mouseleave',endHover);

@@ -27,6 +27,13 @@ export const renumberActions = (text: string): string => {
     return lines.map((l, i) => `${i + 1}- ${l}`).join('\n');
 };
 
+// Merge Current Controls and Mitigation into one continuously numbered list:
+// controls first, then mitigations, renumbered sequentially.
+export const combineControlsAndMitigation = (currentControls?: string, mitigation?: string): string => {
+    const combined = [currentControls, mitigation].filter(Boolean).join('\n');
+    return combined ? renumberActions(combined) : '';
+};
+
 // Numbered action-list builder shared by the Mitigation and Current Controls
 // fields: "N- Action (Owner)" lines, auto-renumbered on insert and on blur.
 export const MitigationBuilder: React.FC<MitigationBuilderProps> = ({ value, onChange, label = 'Mitigation', placeholder = 'Mitigation...', apiKey, modelName, aiSourceMode, referenceFileText, contextData, aiProvider, azureEndpoint, systemContext, powerAutomateUrl }) => {
