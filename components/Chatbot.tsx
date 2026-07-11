@@ -46,7 +46,7 @@ interface Message {
 }
 // ===== System Prompts =====
 
-const SYSTEM_RAG_ON = `You are "FMECA Copilot", a senior Reliability / RCM consultant.
+const SYSTEM_RAG_ON = `You are "FMECA Copilot", a senior Reliability / FMECA consultant.
 Answer questions about the user's FMECA project using the RETRIEVED DATA provided below.
 
 SCOPE (hard rule):
@@ -250,7 +250,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelNa
 
     const initialMessages: Message[] = [{
         role: 'assistant',
-        content: "Hello! I am your RCM Consultant. I can help analyze your FMECA project, suggest improvements, or identify risks. How can I assist you today?"
+        content: "Hello! I am your FMECA Consultant. I can help analyze your FMECA project, suggest improvements, or identify risks. How can I assist you today?"
     }];
 
     const chatStorageKey = activeProject?.id ? `rcm_chatbot_msgs_${activeProject.id}` : 'rcm_chatbot_msgs';
@@ -335,7 +335,7 @@ export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelNa
     {
       role: 'assistant',
       content:
-        "Hello! I am your RCM Consultant. I can help analyze your FMECA project, suggest improvements, or identify risks. How can I assist you today?"
+        "Hello! I am your FMECA Consultant. I can help analyze your FMECA project, suggest improvements, or identify risks. How can I assist you today?"
     }
   ];
   setMessages(initial);
@@ -585,7 +585,7 @@ const apiMessages: AIMessage[] = [
                     transition-all duration-300 ease-out border-y border-l border-white/10
                     ${isDragging ? 'cursor-grabbing opacity-100 translate-x-0' : 'cursor-grab opacity-50 hover:opacity-100 translate-x-1/2 hover:translate-x-0'}
                     `}
-                    title="RCM Consultant"
+                    title="FMECA Consultant"
                     onClick={() => { if(!wasDraggingRef.current) setIsOpen(true); }}
                 >
                     <div className="mr-2"> {/* Offset icon slightly left because of half-circle shape */}
@@ -605,7 +605,7 @@ const apiMessages: AIMessage[] = [
                             <div className="flex items-center gap-2">
                                 <div className="p-1.5 bg-brand-600 rounded-lg"><Icon name="wand" className="w-4 h-4"/></div>
                                 <div>
-                                    <h3 className="font-bold text-sm">RCM Consultant</h3>
+                                    <h3 className="font-bold text-sm">FMECA Consultant</h3>
                                     <div className="text-[10px] text-slate-400 flex items-center gap-2">
   <span className={`w-1.5 h-1.5 rounded-full ${isRagEnabled ? "bg-green-500" : "bg-slate-400"}`}></span>
   <span>

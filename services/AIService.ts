@@ -287,7 +287,7 @@ export const AIService = {
                     .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: typeof m.content === 'string' ? m.content : '' }));
                 url = 'https://api.anthropic.com/v1/messages';
                 headers = { 'Content-Type': 'application/json', 'x-api-key': req.apiKey, 'anthropic-version': '2023-06-01' };
-                body = { model: (req.model && req.model.trim()) || 'claude-sonnet-4-20250514', max_tokens: 4096, system: sys() || 'You are a helpful RCM consultant.', messages: convMsgs, stream: true };
+                body = { model: (req.model && req.model.trim()) || 'claude-sonnet-4-20250514', max_tokens: 4096, system: sys() || 'You are a helpful FMECA consultant.', messages: convMsgs, stream: true };
             } else if (req.provider === 'gemini') {
                 parser = 'gemini';
                 const contents = req.messages
@@ -296,7 +296,7 @@ export const AIService = {
                 const model = (req.model && req.model.trim()) || 'gemini-2.0-flash';
                 url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${req.apiKey}`;
                 headers = { 'Content-Type': 'application/json' };
-                body = { contents, systemInstruction: { parts: [{ text: sys() || 'You are a helpful RCM consultant.' }] } };
+                body = { contents, systemInstruction: { parts: [{ text: sys() || 'You are a helpful FMECA consultant.' }] } };
             } else {
                 // openai | openrouter | azure — OpenAI-compatible SSE
                 parser = 'openai';
@@ -1732,7 +1732,7 @@ Output format:
                         .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: typeof m.content === 'string' ? m.content : '' }))
                     : [{ role: 'user', content: fullPrompt + (req.responseFormat === 'json' ? ' Return JSON object only.' : '') }];
                 const body: any = { model: (req.model && req.model.trim()) || 'claude-sonnet-4-20250514', max_tokens: 4096, messages: msgs };
-                if (req.feature === 'chatbot') body.system = systemText || "You are a helpful RCM consultant.";
+                if (req.feature === 'chatbot') body.system = systemText || "You are a helpful FMECA consultant.";
                 const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': req.apiKey, 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) });
                 const data = await res.json();
                 if (data.error) throw new Error(data.error.message || data.error.type || JSON.stringify(data.error));
@@ -1805,7 +1805,7 @@ Output format:
                     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${(req.model && req.model.trim()) || "gemini-1.5-flash"}:generateContent?key=${req.apiKey}`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ contents, systemInstruction: { parts: [{ text: systemText || "You are a helpful RCM consultant." }] } }) // Basic system instruction support
+                        body: JSON.stringify({ contents, systemInstruction: { parts: [{ text: systemText || "You are a helpful FMECA consultant." }] } }) // Basic system instruction support
                     });
                     const data = await res.json();
                     if (data.error) throw new Error(data.error.message);
