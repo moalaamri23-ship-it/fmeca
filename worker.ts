@@ -3,7 +3,13 @@ export default {
     const response = await env.ASSETS.fetch(request)
     const r = new Response(response.body, response)
     r.headers.delete('X-Frame-Options')
-    r.headers.set('Content-Security-Policy', "frame-ancestors *")
+    const isManual = new URL(request.url).pathname.startsWith('/manual/')
+    r.headers.set(
+      'Content-Security-Policy',
+      isManual
+        ? 'frame-ancestors https://relshell.moalaamri23.workers.dev'
+        : 'frame-ancestors *',
+    )
     return r
   },
 } satisfies ExportedHandler<{ ASSETS: Fetcher }>

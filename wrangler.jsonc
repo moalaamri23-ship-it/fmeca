@@ -9,7 +9,11 @@
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
+    // Run the Worker before static-asset serving for the manual so it emits a
+    // single clean `frame-ancestors` header (relshell only) and strips
+    // X-Frame-Options. Everything else is served straight from assets.
+    "run_worker_first": ["/manual/*", "/manual"]
   },
   "compatibility_flags": [
     "nodejs_compat"
