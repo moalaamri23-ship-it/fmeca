@@ -1,6 +1,14 @@
 /manual/*
   Content-Security-Policy: frame-ancestors https://relshell.moalaamri23.workers.dev
 
+/manual/index.html
+  Content-Type: text/html; charset=utf-8
+  Content-Disposition: attachment; filename="user-manual.html"
+
+/manual/manual.pdf
+  Content-Type: application/pdf
+  Content-Disposition: attachment; filename="user-manual.pdf"
+
 /*
   X-Frame-Options: ALLOWALL
   Content-Security-Policy: frame-ancestors *
