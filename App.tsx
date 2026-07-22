@@ -236,6 +236,27 @@ const collapseAllTree = () => {
 const tryIso=(x:any)=>{ try{ if(!x) return null; const d=new Date(x); return Number.isNaN(d.getTime())?null:d.toISOString(); }catch(e){ return null; } };
 const normalizeProjectDates=(sp:any)=>{ const now=nowIso(); const createdAt=sp.createdAt||sp.updatedAt||tryIso(sp.created)||tryIso(sp.updated)||now; const updatedAt=sp.updatedAt||tryIso(sp.updated)||createdAt; return { ...sp, createdAt, updatedAt }; };
 
+// Validates that parsed JSON is actually an FMECA project (guards against white-screen on wrong file)
+const isFmecaProject = (p: any): boolean =>
+    !!p && typeof p === 'object' && !Array.isArray(p) &&
+    typeof p.name === 'string' && Array.isArray(p.subsystems);
+
+// Merges multiple sanitized projects into one. Shared system name/context are kept;
+// if they differ across projects the dissimilar field is left empty. All subsystems combined.
+const mergeProjects = (projects: any[]): any => {
+    const names = projects.map(p => (p.name || '').trim());
+    const descs = projects.map(p => (p.desc || '').trim());
+    const allSameName = names.every(n => n === names[0]);
+    const allSameDesc = descs.every(d => d === descs[0]);
+    const subsystems: any[] = [];
+    projects.forEach(p => { if (Array.isArray(p.subsystems)) subsystems.push(...p.subsystems); });
+    return sanitizeProject({
+        name: allSameName ? names[0] : '',
+        desc: allSameDesc ? descs[0] : '',
+        subsystems,
+    });
+};
+
     /* ATTACHMENT STATE */
     const [storageProvider, setStorageProvider] = useState<LocalFileSystemProvider | null>(null);
     const [attachModal, setAttachModal] = useState<{ open: boolean, type: 'sub' | 'fail' | null, entity: any, sub: Subsystem | null }>({ open: false, type: null, entity: null, sub: null });
@@ -400,7 +421,42 @@ setProjects(
     const deleteProject = (id: string, e: React.MouseEvent) => { e.stopPropagation(); ask("Delete this project?",() => { setProjects(prev => prev.filter(p => p.id !== id)); }); };
 
     const exportJSON = () => { if(!activeProject) return; const p:any = normalizeProjectDates(activeProject); const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(p)); const a = document.createElement('a'); a.href = dataStr; a.download = `FMECA_${p.name}.json`; a.click(); };
-    const importJSON = (event: React.ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = (e) => { try { const imported:any = normalizeProjectDates(sanitizeProject(JSON.parse(e.target?.result as string))); imported.id = generateId(); setProjects([imported, ...projects]); } catch (err) { alert("Invalid File"); } }; reader.readAsText(file); };
+    const importJSON = async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const files = Array.from(event.target.files || []);
+        if (!files.length) return;
+        const input = event.target; // reset later so re-importing the same file(s) fires change
+        const readText = (file: File) => new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = e => resolve(e.target?.result as string);
+            reader.onerror = () => reject(new Error('read failed'));
+            reader.readAsText(file);
+        });
+        const valid: any[] = [];
+        const invalid: string[] = [];
+        for (const file of files) {
+            try {
+                const parsed = JSON.parse(await readText(file));
+                if (isFmecaProject(parsed)) valid.push(sanitizeProject(parsed));
+                else invalid.push(file.name);
+            } catch { invalid.push(file.name); }
+        }
+        input.value = '';
+        if (!valid.length) {
+            alert(`No valid FMECA project found.\n${invalid.join(', ')} ${invalid.length > 1 ? 'are' : 'is'} not an FMECA project file.`);
+            return;
+        }
+        // Merge when the user selected more than one project (Ctrl/Cmd + click)
+        const result: any = valid.length > 1 ? mergeProjects(valid) : valid[0];
+        const finalProject: any = normalizeProjectDates(result);
+        finalProject.id = generateId();
+        if (valid.length > 1) finalProject.name = finalProject.name || 'Merged Analysis';
+        setProjects([finalProject, ...projects]);
+        if (invalid.length) {
+            alert(`Imported ${valid.length} project${valid.length > 1 ? 's' : ''}.\nSkipped (not FMECA): ${invalid.join(', ')}`);
+        } else if (valid.length > 1) {
+            alert(`Merged ${valid.length} projects into "${finalProject.name}".`);
+        }
+    };
     const downloadTemplate = () => { const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify({ "System": [{ "fail": "Desc", "mode": "Mode", "effect": "Effect", "cause": "Root", "task": "Task" }] }, null, 2)); const a = document.createElement('a'); a.href = dataStr; a.download = 'Library_Template.json'; a.click(); };
     const importLibrary = (event: React.ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = (e) => { try { setLibrary(prev => ({...prev, ...JSON.parse(e.target?.result as string)})); alert("Updated!"); } catch (err) { alert("Invalid File"); } }; reader.readAsText(file); };
 
@@ -1320,7 +1376,7 @@ render();
                     <div className="max-w-5xl mx-auto w-full flex-1">
                         <div className="flex justify-between items-end mb-8">
                             <div><h1 className="text-3xl font-bold text-slate-900">FMECA Studio</h1><div className="mt-3 flex gap-2 text-xs"><button onClick={() => setDashboardTab('projects')} className={`px-3 py-1 rounded-full border font-semibold ` + (dashboardTab === 'projects' ? 'bg-slate-900 text-white border-slate-900' : 'bg-slate-100 text-slate-600 border-slate-300')}>Projects</button><button onClick={() => setDashboardTab('settings')} className={`px-3 py-1 rounded-full border font-semibold ` + (dashboardTab === 'settings' ? 'bg-slate-900 text-white border-slate-900' : 'bg-slate-100 text-slate-600 border-slate-300')}>Settings</button></div></div>
-                            {dashboardTab === 'projects' && (<div className="flex gap-2"><label className="bg-white border text-slate-600 px-4 py-2 rounded font-bold flex gap-2 cursor-pointer hover:bg-slate-50"><Icon name="upload" /> Import<input type="file" accept=".json" className="hidden" onChange={importJSON}/></label><button onClick={createProject} className="bg-slate-900 text-white px-4 py-2 rounded font-bold flex gap-2"><Icon name="plus" /> New</button></div>)}
+                            {dashboardTab === 'projects' && (<div className="flex gap-2"><label title="Select one file, or Ctrl/Cmd-click several to merge them into one project" className="bg-white border text-slate-600 px-4 py-2 rounded font-bold flex gap-2 cursor-pointer hover:bg-slate-50"><Icon name="upload" /> Import<input type="file" accept=".json" multiple className="hidden" onChange={importJSON}/></label><button onClick={createProject} className="bg-slate-900 text-white px-4 py-2 rounded font-bold flex gap-2"><Icon name="plus" /> New</button></div>)}
                         </div>
                         {dashboardTab === 'projects' ? (
                             <div className="grid md:grid-cols-3 gap-6 mb-12">
