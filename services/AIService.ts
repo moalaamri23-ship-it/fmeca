@@ -1,6 +1,7 @@
 import { ContextData } from '../types';
 import { RICH_LIBRARY } from '../constants';
 import { buildCopilotPrompt, parseCopilotReply, getCopilotSessionId } from './copilotHelper';
+import type { SystemMode } from './SystemModesService';
 
 /*
   -------------------------------------------------------------------------
@@ -115,6 +116,14 @@ const FAILURE_MODE_TECHNICAL_RULES = `Failure mode / cause / effect rules:
 - "cause": why the mode occurs; do not repeat the mode unless no deeper cause is available; do not write an effect or mitigation.
 - "effect": consequence after the mode occurs; preserve the required Local/End format; do not write a cause, control, or mitigation.`;
 
+const OPERATIONAL_HISTORY_GUIDANCE_RULES = `Operational failure history rules:
+- Treat component-scoped history as advisory occurrence evidence, never as an output template or naming authority.
+- Derive every Failure Mode from the current Functional Failure and subsystem function first.
+- Rewrite any useful historical concept into the required concise failed-state format; do not copy CMMS event wording.
+- Do not output Unknown, Review Required, No Fault Found, Non-Equipment Activity, replacement/repair actions, or maintenance activities as Failure Modes.
+- Do not generate a mode merely because it appears in history, and do not omit a credible mode merely because it is absent.
+- Existing FMECA hierarchy, field-separation, uniqueness, and wording rules override historical labels.`;
+
 const FAILURE_MODE_BARRIER_FILTER = `Failure-mode-specific barrier filter:
 - Use Functional Failure, Failure Mode, Cause, and Effect as hard anchors.
 - Keep only barriers that directly prevent the stated cause, detect the stated cause, detect the failure signature specific to this failure mode, or reduce/limit the stated effect.
@@ -216,9 +225,10 @@ export interface AIRequestPayload {
     apiKey: string;
 }
 
-type SystemModeRow = { mode: string; count: number };
+type SystemModeRow = Pick<SystemMode, 'component' | 'mode' | 'count'>;
 
 type SystemModeOccurrenceEvidence = {
+    component: string;
     mode: string;
     count: number;
     rank: number;
@@ -726,7 +736,7 @@ export const AIService = {
     findSystemModeOccurrenceEvidence(failureMode: string, cause: string, systemModes?: SystemModeRow[]): SystemModeOccurrenceEvidence | null {
         if (!Array.isArray(systemModes) || systemModes.length === 0) return null;
         const sorted = systemModes
-            .map(row => ({ mode: String(row?.mode || '').trim(), count: Number(row?.count) || 0 }))
+            .map(row => ({ component: String(row?.component || '').trim(), mode: String(row?.mode || '').trim(), count: Number(row?.count) || 0 }))
             .filter(row => row.mode)
             .sort((a, b) => b.count - a.count);
         if (!sorted.length) return null;
@@ -763,6 +773,7 @@ export const AIService = {
 
         if (!best) return null;
         return {
+            component: best.row.component,
             mode: best.row.mode,
             count: best.row.count,
             rank: best.rank,
@@ -883,7 +894,7 @@ Output contract:
 - Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
 - Never write the words "Existing control".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
-            const controlsContent = controlsPrompt + (systemContext ? '\n\n' + systemContext : '') + '\n\n' + controlsOutputContract;
+            const controlsContent = controlsPrompt + '\n\n' + controlsOutputContract;
             const controlsRes = await this.chat({
                 feature: 'field-generation',
                 provider: (aiProvider || inferProvider(key)) as any,
@@ -962,7 +973,7 @@ ${FAILURE_MODE_BARRIER_FILTER}
 ${ownerRules}
 ${formatRule}`;
             }
-            const mitigationContent = mitigationPrompt + (systemContext ? '\n\n' + systemContext : '') + '\n\n' + formatRule.replace('Output contract:', 'FINAL OUTPUT CONTRACT:');
+            const mitigationContent = mitigationPrompt + '\n\n' + formatRule.replace('Output contract:', 'FINAL OUTPUT CONTRACT:');
             const mitigationRes = await this.chat({
                 feature: 'field-generation',
                 provider: (aiProvider || inferProvider(key)) as any,
@@ -1095,7 +1106,9 @@ ${formatRule}`;
             }
         }
 
-        const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
+        const content = corePrompt + (isFailureModeField && systemContext
+            ? `\n\n${OPERATIONAL_HISTORY_GUIDANCE_RULES}\n\n${systemContext}`
+            : '');
 
         const generated = await this.chat({
             feature: 'field-generation',
@@ -1130,7 +1143,9 @@ ${formatRule}`;
             "specs": "string (Key: Value Unit, ...)"
         } ] }`;
 
-        const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
+        const content = corePrompt + (systemContext
+            ? '\n\nOperational component catalog may guide subsystem boundaries and names only. It must not create specifications or failure-mode wording.\n\n' + systemContext
+            : '');
 
         try {
             const res = await this.chat({
@@ -1177,7 +1192,9 @@ ${formatRule}`;
         Do NOT generate or include RPN/S/O/D values. RPN is scored later by the dedicated RPN scorer.
         Return JSON object: { "failures": [ { "desc": "string (Functional Failure)", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "currentControls": "string", "mitigation": "string" } ] } ] }${mitigationInstruction}`;
 
-        const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
+        const content = corePrompt + (systemContext
+            ? `\n\nApply operational history only to Task 3 Failure Mode selection; never use it to write Functional Failure text.\n${OPERATIONAL_HISTORY_GUIDANCE_RULES}\n\n${systemContext}`
+            : '');
 
         try {
             const res = await this.chat({
@@ -1221,7 +1238,9 @@ ${formatRule}`;
         Do NOT generate or include RPN/S/O/D values. RPN is scored later by the dedicated RPN scorer.
         Return JSON object: { "modes": [ { "mode": "string", "effect": "string", "cause": "string", "currentControls": "string", "mitigation": "string" } ] }${mitigationInstruction}`;
 
-        const content = corePrompt + (systemContext ? '\n\n' + systemContext : '');
+        const content = corePrompt + (systemContext
+            ? `\n\n${OPERATIONAL_HISTORY_GUIDANCE_RULES}\n\n${systemContext}`
+            : '');
 
         let lastErr: any;
         for (let attempt = 1; attempt <= MODE_ATTEMPTS; attempt++) {
@@ -1300,7 +1319,9 @@ Do NOT generate duplicate or closely similar failures. If two rows would produce
 
 Return ONLY strict JSON:
 { "failures": [ { "rowId": "same rowId from input", "desc": "Functional Failure", "sourceSnippet": "source snippet from row" } ] }`;
-        const content = prompt + (systemContext ? '\n\n' + systemContext : '');
+        // Functional Failure generation must remain independent from historical
+        // failed-state labels. Keep parameter for API compatibility.
+        const content = prompt;
         try {
             const parsed = await this._withRetry(async () => {
                 const res = await this.chat({
@@ -1377,7 +1398,9 @@ ${MODE_ACTION_FORMAT_RULES}
 
 Return ONLY strict JSON:
 { "failures": [ { "failureId": "same failureId from input", "modes": [ { "mode": "string", "effect": "string", "cause": "string", "currentControls": "string", "mitigation": "string" } ] } ] }`;
-        const content = prompt + (systemContext ? '\n\n' + systemContext : '');
+        const content = prompt + (systemContext
+            ? `\n\n${OPERATIONAL_HISTORY_GUIDANCE_RULES}\n\n${systemContext}`
+            : '');
         try {
             const parsed = await this._withRetry(async () => {
                 const res = await this.chat({
@@ -1466,6 +1489,7 @@ async evaluateRpnFromText(
   const systemModeBlock = systemModeEvidence
     ? `Operational Failure Data Match:
 - System Type: "${systemType || 'N/A'}"
+- Matched Component: "${systemModeEvidence.component || 'N/A'}"
 - Matched System Mode: "${systemModeEvidence.mode}"
 - Match Type: ${systemModeEvidence.matchType}
 - Failure Mode Count: ${systemModeEvidence.count}

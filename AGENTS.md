@@ -36,13 +36,14 @@ This is a fully client-side SPA — no backend. AI calls go directly from the br
   - `SmartInput.tsx` — AI-augmented input field with hover wand
   - `ModelSelector.tsx` — live model picker with search, tier groups, and favorites
   - `Chatbot.tsx` — floating RCM Consultant panel. RAG ON: calls `chatWithTools()` to select tools, `executeToolCall()` to fetch exact data, then `chat()` for the final answer. Falls back to JSON planner then keyword retrieval. RAG OFF: direct general-knowledge chat.
-  - `SystemModesModal.tsx` — System Modes feature: upload Excel failure data (mode + count), inject as ranked context block into every AI prompt when enabled
+  - `SystemModesModal.tsx` — System Modes feature: import Component + Failure Mode + Occurrences by heading and preview component-grouped operational history
   - `TreeNode.tsx` — tree visualization node
   - `AttachmentModal.tsx`, `SystemModesModal.tsx`, `MitigationBuilder.tsx`
 - **`services/AIService.ts`** — all AI calls (~820 lines); supports Gemini, OpenAI, Anthropic, Azure, OpenRouter. Key additions:
   - `chatWithTools(req, tools)` — sends tool definitions to OpenAI (`tools` param + `tool_calls` parsing) and Gemini (`function_declarations` + `functionCall` parsing); falls back to `chat()` for Anthropic/errors. Returns `ToolChatResult` (`type: 'text' | 'tool_calls'`).
   - Exported interfaces: `ToolDefinition`, `ToolCall`, `ToolChatResult`
   - `fetchModels(provider, apiKey)` — live model list fetching with `TieredModels` classification (Pro / Balanced / Efficient), cached 24h.
+- **`services/SystemModesService.ts`** — sanitizes and aggregates uploaded operational history, matches component groups to subsystem context, and builds catalog/scoped/chatbot prompt blocks
 - **`services/RAGService.ts`** — client-side RAG + tool execution engine for the chatbot. Key methods:
   - `buildRichIndex(project)` — two-level orientation index (subsystems + all FF descriptions)
   - `resolveSubsystem(name, project)` — fuzzy name matching (exact → contains → word-overlap)

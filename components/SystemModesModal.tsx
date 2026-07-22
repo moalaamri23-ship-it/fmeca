@@ -1,10 +1,13 @@
 import React, { useState, useRef } from 'react';
 import XLSX from 'xlsx-js-style';
-
-export interface SystemMode {
-    mode: string;
-    count: number;
-}
+import { Icon } from './Icon';
+import {
+    aggregateSystemModes,
+    groupSystemModes,
+    parseSystemModesRows,
+    type SystemMode,
+    type SystemModesImportSummary,
+} from '../services/SystemModesService';
 
 interface SystemModesModalProps {
     systemType: string;
@@ -26,7 +29,8 @@ export const SystemModesModal: React.FC<SystemModesModalProps> = ({
     onClose
 }) => {
     const [localType, setLocalType] = useState(initialSystemType);
-    const [localModes, setLocalModes] = useState<SystemMode[]>(initialModes);
+    const [localModes, setLocalModes] = useState<SystemMode[]>(() => aggregateSystemModes(initialModes).modes);
+    const [importSummary, setImportSummary] = useState<SystemModesImportSummary | null>(null);
     const [parseError, setParseError] = useState('');
     const fileRef = useRef<HTMLInputElement>(null);
 
@@ -40,37 +44,38 @@ export const SystemModesModal: React.FC<SystemModesModalProps> = ({
                 const data = new Uint8Array(ev.target!.result as ArrayBuffer);
                 const wb = XLSX.read(data, { type: 'array' });
                 const ws = wb.Sheets[wb.SheetNames[0]];
-                const rows: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as any[][];
-                // Skip header if first cell is text and second cell is not a number
-                const startRow = (rows.length > 0 && typeof rows[0][0] === 'string' && isNaN(Number(rows[0][1]))) ? 1 : 0;
-                const parsed: SystemMode[] = rows
-                    .slice(startRow)
-                    .filter((r) => r[0] && String(r[0]).trim())
-                    .map((r) => ({
-                        mode: String(r[0]).trim(),
-                        count: parseInt(String(r[1])) || 0
-                    }));
-                setLocalModes(parsed);
-            } catch {
-                setParseError('Failed to parse file. Ensure it is a valid Excel file with Failure Mode in Column 1 and Count in Column 2.');
+                const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as unknown[][];
+                const parsed = parseSystemModesRows(rows);
+                setLocalModes(parsed.modes);
+                setImportSummary(parsed.summary);
+                if (!parsed.modes.length) {
+                    setParseError('No valid rows found. Component and Failure Mode must be present, and Occurrences must be at least 1.');
+                }
+            } catch (error: any) {
+                setLocalModes([]);
+                setImportSummary(null);
+                setParseError(error?.message || 'Failed to parse the Excel file.');
             }
         };
         reader.readAsArrayBuffer(file);
         e.target.value = '';
     };
 
-    const sorted = [...localModes].sort((a, b) => b.count - a.count).slice(0, 20);
+    const grouped = groupSystemModes(localModes);
     const hasExistingData = initialModes.length > 0;
-    const canInsert = localType.trim().length > 0 || localModes.length > 0;
+    const canInsert = localModes.length > 0;
+    const skippedRows = importSummary
+        ? importSummary.skippedBlankComponent + importSummary.skippedBlankMode + importSummary.skippedInvalidOccurrences
+        : 0;
 
     return (
         <div className="fixed inset-0 z-[9999] bg-black/50 flex items-center justify-center" onClick={onClose}>
-            <div className="bg-white rounded-xl shadow-2xl w-[560px] max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="bg-white rounded-xl shadow-2xl w-[92vw] max-w-3xl max-h-[90vh] flex flex-col border border-slate-200" onClick={e => e.stopPropagation()}>
                 {/* Header */}
                 <div className="flex items-center justify-between px-5 py-4 border-b">
                     <div>
                         <h2 className="font-bold text-slate-800 text-base">System Modes</h2>
-                        <p className="text-xs text-slate-400 mt-0.5">Inject operational failure data as context into AI prompts</p>
+                        <p className="text-xs text-slate-400 mt-0.5">Route grouped operational history to matching FMECA subsystems</p>
                     </div>
                     <button onClick={onClose} className="text-slate-400 hover:text-slate-700 text-2xl leading-none w-8 h-8 flex items-center justify-center rounded hover:bg-slate-100">&times;</button>
                 </div>
@@ -85,7 +90,7 @@ export const SystemModesModal: React.FC<SystemModesModalProps> = ({
                             value={localType}
                             onChange={e => setLocalType(e.target.value)}
                             placeholder="e.g. Centrifugal Pump"
-                            className="w-full border border-slate-200 rounded px-3 py-2 text-sm outline-none focus:border-blue-500 transition"
+                            className="w-full border border-slate-200 rounded px-3 py-2 text-sm outline-none focus:border-brand-500 transition"
                         />
                     </div>
 
@@ -93,46 +98,72 @@ export const SystemModesModal: React.FC<SystemModesModalProps> = ({
                     <div>
                         <label className="block text-xs font-semibold text-slate-500 mb-1">Upload Failure Data (Excel)</label>
                         <p className="text-xs text-slate-400 mb-2">
-                            Column 1: Failure Mode &nbsp;&middot;&nbsp; Column 2: Failure Count (occurrences)
+                            Required headings: Component &nbsp;&middot;&nbsp; Failure Mode (Failed State) &nbsp;&middot;&nbsp; Occurrences
                         </p>
+                        <p className="text-[10px] text-slate-400 mb-2">Columns may appear in any order. Equipment and ISO 14224 Code are ignored.</p>
                         <label className="cursor-pointer inline-flex items-center gap-2 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold px-3 py-2 rounded border border-slate-200 transition">
-                            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
-                            </svg>
+                            <Icon name="upload" className="w-4 h-4" />
                             Choose Excel File
                             <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFile} />
                         </label>
                         {parseError && <p className="text-xs text-red-500 mt-1.5">{parseError}</p>}
                     </div>
 
-                    {/* Parsed Table */}
-                    {localModes.length > 0 && (
+                    {importSummary && (
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2">
+                                <div className="text-[10px] font-bold uppercase text-slate-400">Components</div>
+                                <div className="text-lg font-bold text-slate-800">{importSummary.componentGroups}</div>
+                            </div>
+                            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2">
+                                <div className="text-[10px] font-bold uppercase text-slate-400">Unique modes</div>
+                                <div className="text-lg font-bold text-slate-800">{importSummary.uniqueModes}</div>
+                            </div>
+                            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2">
+                                <div className="text-[10px] font-bold uppercase text-slate-400">Merged rows</div>
+                                <div className="text-lg font-bold text-slate-800">{importSummary.duplicateRows}</div>
+                            </div>
+                            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2">
+                                <div className="text-[10px] font-bold uppercase text-slate-400">Skipped rows</div>
+                                <div className={`text-lg font-bold ${skippedRows ? 'text-amber-600' : 'text-slate-800'}`}>{skippedRows}</div>
+                            </div>
+                        </div>
+                    )}
+
+                    {importSummary && skippedRows > 0 && (
+                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                            Excluded {importSummary.skippedBlankComponent} blank-component, {importSummary.skippedBlankMode} blank-mode, and {importSummary.skippedInvalidOccurrences} invalid-occurrence row(s).
+                        </p>
+                    )}
+
+                    {/* Component-grouped preview */}
+                    {grouped.length > 0 && (
                         <div>
                             <p className="text-xs font-semibold text-slate-500 mb-1.5">
-                                Parsed — {localModes.length} failure mode{localModes.length !== 1 ? 's' : ''} found
-                                {localModes.length > 20 && ' (showing top 20 by count)'}
+                                Component groups — {grouped.length} component{grouped.length !== 1 ? 's' : ''}, {localModes.length} unique failure mode{localModes.length !== 1 ? 's' : ''}
                             </p>
-                            <div className="border rounded-lg overflow-hidden">
-                                <div className="max-h-52 overflow-y-auto">
-                                    <table className="w-full text-xs">
-                                        <thead className="bg-slate-50 sticky top-0 z-10">
-                                            <tr>
-                                                <th className="text-left px-3 py-2 text-slate-500 font-semibold border-b w-8">#</th>
-                                                <th className="text-left px-3 py-2 text-slate-500 font-semibold border-b">Failure Mode</th>
-                                                <th className="text-right px-3 py-2 text-slate-500 font-semibold border-b w-20">Count</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {sorted.map((m, i) => (
-                                                <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
-                                                    <td className="px-3 py-1.5 text-slate-400">{i + 1}</td>
-                                                    <td className="px-3 py-1.5 text-slate-700">{m.mode}</td>
-                                                    <td className="px-3 py-1.5 text-slate-600 text-right font-mono">{m.count}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
+                            <div className="max-h-80 overflow-y-auto scroll-thin space-y-3 pr-1">
+                                {grouped.map(group => (
+                                    <div key={group.component} className="border border-slate-200 rounded-lg overflow-hidden">
+                                        <div className="flex items-center justify-between bg-slate-50 px-3 py-2 border-b border-slate-200">
+                                            <span className="text-xs font-bold text-slate-700">{group.component}</span>
+                                            <span className="text-[10px] font-mono text-slate-500">{group.totalOccurrences} occurrences · {group.modes.length} modes</span>
+                                        </div>
+                                        <table className="w-full text-xs">
+                                            <thead className="text-[10px] font-bold uppercase text-slate-400">
+                                                <tr><th className="text-left px-3 py-1.5">Failure Mode (Failed State)</th><th className="text-right px-3 py-1.5 w-24">Occurrences</th></tr>
+                                            </thead>
+                                            <tbody>
+                                                {group.modes.map((mode, index) => (
+                                                    <tr key={`${group.component}-${mode.mode}`} className={index % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
+                                                        <td className="px-3 py-1.5 text-slate-700">{mode.mode}</td>
+                                                        <td className="px-3 py-1.5 text-slate-600 text-right font-mono">{mode.count}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                ))}
                             </div>
                         </div>
                     )}
@@ -172,7 +203,7 @@ export const SystemModesModal: React.FC<SystemModesModalProps> = ({
                         <button
                             onClick={() => { onInsert(localType, localModes); onClose(); }}
                             disabled={!canInsert}
-                            className="text-xs px-4 py-1.5 rounded bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                            className="text-xs px-4 py-1.5 rounded bg-brand-600 text-white font-semibold hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
                         >
                             Insert
                         </button>
