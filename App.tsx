@@ -105,6 +105,7 @@ const App = () => {
     const [azureEndpoint, setAzureEndpoint] = useState('');
     const [powerAutomateUrl, setPowerAutomateUrl] = useState('');
     const [rcmRegisterUrl, setRcmRegisterUrl] = useState('');
+    const [rcmReaderUrl, setRcmReaderUrl] = useState('');
     const [engineerEmail, setEngineerEmail] = useState('');
     const [liveModels, setLiveModels] = useState<Record<string, TieredModels>>(() => {
         try { return JSON.parse(localStorage.getItem('fmeca_models_cache') || '{}'); } catch { return {}; }
@@ -299,6 +300,7 @@ setProjects(
     setAzureEndpoint(localStorage.getItem('rcm_azure_endpoint') || '');
     setPowerAutomateUrl(localStorage.getItem('rcm_power_automate_url') || '');
     setRcmRegisterUrl(localStorage.getItem('rcm_register_flow_url') || '');
+    setRcmReaderUrl(localStorage.getItem('rcm_reader_flow_url') || '');
     setEngineerEmail(localStorage.getItem('rcm_engineer_email') || '');
     setEnableChatbot(localStorage.getItem('rcm_enable_chatbot') !== 'false');
     const storedStyle = localStorage.getItem('rcm_chatbot_style');
@@ -384,6 +386,7 @@ setProjects(
         localStorage.setItem('rcm_azure_endpoint', azureEndpoint);
         localStorage.setItem('rcm_power_automate_url', powerAutomateUrl);
         localStorage.setItem('rcm_register_flow_url', rcmRegisterUrl);
+        localStorage.setItem('rcm_reader_flow_url', rcmReaderUrl);
         localStorage.setItem('rcm_engineer_email', engineerEmail);
         localStorage.setItem('rcm_enable_chatbot', String(enableChatbot));
         localStorage.setItem('rcm_chatbot_style', chatbotStyle);
@@ -396,7 +399,7 @@ setProjects(
         localStorage.setItem('rcm_system_type', systemType);
         localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
-    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, rcmRegisterUrl, engineerEmail, enableChatbot, chatbotStyle, agentWorkflow, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
+    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, rcmRegisterUrl, rcmReaderUrl, engineerEmail, enableChatbot, chatbotStyle, agentWorkflow, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
 
     const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic', 'openrouter'] as const;
     type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
@@ -440,7 +443,7 @@ setProjects(
      * study does not fill the dashboard with copies.
      */
     const openRegisterRow = async (row: RcmRegisterRow) => {
-        const parsed = await fetchRegisterProjectJson(rcmRegisterUrl, row.itemId);
+        const parsed = await fetchRegisterProjectJson(rcmReaderUrl, row.itemId);
         if (!isFmecaProject(parsed)) {
             throw new Error(`The attachment on ${row.rcmInternalNumber || `row #${row.itemId}`} is not an FMECA project file.`);
         }
@@ -1607,6 +1610,11 @@ render();
                                             <input type="password" value={rcmRegisterUrl} onChange={e => setRcmRegisterUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://prod-xx.westus.logic.azure.com/workflows/..."/>
                                         </div>
                                         <div>
+                                            <label className="block text-xs font-semibold text-slate-500 mb-1">SharePoint Reader flow URL</label>
+                                            <input type="password" value={rcmReaderUrl} onChange={e => setRcmReaderUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://...powerplatform.com/.../triggers/manual/paths/invoke?..."/>
+                                            <p className="text-xs text-slate-400 mt-1">Read-only flow used to browse the RCM list and load a study's FMECA attachment.</p>
+                                        </div>
+                                        <div>
                                             <label className="block text-xs font-semibold text-slate-500 mb-1">Default engineer email</label>
                                             <input type="text" value={engineerEmail} onChange={e => setEngineerEmail(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="name@company.com"/>
                                         </div>
@@ -2052,7 +2060,7 @@ render();
             )}
             {showNewProject && (
                 <NewProjectModal
-                    registerFlowUrl={rcmRegisterUrl}
+                    readerFlowUrl={rcmReaderUrl}
                     onPickLocal={() => { setShowNewProject(false); importInputRef.current?.click(); }}
                     onPickRegisterRow={openRegisterRow}
                     onCreateBlank={() => { setShowNewProject(false); createProject(); }}

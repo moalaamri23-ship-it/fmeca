@@ -47,6 +47,28 @@ export interface RcmRegisterRow {
     jsonFileName: string;
 }
 
+/**
+ * Where the register lives, for the generic SharePoint Reader flow. That flow is
+ * list-agnostic — it takes the site and list per request and returns raw SharePoint
+ * fields — so the app owns this mapping rather than the flow.
+ *
+ * Internal names come from the reader's own `schema` action; note the RCM internal
+ * number is stored in the built-in `Title` column, not a custom one.
+ */
+export const REGISTER_LIST = {
+    site: 'https://oxyinc.sharepoint.com/sites/AIProduction',
+    list: 'RCM List',
+    columns: {
+        rcmInternalNumber: 'Title',
+        system: 'System',
+        subSystems: 'Sub_x002d_Systems',
+        startDate: 'StartDate',
+        engineerName: 'EngineerName',   // Person column — needs $expand to read the email
+        status: 'Status',
+        summaryOfActions: 'SummaryofActions',
+    },
+} as const;
+
 export interface BuildRegisterPayloadOptions {
     engineerEmail: string;
     status: string;
@@ -249,12 +271,26 @@ export async function publishToRcmRegister(flowUrl: string, payload: RcmRegister
     return { rcmInternalNumber, itemId, itemLink: String(parsed?.itemLink ?? '') };
 }
 
+const C = REGISTER_LIST.columns;
+
+/** Columns the picker needs. The Person column only yields an email when expanded. */
+const REGISTER_SELECT = `ID,${C.rcmInternalNumber},${C.system},${C.status},${C.startDate},${C.engineerName}/Title,${C.engineerName}/EMail`;
+
 /**
- * Lists the register rows so the user can pick one to open. The flow may reply with a bare
- * array or wrap it as `{ items: [...] }` / `{ value: [...] }` (the shape "Get items" returns).
+ * Lists the register rows so the user can pick one to open. The reader replies with raw
+ * SharePoint fields under `{ items: [...] }`; a bare array or `{ value: [...] }` is accepted
+ * too, since that is what a "Get items" style flow returns.
  */
-export async function listRegisterProjects(flowUrl: string): Promise<RcmRegisterRow[]> {
-    const parsed = await postToFlow(flowUrl, { action: 'list' });
+export async function listRegisterProjects(readerUrl: string): Promise<RcmRegisterRow[]> {
+    const parsed = await postToFlow(readerUrl, {
+        action: 'list',
+        site: REGISTER_LIST.site,
+        list: REGISTER_LIST.list,
+        select: REGISTER_SELECT,
+        expand: C.engineerName,
+        orderBy: 'ID desc',
+        top: 500,
+    });
     const rows = Array.isArray(parsed) ? parsed
         : Array.isArray(parsed?.items) ? parsed.items
         : Array.isArray(parsed?.value) ? parsed.value
@@ -263,15 +299,18 @@ export async function listRegisterProjects(flowUrl: string): Promise<RcmRegister
         throw new Error(`RCM Register error: expected a list of rows. Raw response: ${JSON.stringify(parsed)}`);
     }
     return rows
-        .map((row: any): RcmRegisterRow => ({
-            itemId: Number(row?.itemId ?? row?.ID ?? row?.Id),
-            rcmInternalNumber: String(row?.rcmInternalNumber ?? '').trim(),
-            system: String(row?.system ?? '').trim(),
-            status: String(row?.status ?? '').trim(),
-            engineerName: String(row?.engineerName ?? '').trim(),
-            startDate: String(row?.startDate ?? '').trim(),
-            jsonFileName: String(row?.jsonFileName ?? '').trim(),
-        }))
+        .map((row: any): RcmRegisterRow => {
+            const person = row?.[C.engineerName];
+            return {
+                itemId: Number(row?.ID ?? row?.Id ?? row?.itemId),
+                rcmInternalNumber: String(row?.[C.rcmInternalNumber] ?? '').trim(),
+                system: String(row?.[C.system] ?? '').trim(),
+                status: String(row?.[C.status] ?? '').trim(),
+                engineerName: String(person?.EMail || person?.Title || '').trim(),
+                startDate: String(row?.[C.startDate] ?? '').trim(),
+                jsonFileName: '',
+            };
+        })
         .filter(row => Number.isFinite(row.itemId));
 }
 
@@ -288,9 +327,17 @@ export function fromBase64Utf8(base64: string): string {
  * Validation that the parsed object really is an FMECA project stays with the caller, which
  * already owns that guard for file imports.
  */
-export async function fetchRegisterProjectJson(flowUrl: string, itemId: number): Promise<any> {
-    const parsed = await postToFlow(flowUrl, { action: 'fetch', itemId });
-    const base64 = String(parsed?.fileContentBase64 ?? '').trim();
+export async function fetchRegisterProjectJson(readerUrl: string, itemId: number): Promise<any> {
+    const parsed = await postToFlow(readerUrl, {
+        action: 'fetch',
+        site: REGISTER_LIST.site,
+        list: REGISTER_LIST.list,
+        itemId,
+        // Publishing attaches both the workbook and the project JSON; match on the suffix so
+        // the reader picks the right one without the app knowing the exact file name.
+        fileNameEndsWith: '.json',
+    });
+    const base64 = String(parsed?.contentBase64 ?? parsed?.fileContentBase64 ?? '').trim();
     if (!base64) {
         throw new Error(`RCM Register error: row ${itemId} returned no FMECA JSON attachment. Raw response: ${JSON.stringify(parsed)}`);
     }
