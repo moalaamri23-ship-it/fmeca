@@ -1,8 +1,14 @@
 import { Project } from '../types';
 import { normalizeProjectDates, rpnTotal, tryIso } from './ProjectUtils';
 
-// TODO: replace with the exact Choice values from the SharePoint list.
-export const RCM_STATUS_OPTIONS = ['Draft', 'In Progress', 'Under Review', 'Completed'];
+// Must match the Status Choice values on the SharePoint RCM Register list exactly.
+export const RCM_STATUS_OPTIONS = [
+    'Data Gathering',
+    'FMECA',
+    'Consequence Classification',
+    'RCM Report Drafting',
+    'Attached Report',
+];
 
 const SUMMARY_MAX_CHARS = 2000;
 const TRUNCATION_SUFFIX = '…(truncated)';
