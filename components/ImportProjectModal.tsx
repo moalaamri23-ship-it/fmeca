@@ -2,14 +2,13 @@ import React, { useEffect, useState } from 'react';
 import { Icon } from './Icon';
 import { listRegisterProjects, type RcmRegisterRow } from '../services/RcmRegisterService';
 
-interface NewProjectModalProps {
+interface ImportProjectModalProps {
     /** Empty when the reader flow URL is not configured — the SharePoint option is then disabled. */
     readerFlowUrl: string;
     /** Opens the existing file picker (same handler as the Import button). */
     onPickLocal: () => void;
     /** Loads the FMECA JSON attached to the chosen register row. */
     onPickRegisterRow: (row: RcmRegisterRow) => Promise<void>;
-    onCreateBlank: () => void;
     onClose: () => void;
 }
 
@@ -19,11 +18,10 @@ const fmtDate = (iso: string) => {
     return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString();
 };
 
-export const NewProjectModal: React.FC<NewProjectModalProps> = ({
+export const ImportProjectModal: React.FC<ImportProjectModalProps> = ({
     readerFlowUrl,
     onPickLocal,
     onPickRegisterRow,
-    onCreateBlank,
     onClose
 }) => {
     const [source, setSource] = useState<'choose' | 'sharepoint'>('choose');
@@ -70,11 +68,11 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                 <div className="flex items-center justify-between px-5 py-4 border-b">
                     <div>
                         <h2 className="font-bold text-slate-800 text-base">
-                            {source === 'choose' ? 'New Project' : 'Open from SharePoint RCM List'}
+                            {source === 'choose' ? 'Import Project' : 'Open from SharePoint RCM List'}
                         </h2>
                         <p className="text-xs text-slate-400 mt-0.5">
                             {source === 'choose'
-                                ? 'Choose where this analysis comes from'
+                                ? 'Choose where the analysis you are importing comes from'
                                 : 'Pick a registered study — its FMECA JSON attachment is loaded into the app'}
                         </p>
                     </div>
@@ -84,34 +82,29 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                 {/* Body */}
                 <div className="overflow-y-auto flex-1 p-5">
                     {source === 'choose' ? (
-                        <>
-                            <div className="grid sm:grid-cols-2 gap-4">
-                                <button
-                                    onClick={() => { if (readerFlowUrl.trim()) setSource('sharepoint'); }}
-                                    disabled={!readerFlowUrl.trim()}
-                                    className="text-left rounded-lg border border-slate-200 p-4 hover:border-brand-500 hover:bg-brand-50/40 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-200 disabled:hover:bg-transparent"
-                                >
-                                    <div className="text-brand-600 mb-2"><Icon name="table" className="w-6 h-6" /></div>
-                                    <div className="font-bold text-sm text-slate-800">SharePoint RCM List</div>
-                                    <p className="text-xs text-slate-500 mt-1">
-                                        {readerFlowUrl.trim()
-                                            ? 'Browse registered studies by RCM internal number and load the attached FMECA.'
-                                            : 'Set the SharePoint Reader flow URL in Settings to enable this.'}
-                                    </p>
-                                </button>
-                                <button
-                                    onClick={onPickLocal}
-                                    className="text-left rounded-lg border border-slate-200 p-4 hover:border-brand-500 hover:bg-brand-50/40 transition"
-                                >
-                                    <div className="text-brand-600 mb-2"><Icon name="folder" className="w-6 h-6" /></div>
-                                    <div className="font-bold text-sm text-slate-800">Local FMECA Project</div>
-                                    <p className="text-xs text-slate-500 mt-1">Open one or more exported FMECA JSON files from this computer.</p>
-                                </button>
-                            </div>
-                            <button onClick={onCreateBlank} className="mt-4 text-xs font-semibold text-slate-500 hover:text-brand-600 underline">
-                                Or start from scratch with a blank analysis
+                        <div className="grid sm:grid-cols-2 gap-4">
+                            <button
+                                onClick={() => { if (readerFlowUrl.trim()) setSource('sharepoint'); }}
+                                disabled={!readerFlowUrl.trim()}
+                                className="text-left rounded-lg border border-slate-200 p-4 hover:border-brand-500 hover:bg-brand-50/40 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-200 disabled:hover:bg-transparent"
+                            >
+                                <div className="text-brand-600 mb-2"><Icon name="table" className="w-6 h-6" /></div>
+                                <div className="font-bold text-sm text-slate-800">SharePoint RCM List</div>
+                                <p className="text-xs text-slate-500 mt-1">
+                                    {readerFlowUrl.trim()
+                                        ? 'Browse registered studies by RCM internal number and load the attached FMECA.'
+                                        : 'Set the SharePoint Reader flow URL in Settings to enable this.'}
+                                </p>
                             </button>
-                        </>
+                            <button
+                                onClick={onPickLocal}
+                                className="text-left rounded-lg border border-slate-200 p-4 hover:border-brand-500 hover:bg-brand-50/40 transition"
+                            >
+                                <div className="text-brand-600 mb-2"><Icon name="folder" className="w-6 h-6" /></div>
+                                <div className="font-bold text-sm text-slate-800">Local FMECA Project</div>
+                                <p className="text-xs text-slate-500 mt-1">Open one or more exported FMECA JSON files from this computer.</p>
+                            </button>
+                        </div>
                     ) : (
                         <>
                             {loading && <div className="text-sm text-slate-400 py-8 text-center">Loading register…</div>}
