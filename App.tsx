@@ -16,7 +16,7 @@ import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch } from './types';
 import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
 import { RcmRegisterModal, type RcmRegisterSubmit } from './components/RcmRegisterModal';
-import { NewProjectModal } from './components/NewProjectModal';
+import { ImportProjectModal } from './components/ImportProjectModal';
 import { hasCompleteRpn, normalizeProjectDates, nowIso, rpnTotal } from './services/ProjectUtils';
 import { buildActionsInput, buildProjectJsonBase64, buildRegisterPayload, buildSummaryPrompt, fetchRegisterProjectJson, publishToRcmRegister, type RcmRegisterRow } from './services/RcmRegisterService';
 import {
@@ -433,8 +433,9 @@ setProjects(
 
     const createProject=()=>{ const now=nowIso(); const p:any={id:generateId(),name:"New Analysis",desc:"",createdAt:now,updatedAt:now,subsystems:[]}; setProjects([p,...projects]); setActiveProject(p); setView('editor'); };
 
-    /* NEW PROJECT SOURCE PICKER — local JSON file vs a row in the SharePoint RCM register */
-    const [showNewProject, setShowNewProject] = useState(false);
+    /* IMPORT SOURCE PICKER — local JSON file(s) vs a row in the SharePoint RCM register.
+       "New" stays a one-click blank analysis; only importing asks where the data comes from. */
+    const [showImportPicker, setShowImportPicker] = useState(false);
     const importInputRef = useRef<HTMLInputElement>(null);
 
     /**
@@ -462,7 +463,7 @@ setProjects(
         };
         setProjects(prev => existing ? prev.map(p => p.id === loaded.id ? loaded : p) : [loaded, ...prev]);
         setActiveProject(loaded);
-        setShowNewProject(false);
+        setShowImportPicker(false);
         setView('editor');
     };
     const closeEditor = () => { if(activeProject) setProjects(projects.map(p => p.id === activeProject.id ? activeProject : p)); setView('dashboard'); setActiveProject(null); };
@@ -1503,7 +1504,7 @@ render();
                     <div className="max-w-5xl mx-auto w-full flex-1">
                         <div className="flex justify-between items-end mb-8">
                             <div><h1 className="text-3xl font-bold text-slate-900">FMECA Studio</h1><div className="mt-3 flex gap-2 text-xs"><button onClick={() => setDashboardTab('projects')} className={`px-3 py-1 rounded-full border font-semibold ` + (dashboardTab === 'projects' ? 'bg-slate-900 text-white border-slate-900' : 'bg-slate-100 text-slate-600 border-slate-300')}>Projects</button><button onClick={() => setDashboardTab('settings')} className={`px-3 py-1 rounded-full border font-semibold ` + (dashboardTab === 'settings' ? 'bg-slate-900 text-white border-slate-900' : 'bg-slate-100 text-slate-600 border-slate-300')}>Settings</button></div></div>
-                            {dashboardTab === 'projects' && (<div className="flex gap-2"><label title="Select one file, or Ctrl/Cmd-click several to merge them into one project" className="bg-white border text-slate-600 px-4 py-2 rounded font-bold flex gap-2 cursor-pointer hover:bg-slate-50"><Icon name="upload" /> Import<input ref={importInputRef} type="file" accept=".json" multiple className="hidden" onChange={importJSON}/></label><button onClick={() => setShowNewProject(true)} className="bg-slate-900 text-white px-4 py-2 rounded font-bold flex gap-2"><Icon name="plus" /> New</button></div>)}
+                            {dashboardTab === 'projects' && (<div className="flex gap-2"><button onClick={() => setShowImportPicker(true)} className="bg-white border text-slate-600 px-4 py-2 rounded font-bold flex gap-2 hover:bg-slate-50"><Icon name="upload" /> Import</button><button onClick={createProject} className="bg-slate-900 text-white px-4 py-2 rounded font-bold flex gap-2"><Icon name="plus" /> New</button><input ref={importInputRef} type="file" accept=".json" multiple className="hidden" onChange={importJSON}/></div>)}
                         </div>
                         {dashboardTab === 'projects' ? (
                             <div className="grid md:grid-cols-3 gap-6 mb-12">
@@ -2058,13 +2059,12 @@ render();
                     onClose={() => setShowSystemModes(false)}
                 />
             )}
-            {showNewProject && (
-                <NewProjectModal
+            {showImportPicker && (
+                <ImportProjectModal
                     readerFlowUrl={rcmReaderUrl}
-                    onPickLocal={() => { setShowNewProject(false); importInputRef.current?.click(); }}
+                    onPickLocal={() => { setShowImportPicker(false); importInputRef.current?.click(); }}
                     onPickRegisterRow={openRegisterRow}
-                    onCreateBlank={() => { setShowNewProject(false); createProject(); }}
-                    onClose={() => setShowNewProject(false)}
+                    onClose={() => setShowImportPicker(false)}
                 />
             )}
             {showRegisterModal && activeProject && registerAttachment && (
