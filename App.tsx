@@ -16,8 +16,9 @@ import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch } from './types';
 import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
 import { RcmRegisterModal, type RcmRegisterSubmit } from './components/RcmRegisterModal';
+import { NewProjectModal } from './components/NewProjectModal';
 import { hasCompleteRpn, normalizeProjectDates, nowIso, rpnTotal } from './services/ProjectUtils';
-import { buildActionsInput, buildProjectJsonBase64, buildRegisterPayload, buildSummaryPrompt, publishToRcmRegister } from './services/RcmRegisterService';
+import { buildActionsInput, buildProjectJsonBase64, buildRegisterPayload, buildSummaryPrompt, fetchRegisterProjectJson, publishToRcmRegister, type RcmRegisterRow } from './services/RcmRegisterService';
 import {
     buildComponentCatalogContext,
     buildFullSystemModesContext,
@@ -428,6 +429,39 @@ setProjects(
     }, [aiProvider, apiKey]);
 
     const createProject=()=>{ const now=nowIso(); const p:any={id:generateId(),name:"New Analysis",desc:"",createdAt:now,updatedAt:now,subsystems:[]}; setProjects([p,...projects]); setActiveProject(p); setView('editor'); };
+
+    /* NEW PROJECT SOURCE PICKER — local JSON file vs a row in the SharePoint RCM register */
+    const [showNewProject, setShowNewProject] = useState(false);
+    const importInputRef = useRef<HTMLInputElement>(null);
+
+    /**
+     * Opens a registered study: pulls the FMECA JSON attached to the row through the flow.
+     * A row already open locally is reused instead of duplicated, so re-opening the same
+     * study does not fill the dashboard with copies.
+     */
+    const openRegisterRow = async (row: RcmRegisterRow) => {
+        const parsed = await fetchRegisterProjectJson(rcmRegisterUrl, row.itemId);
+        if (!isFmecaProject(parsed)) {
+            throw new Error(`The attachment on ${row.rcmInternalNumber || `row #${row.itemId}`} is not an FMECA project file.`);
+        }
+        const existing = projects.find(p => (p as any).rcmRegister?.itemId === row.itemId);
+        const loaded: any = normalizeProjectDates(sanitizeProject(parsed));
+        loaded.id = existing?.id || generateId();
+        // Keep the register link on the project so the Register button shows the number and
+        // re-publishing from this copy is traceable back to the row it came from.
+        loaded.rcmRegister = {
+            ...(existing as any)?.rcmRegister,
+            rcmInternalNumber: row.rcmInternalNumber,
+            itemId: row.itemId,
+            itemLink: (existing as any)?.rcmRegister?.itemLink || '',
+            publishedAt: (existing as any)?.rcmRegister?.publishedAt || nowIso(),
+            status: row.status || (existing as any)?.rcmRegister?.status || '',
+        };
+        setProjects(prev => existing ? prev.map(p => p.id === loaded.id ? loaded : p) : [loaded, ...prev]);
+        setActiveProject(loaded);
+        setShowNewProject(false);
+        setView('editor');
+    };
     const closeEditor = () => { if(activeProject) setProjects(projects.map(p => p.id === activeProject.id ? activeProject : p)); setView('dashboard'); setActiveProject(null); };
     const deleteProject = (id: string, e: React.MouseEvent) => { e.stopPropagation(); ask("Delete this project?",() => { setProjects(prev => prev.filter(p => p.id !== id)); }); };
 
@@ -1466,7 +1500,7 @@ render();
                     <div className="max-w-5xl mx-auto w-full flex-1">
                         <div className="flex justify-between items-end mb-8">
                             <div><h1 className="text-3xl font-bold text-slate-900">FMECA Studio</h1><div className="mt-3 flex gap-2 text-xs"><button onClick={() => setDashboardTab('projects')} className={`px-3 py-1 rounded-full border font-semibold ` + (dashboardTab === 'projects' ? 'bg-slate-900 text-white border-slate-900' : 'bg-slate-100 text-slate-600 border-slate-300')}>Projects</button><button onClick={() => setDashboardTab('settings')} className={`px-3 py-1 rounded-full border font-semibold ` + (dashboardTab === 'settings' ? 'bg-slate-900 text-white border-slate-900' : 'bg-slate-100 text-slate-600 border-slate-300')}>Settings</button></div></div>
-                            {dashboardTab === 'projects' && (<div className="flex gap-2"><label title="Select one file, or Ctrl/Cmd-click several to merge them into one project" className="bg-white border text-slate-600 px-4 py-2 rounded font-bold flex gap-2 cursor-pointer hover:bg-slate-50"><Icon name="upload" /> Import<input type="file" accept=".json" multiple className="hidden" onChange={importJSON}/></label><button onClick={createProject} className="bg-slate-900 text-white px-4 py-2 rounded font-bold flex gap-2"><Icon name="plus" /> New</button></div>)}
+                            {dashboardTab === 'projects' && (<div className="flex gap-2"><label title="Select one file, or Ctrl/Cmd-click several to merge them into one project" className="bg-white border text-slate-600 px-4 py-2 rounded font-bold flex gap-2 cursor-pointer hover:bg-slate-50"><Icon name="upload" /> Import<input ref={importInputRef} type="file" accept=".json" multiple className="hidden" onChange={importJSON}/></label><button onClick={() => setShowNewProject(true)} className="bg-slate-900 text-white px-4 py-2 rounded font-bold flex gap-2"><Icon name="plus" /> New</button></div>)}
                         </div>
                         {dashboardTab === 'projects' ? (
                             <div className="grid md:grid-cols-3 gap-6 mb-12">
@@ -2014,6 +2048,15 @@ render();
                     onClear={() => { setSystemType(''); setSystemModes([]); setSystemContextEnabled(true); }}
                     onToggle={() => setSystemContextEnabled(e => !e)}
                     onClose={() => setShowSystemModes(false)}
+                />
+            )}
+            {showNewProject && (
+                <NewProjectModal
+                    registerFlowUrl={rcmRegisterUrl}
+                    onPickLocal={() => { setShowNewProject(false); importInputRef.current?.click(); }}
+                    onPickRegisterRow={openRegisterRow}
+                    onCreateBlank={() => { setShowNewProject(false); createProject(); }}
+                    onClose={() => setShowNewProject(false)}
                 />
             )}
             {showRegisterModal && activeProject && registerAttachment && (
