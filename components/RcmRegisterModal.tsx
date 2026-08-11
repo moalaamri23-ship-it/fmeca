@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Project } from '../types';
+import { Icon } from './Icon';
 import {
     RCM_STATUS_OPTIONS,
-    buildSubSystemsList,
     buildSummaryOfActions,
     projectStartDateInput,
+    subSystemNames,
     type RcmRegisterResult,
 } from '../services/RcmRegisterService';
 
@@ -20,6 +21,8 @@ interface RcmRegisterModalProps {
     defaultEngineerEmail: string;
     attachments: { fileName: string; sizeBytes: number }[];
     onPublish: (values: RcmRegisterSubmit) => Promise<RcmRegisterResult>;
+    /** Rewrites the rollup into a CONTINUE / IMPLEMENT summary. Throws on AI failure. */
+    onGenerateSummary: () => Promise<string>;
     onClose: () => void;
 }
 
@@ -32,6 +35,7 @@ export const RcmRegisterModal: React.FC<RcmRegisterModalProps> = ({
     defaultEngineerEmail,
     attachments,
     onPublish,
+    onGenerateSummary,
     onClose
 }) => {
     const [engineerEmail, setEngineerEmail] = useState(defaultEngineerEmail);
@@ -42,8 +46,31 @@ export const RcmRegisterModal: React.FC<RcmRegisterModalProps> = ({
     const [result, setResult] = useState<RcmRegisterResult | null>(null);
     const [error, setError] = useState('');
     const [fieldErrors, setFieldErrors] = useState<{ engineerEmail?: string; status?: string; summary?: string }>({});
+    const [summarising, setSummarising] = useState(false);
+    const [summaryNote, setSummaryNote] = useState('');
 
-    const subSystems = buildSubSystemsList(project).split('\n').filter(Boolean);
+    const subSystems = subSystemNames(project);
+
+    const runSummary = async () => {
+        setSummarising(true);
+        setSummaryNote('');
+        try {
+            setSummary(await onGenerateSummary());
+        } catch (e: any) {
+            // Keep the plain rollup that is already in the box — it is still publishable.
+            setSummaryNote(e?.message || String(e));
+        } finally {
+            setSummarising(false);
+        }
+    };
+
+    // Draft once on open; the engineer can edit the result or regenerate it.
+    const autoRan = useRef(false);
+    useEffect(() => {
+        if (autoRan.current) return;
+        autoRan.current = true;
+        runSummary();
+    }, []);
 
     const submit = async () => {
         const errs: typeof fieldErrors = {};
@@ -157,14 +184,26 @@ export const RcmRegisterModal: React.FC<RcmRegisterModalProps> = ({
                             </div>
 
                             <div>
-                                <label className="block text-xs font-semibold text-slate-500 mb-1">Summary of actions</label>
+                                <div className="flex items-center justify-between mb-1">
+                                    <label className="block text-xs font-semibold text-slate-500">Summary of actions</label>
+                                    <button
+                                        onClick={runSummary}
+                                        disabled={summarising}
+                                        className="flex items-center gap-1 text-xs font-bold text-brand-600 hover:text-brand-700 disabled:text-slate-300 disabled:cursor-not-allowed transition"
+                                    >
+                                        <Icon name="wand" className="w-3.5 h-3.5" />
+                                        {summarising ? 'Writing...' : 'Rewrite with AI'}
+                                    </button>
+                                </div>
                                 <textarea
-                                    value={summary}
+                                    value={summarising ? 'Writing summary...' : summary}
                                     onChange={e => setSummary(e.target.value)}
-                                    rows={7}
-                                    className="w-full border border-slate-200 rounded px-3 py-2 text-sm outline-none focus:border-brand-500 min-h-[50px]"
+                                    readOnly={summarising}
+                                    rows={10}
+                                    className={`w-full border border-slate-200 rounded px-3 py-2 text-sm outline-none focus:border-brand-500 min-h-[50px] ${summarising ? 'text-slate-400 animate-pulse' : ''}`}
                                 />
-                                <p className="text-[10px] text-slate-400 mt-1">{summary.length} / 2000 characters — rolled up from mitigations, highest RPN first.</p>
+                                <p className="text-[10px] text-slate-400 mt-1">{summary.length} characters — AI splits existing controls (continue) from mitigations (implement).</p>
+                                {summaryNote && <p className="text-xs text-amber-700 mt-1">AI summary unavailable, using the plain rollup. {summaryNote}</p>}
                                 {fieldErrors.summary && <p className="text-xs text-red-500 mt-1">{fieldErrors.summary}</p>}
                             </div>
 
@@ -188,7 +227,7 @@ export const RcmRegisterModal: React.FC<RcmRegisterModalProps> = ({
                     {!result && (
                         <button
                             onClick={submit}
-                            disabled={publishing}
+                            disabled={publishing || summarising}
                             className="text-xs px-4 py-1.5 rounded bg-brand-600 text-white font-semibold hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
                         >
                             {publishing ? 'Publishing...' : 'Publish'}

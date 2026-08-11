@@ -10,7 +10,9 @@ export const RCM_STATUS_OPTIONS = [
     'Attached Report',
 ];
 
-const SUMMARY_MAX_CHARS = 2000;
+// SharePoint's "Multiple lines of text" (plain text, no append) holds 63,999 characters.
+// Stay just under it — the earlier 2,000 cap was ours, not the list's, and truncated summaries.
+const SUMMARY_MAX_CHARS = 60000;
 const TRUNCATION_SUFFIX = '…(truncated)';
 
 export interface RcmRegisterPayload {
@@ -55,7 +57,7 @@ export function projectStartDateInput(project: Project): string {
 }
 
 /** Sub-system names, deduped, blanks dropped, source order preserved. */
-export function buildSubSystemsList(project: Project): string {
+export function subSystemNames(project: Project): string[] {
     const seen = new Set<string>();
     const names: string[] = [];
     (project.subsystems || []).forEach(s => {
@@ -64,7 +66,12 @@ export function buildSubSystemsList(project: Project): string {
         seen.add(name);
         names.push(name);
     });
-    return names.join('\n');
+    return names;
+}
+
+/** Numbered one per line — "1- Pump Assembly" — as the register list expects. */
+export function buildSubSystemsList(project: Project): string {
+    return subSystemNames(project).map((name, i) => `${i + 1}- ${name}`).join('\n');
 }
 
 /** Rollup of every mode mitigation across the project, ordered by descending RPN total. */
@@ -84,6 +91,69 @@ export function buildSummaryOfActions(project: Project): string {
     });
     const ordered = [...best.entries()].sort((a, b) => b[1] - a[1]).map(([text]) => text);
     return capText(ordered.join('\n'), SUMMARY_MAX_CHARS);
+}
+
+/**
+ * Flattened controls/mitigations, highest RPN first — the input the AI summarizes.
+ * Modes with neither a control nor a mitigation carry no action, so they are dropped.
+ */
+export function buildActionsInput(project: Project): string {
+    const rows: { score: number; text: string }[] = [];
+    (project.subsystems || []).forEach(sub => {
+        (sub.failures || []).forEach(fail => {
+            (fail.modes || []).forEach(mode => {
+                const controls = (mode?.currentControls || '').trim();
+                const mitigation = (mode?.mitigation || '').trim();
+                if (!controls && !mitigation) return;
+                const total = rpnTotal(mode.rpn);
+                const score = typeof total === 'number' ? total : 0;
+                rows.push({
+                    score,
+                    text: [
+                        `SUB-SYSTEM: ${(sub.name || '').trim() || '(unnamed)'}`,
+                        `FUNCTIONAL FAILURE: ${(fail.desc || '').trim() || '(none)'}`,
+                        `FAILURE MODE: ${(mode.mode || '').trim() || '(none)'}`,
+                        `RPN: ${score || 'unscored'}`,
+                        `CURRENT CONTROLS (already in place): ${controls || '(none)'}`,
+                        `RECOMMENDED MITIGATION (not yet in place): ${mitigation || '(none)'}`,
+                    ].join('\n'),
+                });
+            });
+        });
+    });
+    return rows.sort((a, b) => b.score - a.score).map(r => r.text).join('\n\n');
+}
+
+export const SUMMARY_SYSTEM_PROMPT = `You are a senior reliability engineer writing the "Summary of Actions" entry for an RCM register.
+
+You receive failure modes with two distinct fields:
+- CURRENT CONTROLS — maintenance and monitoring ALREADY being performed. These continue.
+- RECOMMENDED MITIGATION — barriers NOT yet in place. These are new work to implement.
+
+Write plain text (no markdown, no bold, no headers with #) in exactly this shape:
+
+CONTINUE (existing controls)
+1- <short line, one per distinct control>
+2- ...
+
+IMPLEMENT (new actions)
+1- <action in detail: what to do, on which sub-system/equipment, and the failure mode it defends against>
+2- ...
+
+Rules:
+- CONTINUE items are terse — a few words each, merged where several modes share the same control.
+- IMPLEMENT items are detailed and specific enough to raise a work order from, and are ordered by descending RPN (highest risk first).
+- Merge duplicates across sub-systems instead of repeating them; name the sub-systems the merged item covers.
+- Never invent an action that is not in the input. Never move a mitigation into CONTINUE or a control into IMPLEMENT.
+- If a section has no items, write the heading and "None." beneath it.
+- Output only the summary text — no preamble, no closing remarks.`;
+
+/**
+ * Instructions and data in ONE prompt: AIService._directChat only forwards messages[0]
+ * for non-chatbot features, so a separate system message would be dropped.
+ */
+export function buildSummaryPrompt(project: Project): string {
+    return `${SUMMARY_SYSTEM_PROMPT}\n\nSYSTEM: ${project.name || '(unnamed)'}\n\n${buildActionsInput(project)}`;
 }
 
 /** btoa() is latin1-only, so encode to UTF-8 bytes first (project text may be non-ASCII). */

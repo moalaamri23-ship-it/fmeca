@@ -17,7 +17,7 @@ import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownR
 import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
 import { RcmRegisterModal, type RcmRegisterSubmit } from './components/RcmRegisterModal';
 import { hasCompleteRpn, normalizeProjectDates, nowIso, rpnTotal } from './services/ProjectUtils';
-import { buildProjectJsonBase64, buildRegisterPayload, publishToRcmRegister } from './services/RcmRegisterService';
+import { buildActionsInput, buildProjectJsonBase64, buildRegisterPayload, buildSummaryPrompt, publishToRcmRegister } from './services/RcmRegisterService';
 import {
     buildComponentCatalogContext,
     buildFullSystemModesContext,
@@ -555,6 +555,25 @@ setProjects(
             return;
         }
         start();
+    };
+
+    const generateRegisterSummary = async (): Promise<string> => {
+        if(!activeProject) throw new Error('No active project.');
+        const actions = buildActionsInput(activeProject);
+        if(!actions.trim()) throw new Error('No current controls or mitigations found in this project.');
+        const text = await AIService.chat({
+            feature: 'rcm-register-summary',
+            provider: aiProvider,
+            azureEndpoint: azureEndpoint || undefined,
+            powerAutomateUrl: powerAutomateUrl || undefined,
+            model: modelName,
+            messages: [{ role: 'user', content: buildSummaryPrompt(activeProject) }],
+            mode: 'ai',
+            apiKey
+        });
+        const clean = (text || '').trim();
+        if(!clean) throw new Error('The AI returned an empty summary.');
+        return clean;
     };
 
     const publishRegister = async (values: RcmRegisterSubmit) => {
@@ -2006,6 +2025,7 @@ render();
                         { fileName: registerAttachment.jsonFileName, sizeBytes: Math.round(registerAttachment.jsonBase64.length * 3 / 4) },
                     ]}
                     onPublish={publishRegister}
+                    onGenerateSummary={generateRegisterSummary}
                     onClose={() => { setShowRegisterModal(false); setRegisterAttachment(null); }}
                 />
             )}
