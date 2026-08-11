@@ -15,6 +15,9 @@ import { LocalFileSystemProvider, sanitizeName } from './services/FileSystem';
 import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch } from './types';
 import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
+import { RcmRegisterModal, type RcmRegisterSubmit } from './components/RcmRegisterModal';
+import { hasCompleteRpn, normalizeProjectDates, nowIso, rpnTotal } from './services/ProjectUtils';
+import { buildProjectJsonBase64, buildRegisterPayload, publishToRcmRegister } from './services/RcmRegisterService';
 import {
     buildComponentCatalogContext,
     buildFullSystemModesContext,
@@ -28,10 +31,6 @@ import {
 const safeGet = (k: string, f: any) => { try { const i = localStorage.getItem(k); return i ? JSON.parse(i) : f; } catch (e) { return f; } };
 const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
 const blankRpn = () => ({ s: "", o: "", d: "" });
-const hasCompleteRpn = (rpn: any) => [rpn?.s, rpn?.o, rpn?.d].every(v => String(v ?? '').trim() !== '' && !Number.isNaN(Number(v)));
-const rpnTotal = (rpn: any) => hasCompleteRpn(rpn) ? Number(rpn.s) * Number(rpn.o) * Number(rpn.d) : "";
-
-const nowIso = () => new Date().toISOString();
 
 const fmtDate = (iso?: string) => {
   if (!iso) return "—";
@@ -104,6 +103,8 @@ const App = () => {
     const [aiProvider, setAiProvider] = useState<AIProvider>('gemini');
     const [azureEndpoint, setAzureEndpoint] = useState('');
     const [powerAutomateUrl, setPowerAutomateUrl] = useState('');
+    const [rcmRegisterUrl, setRcmRegisterUrl] = useState('');
+    const [engineerEmail, setEngineerEmail] = useState('');
     const [liveModels, setLiveModels] = useState<Record<string, TieredModels>>(() => {
         try { return JSON.parse(localStorage.getItem('fmeca_models_cache') || '{}'); } catch { return {}; }
     });
@@ -133,8 +134,8 @@ const App = () => {
     const [dragId, setDragId] = useState<number | null>(null);
     const [dragAllowed, setDragAllowed] = useState<number | null>(null);
     // Delete Helper
-    const [confirmBox, setConfirmBox] = useState<{ msg: string; run: null | (() => void) }>({ msg: "", run: null });
-    const ask = (msg: string, run: () => void) => setConfirmBox({ msg, run });
+    const [confirmBox, setConfirmBox] = useState<{ msg: string; run: null | (() => void); okLabel?: string }>({ msg: "", run: null });
+    const ask = (msg: string, run: () => void, okLabel?: string) => setConfirmBox({ msg, run, okLabel });
     const closeAsk = () => setConfirmBox({ msg: "", run: null });
     // Map-tree state + handlers
     const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
@@ -242,9 +243,6 @@ const collapseAllTree = () => {
     const toggleSubVisibility = (id: string) =>
         setMapHiddenSubs(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-const tryIso=(x:any)=>{ try{ if(!x) return null; const d=new Date(x); return Number.isNaN(d.getTime())?null:d.toISOString(); }catch(e){ return null; } };
-const normalizeProjectDates=(sp:any)=>{ const now=nowIso(); const createdAt=sp.createdAt||sp.updatedAt||tryIso(sp.created)||tryIso(sp.updated)||now; const updatedAt=sp.updatedAt||tryIso(sp.updated)||createdAt; return { ...sp, createdAt, updatedAt }; };
-
 // Validates that parsed JSON is actually an FMECA project (guards against white-screen on wrong file)
 const isFmecaProject = (p: any): boolean =>
     !!p && typeof p === 'object' && !Array.isArray(p) &&
@@ -299,6 +297,8 @@ setProjects(
     if (initialProvider !== storedProvider) setModelName(DEFAULT_MODELS[initialProvider]);
     setAzureEndpoint(localStorage.getItem('rcm_azure_endpoint') || '');
     setPowerAutomateUrl(localStorage.getItem('rcm_power_automate_url') || '');
+    setRcmRegisterUrl(localStorage.getItem('rcm_register_flow_url') || '');
+    setEngineerEmail(localStorage.getItem('rcm_engineer_email') || '');
     setEnableChatbot(localStorage.getItem('rcm_enable_chatbot') !== 'false');
     const storedStyle = localStorage.getItem('rcm_chatbot_style');
     setChatbotStyle((storedStyle === 'one_sentence' ? 'tldr' : storedStyle as ChatbotResponseStyle) || 'normal');
@@ -382,6 +382,8 @@ setProjects(
         localStorage.setItem('rcm_ai_provider', aiProvider);
         localStorage.setItem('rcm_azure_endpoint', azureEndpoint);
         localStorage.setItem('rcm_power_automate_url', powerAutomateUrl);
+        localStorage.setItem('rcm_register_flow_url', rcmRegisterUrl);
+        localStorage.setItem('rcm_engineer_email', engineerEmail);
         localStorage.setItem('rcm_enable_chatbot', String(enableChatbot));
         localStorage.setItem('rcm_chatbot_style', chatbotStyle);
         localStorage.setItem('rcm_agent_workflow', agentWorkflow);
@@ -393,7 +395,7 @@ setProjects(
         localStorage.setItem('rcm_system_type', systemType);
         localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
-    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, enableChatbot, chatbotStyle, agentWorkflow, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
+    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, rcmRegisterUrl, engineerEmail, enableChatbot, chatbotStyle, agentWorkflow, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
 
     const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic', 'openrouter'] as const;
     type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
@@ -496,8 +498,8 @@ setProjects(
         return [];
     };
 
-    const downloadExcel = () => {
-        if(!activeProject) return;
+    const buildProjectWorkbook = (): XLSX.WorkBook | null => {
+        if(!activeProject) return null;
         const wb = XLSX.utils.book_new();
         const wsData: any[][] = [["Subsystem", "Specs", "Function", "Functional Failure", "Failure Mode", "Failure Effect", "Failure Cause", "Current Controls", "Mitigation", "S", "O", "D", "RPN"]];
         const merges: any[] = []; let r = 1;
@@ -516,7 +518,60 @@ setProjects(
         // @ts-ignore
         const range = XLSX.utils.decode_range(ws['!ref']);
         for (let R = range.s.r; R <= range.e.r; ++R) { for (let C = range.s.c; C <= range.e.c; ++C) { const ref = XLSX.utils.encode_cell({ r: R, c: C }); if (!ws[ref]) ws[ref] = { t: 's', v: '' }; if (R === 0) ws[ref].s = headStyle; else ws[ref].s = (C === 12) ? rpnStyle : cellStyle; } }
-        XLSX.utils.book_append_sheet(wb, ws, "FMEA"); XLSX.writeFile(wb, `FMECA_${activeProject.name.replace(/ /g, "_")}.xlsx`);
+        XLSX.utils.book_append_sheet(wb, ws, "FMEA");
+        return wb;
+    };
+
+    const excelFileName = (p: Project) => `FMECA_${p.name.replace(/ /g, "_")}.xlsx`;
+
+    const downloadExcel = () => {
+        const wb = buildProjectWorkbook();
+        if(!wb || !activeProject) return;
+        XLSX.writeFile(wb, excelFileName(activeProject));
+    };
+
+    /* RCM REGISTER */
+    const [showRegisterModal, setShowRegisterModal] = useState(false);
+    const [registerAttachment, setRegisterAttachment] = useState<{ fileName: string; base64: string; jsonFileName: string; jsonBase64: string } | null>(null);
+
+    const openRegisterModal = () => {
+        if(!activeProject) return;
+        if(!rcmRegisterUrl.trim()) { alert('Set the RCM Register flow URL in Settings before publishing.'); return; }
+        const start = () => {
+            const wb = buildProjectWorkbook();
+            if(!wb || !activeProject) return;
+            const base64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+            setRegisterAttachment({
+                fileName: excelFileName(activeProject),
+                base64,
+                jsonFileName: `FMECA_${activeProject.name.replace(/ /g, "_")}.json`,
+                jsonBase64: buildProjectJsonBase64(activeProject),
+            });
+            setShowRegisterModal(true);
+        };
+        const existing = (activeProject as any).rcmRegister;
+        if(existing) {
+            ask(`This project is already registered as ${existing.rcmInternalNumber}. Publishing again creates a NEW row in the list. Continue?`, start, 'Continue');
+            return;
+        }
+        start();
+    };
+
+    const publishRegister = async (values: RcmRegisterSubmit) => {
+        if(!activeProject || !registerAttachment) throw new Error('No project workbook to publish.');
+        const payload = buildRegisterPayload(activeProject, {
+            engineerEmail: values.engineerEmail,
+            status: values.status,
+            startDate: values.startDate,
+            summaryOfActions: values.summaryOfActions,
+            fileName: registerAttachment.fileName,
+            fileContentBase64: registerAttachment.base64,
+            jsonFileName: registerAttachment.jsonFileName,
+            jsonContentBase64: registerAttachment.jsonBase64,
+        });
+        const result = await publishToRcmRegister(rcmRegisterUrl, payload);
+        setActiveProject(prev => prev ? { ...prev, rcmRegister: { ...result, publishedAt: nowIso(), status: values.status } } : prev);
+        return result;
     };
 
     const captureMapImage = async (scale: number, format: 'png' | 'jpeg'): Promise<string | null> => {
@@ -1341,6 +1396,7 @@ render();
                             <button onClick={() => setShowRPN(!showRPN)} className={`px-3 py-1 rounded text-xs font-bold whitespace-nowrap ${showRPN?'bg-green-600':'bg-slate-700'}`}>RPN</button>
                             <button onClick={downloadExcel} className="text-xs font-bold bg-green-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-green-600 whitespace-nowrap"><Icon name="excel"/> Download</button>
                             <button onClick={exportJSON} className="text-xs font-bold bg-slate-800 px-3 py-1 rounded border border-slate-600 flex gap-1 items-center whitespace-nowrap"><Icon name="code"/> Export</button>
+                            <button onClick={openRegisterModal} title={(activeProject as any).rcmRegister ? "Published — click to publish again (creates a new row)" : "Publish to RCM Register"} className="text-xs font-bold bg-slate-800 px-3 py-1 rounded border border-slate-600 flex gap-1 items-center whitespace-nowrap"><Icon name="upload"/> {(activeProject as any).rcmRegister?.rcmInternalNumber || 'Register'}</button>
                             <button onClick={() => setShowLib(!showLib)} className="text-xs font-bold bg-slate-800 px-3 py-1 rounded border border-slate-600 whitespace-nowrap">Library</button>
                         </div>
                         <button onClick={() => setShowToolbar(!showToolbar)} className="text-slate-400 hover:text-white transition p-2 bg-slate-800 rounded hover:bg-slate-700" title="Tools">
@@ -1363,7 +1419,7 @@ render();
         <button className="px-3 py-2 text-sm border rounded-lg" onClick={closeAsk}>Cancel</button>
         <button className="px-3 py-2 text-sm bg-red-600 text-white rounded-lg"
           onClick={() => { const fn = confirmBox.run; closeAsk(); fn?.(); }}>
-          Delete
+          {confirmBox.okLabel || 'Delete'}
         </button>
       </div>
     </div>
@@ -1489,6 +1545,19 @@ render();
                                     <p className="text-xs text-slate-500 mt-1">
                                         Fast uses fewer calls for quick drafts. Structured decomposes functions and batch-generates FFs/modes for better traceability. RPN is scored separately with the robot button.
                                     </p>
+                                </div>
+                                <div className="bg-white p-6 rounded border max-w-xl mt-4">
+                                    <h2 className="text-lg font-semibold mb-4">RCM Register</h2>
+                                    <div className="space-y-3">
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 mb-1">Register flow URL</label>
+                                            <input type="password" value={rcmRegisterUrl} onChange={e => setRcmRegisterUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://prod-xx.westus.logic.azure.com/workflows/..."/>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 mb-1">Default engineer email</label>
+                                            <input type="text" value={engineerEmail} onChange={e => setEngineerEmail(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="name@company.com"/>
+                                        </div>
+                                    </div>
                                 </div>
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
                                     <h2 className="text-lg font-semibold mb-4">Chatbot</h2>
@@ -1926,6 +1995,18 @@ render();
                     onClear={() => { setSystemType(''); setSystemModes([]); setSystemContextEnabled(true); }}
                     onToggle={() => setSystemContextEnabled(e => !e)}
                     onClose={() => setShowSystemModes(false)}
+                />
+            )}
+            {showRegisterModal && activeProject && registerAttachment && (
+                <RcmRegisterModal
+                    project={activeProject}
+                    defaultEngineerEmail={engineerEmail}
+                    attachments={[
+                        { fileName: registerAttachment.fileName, sizeBytes: Math.round(registerAttachment.base64.length * 3 / 4) },
+                        { fileName: registerAttachment.jsonFileName, sizeBytes: Math.round(registerAttachment.jsonBase64.length * 3 / 4) },
+                    ]}
+                    onPublish={publishRegister}
+                    onClose={() => { setShowRegisterModal(false); setRegisterAttachment(null); }}
                 />
             )}
             {breakdownSubId && (() => {

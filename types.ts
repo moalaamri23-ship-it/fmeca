@@ -76,6 +76,14 @@ export interface Project {
   created: string;
   updated: string;
   subsystems: Subsystem[];
+  /** Set after a successful publish to the SharePoint RCM register. */
+  rcmRegister?: {
+    rcmInternalNumber: string;
+    itemId: number;
+    itemLink: string;
+    publishedAt: string;   // ISO
+    status: string;        // what was sent
+  };
 }
 
 export interface LibraryItem {
