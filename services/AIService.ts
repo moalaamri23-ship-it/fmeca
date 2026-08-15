@@ -829,6 +829,26 @@ export const AIService = {
         }).join('\n');
     },
 
+    /**
+     * Current controls are evidence-only, so "nothing matched" is a normal outcome and the
+     * field must end up empty. The prompt asks for the sentinel NONE; models that still
+     * narrate the null answer usually wrap it in the numbered format they were also given,
+     * which `cleanNumberedActionList` would happily keep. Both shapes collapse to '' here.
+     */
+    cleanControlsList(text: string): string {
+        if (/^\s*none\b[\s.]*$/i.test(text || '')) return '';
+        const cleaned = this.cleanNumberedActionList(text);
+        const lines = cleaned.split('\n').filter(Boolean);
+        if (!lines.length) return '';
+        // A real control names a tag or an owning team; a narrated null answer names neither.
+        const looksLikeControl = (l: string) => /\[Tag:/i.test(l) || /\([^)]*team\)/i.test(l);
+        const readsAsNothingFound = (l: string) =>
+            /^\d+-\s*(?:none|n\/a)\b[\s.]*$/i.test(l) ||
+            /\b(?:none|no|not|nothing|n\/a)\b[^\n]*\b(?:control|controls|barrier|barriers|evidence|task|tasks|match|matched|matching|found|identified|applicable|available|documented|listed|deployed|specified)\b/i.test(l);
+        const isNullLine = (l: string) => !looksLikeControl(l) && readsAsNothingFound(l);
+        return lines.every(isNullLine) ? '' : cleaned;
+    },
+
     // -------------------------------------------------------------------------
     // FEATURE IMPLEMENTATIONS (Refactored to use contract)
     // -------------------------------------------------------------------------
@@ -884,17 +904,14 @@ Rules:
 - Do NOT include tasks for sibling failure modes in the checklist.
 - Do NOT invent controls, tags, setpoints, alarms, trips, or tasks.
 - Do NOT include recommendations, upgrades, "install", "add", or "consider" actions.
-- If nothing is evidenced for this failure mode, return an empty response.
 ${FAILURE_MODE_BARRIER_FILTER}
 Output contract:
-- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
+- If no evidence matches this failure mode, output exactly: NONE
+- Otherwise return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
+- NONE is a complete and correct answer. Never explain in words that nothing was found, and never emit a line that means "none".
 - Never write the words "Existing control".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
-            const controlsOutputContract = `FINAL OUTPUT CONTRACT:
-- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
-- Never write the words "Existing control".
-- No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
-            const controlsContent = controlsPrompt + '\n\n' + controlsOutputContract;
+            const controlsContent = controlsPrompt;
             const controlsRes = await this.chat({
                 feature: 'field-generation',
                 provider: (aiProvider || inferProvider(key)) as any,
@@ -906,7 +923,7 @@ Output contract:
                 apiKey: key,
                 responseFormat: 'text'
             });
-            return this.cleanNumberedActionList(controlsRes);
+            return this.cleanControlsList(controlsRes);
         }
         // --- END CURRENT CONTROLS SPECIALIST ---
 
