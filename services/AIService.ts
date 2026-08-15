@@ -831,11 +831,17 @@ export const AIService = {
 
     /**
      * Current controls are evidence-only, so "nothing matched" is a normal outcome and the
-     * field must end up empty. The prompt asks for the sentinel NONE; models that still
-     * narrate the null answer usually wrap it in the numbered format they were also given,
-     * which `cleanNumberedActionList` would happily keep. Both shapes collapse to '' here.
+     * field must end up empty.
+     *
+     * The prompt asks for the `<no_evidence/>` marker. The tag shape is deliberate: it cannot
+     * occur inside a genuine control line, so matching it anywhere in the reply is safe even
+     * when the model wraps it in commentary — unlike a bare word such as NONE, which appears
+     * naturally in control text ("no-flow alarm", "none installed"). Models that still narrate
+     * the null answer usually wrap it in the numbered format they were also given, which
+     * `cleanNumberedActionList` would happily keep, so that shape is caught too.
      */
     cleanControlsList(text: string): string {
+        if (/<\s*no_evidence\s*\/?\s*>/i.test(text || '')) return '';
         if (/^\s*none\b[\s.]*$/i.test(text || '')) return '';
         const cleaned = this.cleanNumberedActionList(text);
         const lines = cleaned.split('\n').filter(Boolean);
@@ -893,22 +899,25 @@ export const AIService = {
                 ? `REFERENCE DATA (deployed equipment, instruments, alarms, trips, interlocks, limits):\n"""\n${refText.slice(0, 7000)}\n"""\n\n`
                 : '';
             const controlsPrompt = `${referenceBlock}${checklistBlock}${failureContext}${siblingBlock}
-${existingNote}Task: List ONLY existing controls that are currently deployed for THIS failure mode.
+${existingNote}Task: Look up which lines in the knowledge above are barriers ALREADY deployed against THIS failure mode. This is a lookup over the supplied text, not a writing task.
+Most failure modes have no matching line. Returning the no-evidence marker is the expected outcome more often than not, and is never a failure to complete the task.
 ${FMECA_HIERARCHY_RULES}
 ${FMECA_CONCISE_WORDING_RULES}
 Include:
 - Relevant PM/checklist tasks that directly prevent the stated cause, detect the stated cause, detect this mode's specific failure signature, or limit the stated effect. Use the checklist section name as owner.
 - Deployed instrument/protection controls from the reference data, such as temperature, pressure, level, flow, vibration, speed, differential pressure, alarms, trips, interlocks, shutdowns, transmitters, switches, or monitoring points. Include tag numbers and alarm/trip limits when stated. Use (Instrument team) for instrument controls unless the source states another owner.
 Rules:
+- Every line you output must be traceable to specific wording in the knowledge above. If you cannot point at that wording, it is not a current control.
+- Same equipment, same subsystem, or same general area is NOT a match. The line must act on THIS mode's stated cause, signature, or effect.
 - Match controls to THIS Functional Failure + Failure Mode + Cause + Effect only.
 - Do NOT include tasks for sibling failure modes in the checklist.
-- Do NOT invent controls, tags, setpoints, alarms, trips, or tasks.
 - Do NOT include recommendations, upgrades, "install", "add", or "consider" actions.
+- When unsure whether a line qualifies, drop it. A missing control is caught by the engineer reviewing the sheet; a wrongly claimed one is not.
 ${FAILURE_MODE_BARRIER_FILTER}
 Output contract:
-- If no evidence matches this failure mode, output exactly: NONE
+- If nothing in the knowledge above qualifies, your entire reply must be exactly: <no_evidence/>
 - Otherwise return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
-- NONE is a complete and correct answer. Never explain in words that nothing was found, and never emit a line that means "none".
+- <no_evidence/> is a complete, correct and expected answer. Never describe in words that nothing was found, and never emit a numbered line that means "none".
 - Never write the words "Existing control".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const controlsContent = controlsPrompt;
