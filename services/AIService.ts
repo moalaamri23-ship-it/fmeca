@@ -147,21 +147,12 @@ Sibling-exclusion examples for pump vibration:
  *
  * Each caller used to slice its own copy at its own limit (6000 / 7000 / 10000 / 15000),
  * so the same instrument index was cut at different points depending on which feature
- * asked. A tag near the end of the file was visible to Auto-Fill and invisible to the
+ * asked: a tag near the end of the file was visible to Auto-Fill and invisible to the
  * Current Controls wand, which looks exactly like the model ignoring a deployed
- * protection. The ceiling below exists only so a pathological upload cannot fail the
- * request outright, and when it does bite the model is told the text was cut rather than
- * being handed a file that appears to end early.
+ * protection. There is no cap of our own now — the model's context window is the only
+ * boundary, so an oversized file fails loudly with a provider error instead of quietly
+ * producing an answer built on half the evidence. Do not reintroduce a slice here.
  */
-export const KNOWLEDGE_CHAR_LIMIT = 400_000;
-
-export const knowledgeText = (text: string): string => {
-    const s = String(text || '');
-    if (s.length <= KNOWLEDGE_CHAR_LIMIT) return s;
-    console.warn(`[AIService] Knowledge file truncated at ${KNOWLEDGE_CHAR_LIMIT} of ${s.length} characters.`);
-    return `${s.slice(0, KNOWLEDGE_CHAR_LIMIT)}\n[TRUNCATED — the source file continues beyond this point.]`;
-};
-
 const buildSiblingFailureModeBlock = (siblings: any): string => {
     if (!Array.isArray(siblings) || siblings.length === 0) return '';
     const rows = siblings
@@ -601,7 +592,7 @@ export const AIService = {
 
     attachContext(prompt: string, mode: string, refText: string, responseFormat?: string): string {
         if (!refText || !refText.trim()) return prompt;
-        const refBlock = `REFERENCE DATA:\n"""\n${knowledgeText(refText)}\n"""\n`;
+        const refBlock = `REFERENCE DATA:\n"""\n${refText}\n"""\n`;
         if (mode === 'file') {
             // For JSON tasks "say N/A" would break the parser — keep the output
             // shape intact and signal missing data through empty fields instead.
@@ -914,10 +905,10 @@ export const AIService = {
             if (!hasKnowledge) return currentText || '';
             const existingNote = currentText?.trim() ? `Current field text to revise against the checklist:\n"""${currentText}"""\n` : '';
             const checklistBlock = checklistContent.trim()
-                ? `PM CHECKLIST KNOWLEDGE (plant's EXISTING PM program, organized by team and interval):\n"""\n${knowledgeText(checklistContent)}\n"""\n\n`
+                ? `PM CHECKLIST KNOWLEDGE (plant's EXISTING PM program, organized by team and interval):\n"""\n${checklistContent}\n"""\n\n`
                 : '';
             const referenceBlock = refText.trim()
-                ? `REFERENCE DATA (deployed equipment, instruments, alarms, trips, interlocks, limits):\n"""\n${knowledgeText(refText)}\n"""\n\n`
+                ? `REFERENCE DATA (deployed equipment, instruments, alarms, trips, interlocks, limits):\n"""\n${refText}\n"""\n\n`
                 : '';
             const controlsPrompt = `${referenceBlock}${checklistBlock}${failureContext}${siblingBlock}
 ${existingNote}Task: List ONLY existing controls that are currently deployed for THIS failure mode.
@@ -990,8 +981,8 @@ Output contract:
                 ? `CURRENT CONTROLS already in place (these failure aspects are COVERED — do NOT recommend them again; recommend only actions that close the remaining gaps):\n"""\n${(contextData.currentControls as string).trim()}\n"""\n` : '';
             let mitigationPrompt: string;
             if (mode === 'file' || mode === 'hybrid') {
-                const refSection = refText?.trim() ? `REFERENCE DATA (P&IDs, datasheets, safeguarding instruments with tag numbers and alarm limits):\n"""\n${knowledgeText(refText)}\n"""\n\n` : '';
-                const checkSection = checklistContent?.trim() ? `PM CHECKLIST KNOWLEDGE (organized by team and PM interval):\n"""\n${knowledgeText(checklistContent)}\n"""\n\n` : '';
+                const refSection = refText?.trim() ? `REFERENCE DATA (P&IDs, datasheets, safeguarding instruments with tag numbers and alarm limits):\n"""\n${refText}\n"""\n\n` : '';
+                const checkSection = checklistContent?.trim() ? `PM CHECKLIST KNOWLEDGE (organized by team and PM interval):\n"""\n${checklistContent}\n"""\n\n` : '';
                 mitigationPrompt = `${refSection}${checkSection}${failureContext}${siblingBlock}
 Mitigation wand rule: File-only and Hybrid settings both act as Hybrid here: use loaded knowledge first, then add reliability-engineering actions for remaining gaps.
 ${FMECA_HIERARCHY_RULES}
@@ -1217,7 +1208,7 @@ ${formatRule}`;
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1500)); return { failures: [{ desc: `Failure to perform`, modes: [{ id: generateId(), mode: "Fatigue", effect: "Local: Loss of integrity; End: Reduced system availability", cause: "Aging", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: blankGeneratedRpn(), rpnStatus: "unscored" }] }] }; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
-            ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${knowledgeText(checklistText)}\n"""\n\n` : '';
+            ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText}\n"""\n\n` : '';
         const controlsKnowledgeAvailable = (mode === 'file' || mode === 'hybrid') && (Boolean(checklistText?.trim()) || Boolean(refText?.trim()));
         const existingBlock = existingFailures.length > 0
             ? `Existing Functional Failures already defined for this subsystem (DO NOT repeat or closely resemble):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n` : '';
@@ -1272,7 +1263,7 @@ ${formatRule}`;
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Local: Effect; End: System effect", cause: "Cause", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: blankGeneratedRpn(), rpnStatus: "unscored" }]; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
-            ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${knowledgeText(checklistText)}\n"""\n\n` : '';
+            ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText}\n"""\n\n` : '';
         const controlsKnowledgeAvailable = (mode === 'file' || mode === 'hybrid') && (Boolean(checklistText?.trim()) || Boolean(refText?.trim()));
         const existingBlock = existingModes.length > 0
             ? `Failure Modes already defined in this subsystem (DO NOT repeat or closely resemble any of them; reject controls/mitigations that belong more strongly to these sibling modes):\n${existingModes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n` : '';
@@ -1428,7 +1419,7 @@ Return ONLY strict JSON:
             return { failures: failures.map(f => ({ failureId: f.id, modes: [{ mode: "Simulated", effect: "Local: Effect; End: System effect", cause: "Cause", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: blankGeneratedRpn(), rpnStatus: "unscored" }] })) };
         }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
-            ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${knowledgeText(checklistText)}\n"""\n\n` : '';
+            ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText}\n"""\n\n` : '';
         const controlsKnowledgeAvailable = (mode === 'file' || mode === 'hybrid') && (Boolean(checklistText?.trim()) || Boolean(refText?.trim()));
         const existingBlock = existingModes.length > 0
             ? `Failure Modes already defined in this subsystem (DO NOT repeat or closely resemble any of them; reject controls/mitigations that belong more strongly to these sibling modes):\n${existingModes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n` : '';

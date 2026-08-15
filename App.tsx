@@ -1677,8 +1677,12 @@ render();
                                                 </div>
                                             )}
 	                                        <div className="border-t pt-4 mt-2">
-                                            <label className="block text-xs font-semibold text-slate-500 mb-2">Global Reference File</label>
-                                            <label className="inline-flex items-center gap-2 px-3 py-2 border rounded bg-slate-50 cursor-pointer text-xs"><Icon name="upload" /><span>Upload</span><input type="file" accept=".txt,.md,.json,.csv,.xlsx,.xls,.doc,.docx,.pdf" className="hidden" onChange={async e => { const file = e.target.files && e.target.files[0]; if (!file) return; const text = await file.text(); setGlobalFileText(text); setGlobalFileName(file.name); }}/></label>
+                                            <label className="block text-xs font-semibold text-slate-500 mb-2">Global Reference File <span className="font-normal text-slate-400">(.txt)</span></label>
+                                            {/* Plain text only. The file is read with file.text() and inlined into the
+                                                prompt, so .pdf/.xlsx/.docx decoded to binary noise — the model received
+                                                ZIP and PDF headers instead of the tag list. Accepting them advertised
+                                                support that does not exist; parsing them client-side would. */}
+                                            <label className="inline-flex items-center gap-2 px-3 py-2 border rounded bg-slate-50 cursor-pointer text-xs"><Icon name="upload" /><span>Upload</span><input type="file" accept=".txt,text/plain" className="hidden" onChange={async e => { const file = e.target.files && e.target.files[0]; if (!file) return; const text = await file.text(); setGlobalFileText(text); setGlobalFileName(file.name); }}/></label>
                                             {globalFileName && (
                                                 <div className="mt-2 flex items-center gap-3 bg-slate-50 border rounded p-2">
                                                     <div className="text-[11px] text-slate-600 flex-1 truncate"><span className="font-bold">Loaded:</span> <span className="font-mono">{globalFileName}</span></div>
@@ -1687,9 +1691,9 @@ render();
                                             )}
                                         </div>
                                         <div className="border-t pt-4 mt-2">
-                                            <label className="block text-xs font-semibold text-slate-500 mb-2">Checklist Knowledge</label>
+                                            <label className="block text-xs font-semibold text-slate-500 mb-2">Checklist Knowledge <span className="font-normal text-slate-400">(.txt)</span></label>
                                             <p className="text-[10px] text-slate-400 mb-2">PM checklists by team &amp; interval — used for mitigation in File/Hybrid mode</p>
-                                            <label className="inline-flex items-center gap-2 px-3 py-2 border rounded bg-slate-50 cursor-pointer text-xs"><Icon name="upload" /><span>Upload</span><input type="file" accept=".txt,.md,.csv" className="hidden" onChange={async e => { const file = e.target.files?.[0]; if (!file) return; setChecklistText(await file.text()); setChecklistFileName(file.name); }}/></label>
+                                            <label className="inline-flex items-center gap-2 px-3 py-2 border rounded bg-slate-50 cursor-pointer text-xs"><Icon name="upload" /><span>Upload</span><input type="file" accept=".txt,text/plain" className="hidden" onChange={async e => { const file = e.target.files?.[0]; if (!file) return; setChecklistText(await file.text()); setChecklistFileName(file.name); }}/></label>
                                             {checklistFileName && (
                                                 <div className="mt-2 flex items-center gap-3 bg-slate-50 border rounded p-2">
                                                     <div className="text-[11px] text-slate-600 flex-1 truncate"><span className="font-bold">Loaded:</span> <span className="font-mono">{checklistFileName}</span></div>

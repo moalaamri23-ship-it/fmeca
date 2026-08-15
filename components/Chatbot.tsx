@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AIService, AIMessage, ToolDefinition, knowledgeText } from '../services/AIService';
+import { AIService, AIMessage, ToolDefinition } from '../services/AIService';
 import { RAGService } from '../services/RAGService';
 import { Project } from '../types';
 import { Icon } from './Icon';
@@ -361,12 +361,12 @@ export const Chatbot: React.FC<ChatbotProps> = ({ activeProject, apiKey, modelNa
     // belong in every turn. But once attached it goes in whole: the old 10000/7000 slices cut
     // tag lists mid-way, so the answer depended on where in the file a tag happened to sit.
     if (referenceFileText.trim() && (wantsReference || referenceFileText.length <= 6000)) {
-      sections.push(`REFERENCE FILE (${referenceFileName || 'uploaded file'}):\n${knowledgeText(referenceFileText)}`);
+      sections.push(`REFERENCE FILE (${referenceFileName || 'uploaded file'}):\n${referenceFileText}`);
       sources.push(referenceFileName ? `Reference file: ${referenceFileName}` : 'Reference file');
     }
 
     if (checklistText.trim() && (wantsChecklist || checklistText.length <= 6000)) {
-      sections.push(`PM CHECKLIST (${checklistFileName || 'uploaded checklist'}):\n${knowledgeText(checklistText)}`);
+      sections.push(`PM CHECKLIST (${checklistFileName || 'uploaded checklist'}):\n${checklistText}`);
       sources.push(checklistFileName ? `Checklist: ${checklistFileName}` : 'Checklist');
     }
 
