@@ -120,6 +120,7 @@ export const RpnTotalBadge: React.FC<RpnTotalBadgeProps> = ({ mode, colorClass }
     const parts = parseRpnReason(mode.rpnReason);
     const imp = mode.rpnImprovement;
     const hasBody = Boolean(mode.rpnReason || imp);
+    const hasSegments = Boolean(parts.s || parts.o || parts.baselineD || parts.mitigatedD);
 
     return (
         <>
@@ -157,15 +158,19 @@ export const RpnTotalBadge: React.FC<RpnTotalBadgeProps> = ({ mode, colorClass }
 
                     {!hasBody && <div className="mt-2"><NoReason status={mode.rpnStatus} /></div>}
 
-                    <ReasonBlock title="Severity (S)" body={parts.s} />
-                    <ReasonBlock title="Occurrence (O)" body={parts.o} />
-                    <ReasonBlock title="Detection — before mitigation" body={parts.baselineD} />
-                    <ReasonBlock title="Detection — after mitigation" body={parts.mitigatedD} />
-                    {/* Unparseable reason text still gets shown rather than swallowed. */}
-                    {mode.rpnReason && !parts.s && !parts.o && !parts.baselineD && !parts.mitigatedD && (
+                    {/* Per-score justifications live on the S/O/D hovers — repeating all four
+                        here made this card a wall of text. Show the rollup only. */}
+                    <ReasonBlock title="Improvement" body={imp?.summary} />
+                    {/* No rollup to show: fall back to the raw reason only when it could not be
+                        split per score, so nothing is silently swallowed. */}
+                    {!imp?.summary && mode.rpnReason && !hasSegments && (
                         <ReasonBlock title="Reasoning" body={mode.rpnReason} />
                     )}
-                    {imp?.summary && <ReasonBlock title="Improvement" body={imp.summary} />}
+                    {hasSegments && (
+                        <div className="mt-2 text-[10px] text-slate-400 italic">
+                            Hover S, O or D for the reasoning behind each rating.
+                        </div>
+                    )}
                     {parts.confidence && (
                         <div className="mt-2 pt-2 border-t border-slate-100 text-[10px] text-slate-400">
                             Confidence: <span className="font-semibold text-slate-500">{parts.confidence}</span>
