@@ -30,6 +30,16 @@ const rpnText = (rpn: any) => {
         ? 'RPN=Unscored (SUnscored OUnscored DUnscored)'
         : `RPN=${total} (S${rpn.s} O${rpn.o} D${rpn.d})`;
 };
+/**
+ * `mode.rpn` is the POST-mitigation triple; `mode.rpnBaseline` is the pre-mitigation one
+ * (current controls only). Emitting both lets the chatbot answer "what was it before?".
+ */
+const rpnBaselineText = (m: any) => {
+    const b = m?.rpnBaseline;
+    const total = rpnTotal(b);
+    if (total === null) return '';
+    return ` | BaselinePreMitigation=(S${b.s} O${b.o} D${b.d} RPN=${total})`;
+};
 const rpnImprovementText = (m: any) => {
     const imp = m?.rpnImprovement;
     if (!imp) return '';
@@ -42,6 +52,20 @@ const rpnImprovementText = (m: any) => {
     ].filter(Boolean);
     return parts.length ? ` | ${parts.join(' | ')}` : '';
 };
+/** One-line, fully-attributed score block used wherever a mode is rendered for the AI. */
+const rpnFullText = (m: any) =>
+    `${rpnText(m?.rpn)}${rpnBaselineText(m)}${rpnImprovementText(m)}${m?.rpnReason ? ` | RPNReason="${m.rpnReason}"` : ''}`;
+
+/**
+ * Prepended to every tool result so the answering model never has to guess what the
+ * numbers mean: the stored triple is post-mitigation, the baseline is current-controls-only.
+ */
+const RPN_LEGEND = [
+    'RPN LEGEND: RPN=(S x O x D) is the POST-mitigation score (current controls + recommended mitigation credited).',
+    'BaselinePreMitigation=(S O D RPN) is the score BEFORE mitigation, using current controls only.',
+    'RPNReason carries the per-score justification: "S: .. O: .. Baseline D: .. Mitigated D: .. Confidence: ..".',
+    'Modes scored by hand have no baseline and no RPNReason — say so rather than inventing one.'
+].join(' ');
 
 export const RAGService = {
 
@@ -65,7 +89,7 @@ buildFailureModeIndex(project: Project): string {
     sub.failures.forEach(f => {
       f.modes.forEach(m => {
 		        lines.push(
-		          `[FM-${m.id}] Sub="${sub.name}" | FF="${f.desc}" | Mode="${m.mode}" | CurrentControls="${m.currentControls || ''}" | Mitigation="${m.mitigation || ''}" | ${rpnText(m.rpn)}${rpnImprovementText(m)}${m.rpnReason ? ` | RPNReason="${m.rpnReason}"` : ''}`
+		          `[FM-${m.id}] Sub="${sub.name}" | FF="${f.desc}" | Mode="${m.mode}" | CurrentControls="${m.currentControls || ''}" | Mitigation="${m.mitigation || ''}" | ${rpnFullText(m)}`
 		        );
       });
     });
@@ -369,11 +393,13 @@ const ffCountsBySubsystem = (project.subsystems || []).map(s => ({
 	    if (fields.includes("mitigation")) parts.push(`Mitigation="${safe(fm.mitigation)}"`);
     if (fields.includes("rpn")) {
         parts.push(total === null ? 'RPN=Unscored' : `RPN=${total} (S${fm.rpn.s} O${fm.rpn.o} D${fm.rpn.d})`);
+        const baseline = rpnBaselineText(fm).replace(/^ \| /, '');
+        if (baseline) parts.push(baseline);
         const improvement = rpnImprovementText(fm).replace(/^ \| /, '');
         if (improvement) parts.push(improvement);
         if (fm.rpnReason) parts.push(`RPNReason="${safe(fm.rpnReason)}"`);
     }
-    if ((fields.includes("rpnReason") || fields.includes("rpn_reason")) && fm.rpnReason) parts.push(`RPNReason="${safe(fm.rpnReason)}"`);
+    if ((fields.includes("rpnReason") || fields.includes("rpn_reason")) && fm.rpnReason && !fields.includes("rpn")) parts.push(`RPNReason="${safe(fm.rpnReason)}"`);
     return parts.join(" | ");
   };
 
@@ -468,13 +494,13 @@ if (ffInc) {
                     const vals = [mode.rpn?.s, mode.rpn?.o, mode.rpn?.d];
                     const hasRpn = vals.every(v => String(v ?? '').trim() !== '' && !Number.isNaN(Number(v)));
                     const rpnVal = hasRpn ? Number(vals[0]) * Number(vals[1]) * Number(vals[2]) : 'Unscored';
-		                    const modeText = `Subsystem: ${sub.name}. Functional Failure: ${fail.desc}. Failure Mode: ${mode.mode}. Effect: ${mode.effect || 'N/A'}. Cause: ${mode.cause || 'N/A'}. Current Controls: ${mode.currentControls || 'N/A'}. Mitigation/Control: ${mode.mitigation || 'N/A'}. RPN: S=${mode.rpn?.s || 'Unscored'}, O=${mode.rpn?.o || 'Unscored'}, D=${mode.rpn?.d || 'Unscored'}, Total=${rpnVal}.${rpnImprovementText(mode)}${mode.rpnReason ? ` RPN Reason: ${mode.rpnReason}.` : ''}`;
+		                    const modeText = `Subsystem: ${sub.name}. Functional Failure: ${fail.desc}. Failure Mode: ${mode.mode}. Effect: ${mode.effect || 'N/A'}. Cause: ${mode.cause || 'N/A'}. Current Controls: ${mode.currentControls || 'N/A'}. Mitigation/Control: ${mode.mitigation || 'N/A'}. Post-mitigation RPN: S=${mode.rpn?.s || 'Unscored'}, O=${mode.rpn?.o || 'Unscored'}, D=${mode.rpn?.d || 'Unscored'}, Total=${rpnVal}.${rpnBaselineText(mode).replace(/^ \| /, ' Pre-mitigation ')}${rpnImprovementText(mode)}${mode.rpnReason ? ` RPN Reason: ${mode.rpnReason}.` : ''}`;
                     
                     chunks.push({
                         id: `mode-${mode.id}`,
                         text: modeText,
                         source: `Failure Mode in ${sub.name}`,
-		                        keywords: [sub.name, fail.desc, mode.mode, mode.cause, mode.effect, mode.currentControls, mode.mitigation, mode.rpnReason, mode.rpnImprovement?.summary, 'failure mode', 'current controls', 'mitigation', 'rpn', 'risk'],
+		                        keywords: [sub.name, fail.desc, mode.mode, mode.cause, mode.effect, mode.currentControls, mode.mitigation, mode.rpnReason, mode.rpnImprovement?.summary, 'failure mode', 'current controls', 'mitigation', 'rpn', 'risk', 'severity', 'occurrence', 'detection', 'baseline', 'before mitigation', 'after mitigation', 'reason', 'justification'],
                         type: 'failure-mode'
                     });
                 });
@@ -520,18 +546,34 @@ if (ffInc) {
      * Used as orientation context sent to the AI alongside tool definitions.
      */
     buildRichIndex(project: Project): string {
+        // Counts of scored/unscored modes let the model state coverage without another tool call.
+        let scored = 0, unscored = 0, withReason = 0, withBaseline = 0;
+        const maxRpn = (modes: any[]) => {
+            const vals = (modes || []).map(m => rpnTotal(m.rpn)).filter((v): v is number => v !== null);
+            return vals.length ? Math.max(...vals) : null;
+        };
         const lines: string[] = [
             `System: "${project.name}"`,
             `Subsystems (${(project.subsystems || []).length}):`
         ];
         (project.subsystems || []).forEach(sub => {
             const ffCount = (sub.failures || []).length;
-            const modeCount = (sub.failures || []).reduce((a, f) => a + (f.modes || []).length, 0);
-            lines.push(`  • ${sub.name} — ${ffCount} functional failure(s), ${modeCount} failure mode(s)`);
+            const allModes = (sub.failures || []).flatMap(f => f.modes || []);
+            allModes.forEach((m: any) => {
+                if (rpnTotal(m.rpn) === null) unscored++; else scored++;
+                if (m.rpnReason) withReason++;
+                if (rpnTotal(m.rpnBaseline) !== null) withBaseline++;
+            });
+            const subTop = maxRpn(allModes);
+            lines.push(`  • ${sub.name} — ${ffCount} functional failure(s), ${allModes.length} failure mode(s), TopRPN=${subTop ?? 'Unscored'}`);
             (sub.failures || []).forEach(ff => {
-                lines.push(`      FF: "${ff.desc}" (${(ff.modes || []).length} mode(s))`);
+                const ffTop = maxRpn(ff.modes || []);
+                lines.push(`      FF: "${ff.desc}" (${(ff.modes || []).length} mode(s), TopRPN=${ffTop ?? 'Unscored'})`);
             });
         });
+        lines.push('');
+        lines.push(`Scoring coverage: ${scored} mode(s) scored, ${unscored} unscored, ${withBaseline} with a pre-mitigation baseline, ${withReason} with stored RPN reasoning.`);
+        lines.push('This outline shows RPN totals only. Per-score S/O/D, the pre-mitigation baseline, and the stored RPNReason are available from get_failure_modes, get_rpn_summary and search_project — call one of those before answering anything about severity, occurrence, detection, or why a score was given.');
         return lines.join('\n');
     },
 
@@ -551,19 +593,26 @@ if (ffInc) {
                 );
                 const topRpn = rpns.length ? String(Math.max(...rpns)) : 'Unscored';
                 return `Subsystem="${safe(sub.name)}" | FFs=${sub.failures.length} | Modes=${modeCount} | TopRPN=${topRpn}`;
-            }).join('\n');
+            }).join('\n') + '\n\nTopRPN is the highest POST-mitigation total in the subsystem. For per-score S/O/D, the pre-mitigation baseline, or why a score was assigned, call get_rpn_summary or get_failure_modes.';
         }
 
         if (name === 'get_subsystem_detail') {
             const sub = this.resolveSubsystem(safe(args.subsystem_name), project);
             if (!sub) return `Subsystem not found: "${args.subsystem_name}". Available: ${project.subsystems.map(s => s.name).join(', ')}`;
             return [
+                RPN_LEGEND,
+                '',
                 `Subsystem: ${safe(sub.name)}`,
                 `Function: ${safe(sub.func)}`,
                 `Specs: ${safe(sub.specs)}`,
                 `Functional Failures (${(sub.failures || []).length}):`,
-                ...(sub.failures || []).map((f: any, i: number) =>
-                    `  ${i + 1}. "${safe(f.desc)}" — ${(f.modes || []).length} failure mode(s)`)
+                ...(sub.failures || []).map((f: any, i: number) => {
+                    const totals = (f.modes || []).map((m: any) => rpnTotal(m.rpn)).filter((v: any): v is number => v !== null);
+                    const top = totals.length ? Math.max(...totals) : null;
+                    return `  ${i + 1}. "${safe(f.desc)}" — ${(f.modes || []).length} failure mode(s), TopRPN=${top ?? 'Unscored'}`;
+                }),
+                '',
+                'Per-mode S/O/D, pre-mitigation baseline and RPNReason are not in this view — call get_failure_modes for this subsystem to get them.'
             ].join('\n');
         }
 
@@ -577,12 +626,14 @@ if (ffInc) {
                 if (filtered.length > 0) failures = filtered;
             }
             if (!failures.length) return `No functional failures found in subsystem "${safe(sub.name)}".`;
-            const lines: string[] = [`Failure Modes for Subsystem "${safe(sub.name)}":`];
+            const lines: string[] = [RPN_LEGEND, '', `Failure Modes for Subsystem "${safe(sub.name)}":`];
             failures.forEach((ff: any) => {
                 lines.push(`\nFunctional Failure: "${safe(ff.desc)}"`);
                 if (!(ff.modes || []).length) { lines.push('  (No failure modes defined)'); return; }
                 ff.modes.forEach((m: any) => {
-		                    lines.push(`  Mode: ${safe(m.mode)} | ${rpnText(m.rpn)}`);
+		                    lines.push(`  Mode: ${safe(m.mode)} | ${rpnText(m.rpn)} | Scoring=${safe(m.rpnStatus, 'unscored')}`);
+                            const baseline = rpnBaselineText(m).replace(/^ \| /, '');
+                            if (baseline) lines.push(`    ${baseline}`);
                             if (m.rpnReason) lines.push(`    RPN Reason: ${safe(m.rpnReason)}`);
                             if (m.rpnImprovement) lines.push(`    RPN Improvement: ${rpnImprovementText(m).replace(/^ \| /, '')}`);
 	                    lines.push(`    Effect: ${safe(m.effect)}`);
@@ -607,18 +658,24 @@ if (ffInc) {
                     (ff.modes || []).forEach((m: any) => {
 		                        const inMode = [m.mode, m.effect, m.cause, m.currentControls, m.mitigation, m.rpnReason].some(f => (f || '').toLowerCase().includes(q));
                         if (inMode) {
-	                            const vals = [m.rpn?.s, m.rpn?.o, m.rpn?.d];
-	                            const rpn = vals.every(v => String(v ?? '').trim() !== '' && !Number.isNaN(Number(v))) ? Number(vals[0]) * Number(vals[1]) * Number(vals[2]) : 'Unscored';
-	                            results.push(`[Mode in "${safe(sub.name)}" / "${safe(ff.desc)}"] ${safe(m.mode)} | RPN=${rpn}`);
+	                            // Full score attribution, not just the total — a match here is often the
+	                            // only retrieval the answering model gets for that mode.
+	                            results.push(
+	                                `[Mode in "${safe(sub.name)}" / "${safe(ff.desc)}"] ${safe(m.mode)} | ${rpnFullText(m)}\n` +
+	                                `    Effect: ${safe(m.effect)}\n` +
+	                                `    Cause: ${safe(m.cause)}\n` +
+	                                `    Current Controls: ${safe(m.currentControls, 'None recorded')}\n` +
+	                                `    Mitigation: ${safe(m.mitigation)}`
+	                            );
                         }
                     });
                 });
             });
-            return results.length ? results.join('\n') : `No matches found for "${args.query}".`;
+            return results.length ? [RPN_LEGEND, '', ...results].join('\n') : `No matches found for "${args.query}".`;
         }
 
         if (name === 'get_rpn_summary') {
-			            type Row = { sub: string; ff: string; mode: string; controls: string; reason: string; rpn: number | null; s: string; o: string; d: string };
+			            type Row = { sub: string; ff: string; mode: string; controls: string; mitigation: string; status: string; scores: string; rpn: number | null };
             const rows: Row[] = [];
             (project.subsystems || []).forEach(sub => {
                 if (args.subsystem_name) {
@@ -627,17 +684,24 @@ if (ffInc) {
                 }
                 (sub.failures || []).forEach((ff: any) => {
                     (ff.modes || []).forEach((m: any) => {
-	                        const vals = [m.rpn?.s, m.rpn?.o, m.rpn?.d];
-	                        const hasRpn = vals.every(v => String(v ?? '').trim() !== '' && !Number.isNaN(Number(v)));
-	                        const rpn = hasRpn ? Number(vals[0]) * Number(vals[1]) * Number(vals[2]) : null;
+	                        const rpn = rpnTotal(m.rpn);
 	                        if (typeof args.min_rpn === 'number' && (rpn === null || rpn < args.min_rpn)) return;
-			                        rows.push({ sub: safe(sub.name), ff: safe(ff.desc), mode: safe(m.mode), controls: safe(m.currentControls, 'None recorded'), reason: safe(m.rpnReason, ''), rpn, s: hasRpn ? String(vals[0]) : 'Unscored', o: hasRpn ? String(vals[1]) : 'Unscored', d: hasRpn ? String(vals[2]) : 'Unscored' });
+			                        rows.push({
+			                            sub: safe(sub.name), ff: safe(ff.desc), mode: safe(m.mode),
+			                            controls: safe(m.currentControls, 'None recorded'),
+			                            mitigation: safe(m.mitigation, 'None recorded'),
+			                            status: safe(m.rpnStatus, 'unscored'),
+			                            // Carries S/O/D, the pre-mitigation baseline, the improvement deltas
+			                            // and the per-score RPNReason in one block.
+			                            scores: rpnFullText(m),
+			                            rpn
+			                        });
                     });
                 });
             });
 	            rows.sort((a, b) => (b.rpn ?? -1) - (a.rpn ?? -1));
 	            return rows.length
-			                ? rows.map(r => `RPN=${r.rpn ?? 'Unscored'}(S${r.s} O${r.o} D${r.d}) | Sub="${r.sub}" | FF="${r.ff}" | Mode="${r.mode}" | CurrentControls="${r.controls}"${r.reason ? ` | RPNReason="${r.reason}"` : ''}`).join('\n')
+			                ? [RPN_LEGEND, '', ...rows.map(r => `${r.scores} | Scoring=${r.status} | Sub="${r.sub}" | FF="${r.ff}" | Mode="${r.mode}" | CurrentControls="${r.controls}" | Mitigation="${r.mitigation}"`)].join('\n')
                 : 'No failure modes found.';
         }
 

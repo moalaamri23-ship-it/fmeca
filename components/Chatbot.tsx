@@ -60,6 +60,13 @@ ANSWER GUIDELINES:
 - Gap analysis: Point out missing fields first, then suggest "Candidate (Not in project)" improvements.
 - Risk/priority questions: Reference RPN scores and rank modes accordingly.
 
+RPN SEMANTICS (do not blur these):
+- Every stored S/O/D is the POST-mitigation rating — current controls plus the recommended mitigation. "RPN" with no qualifier means this one.
+- "BaselinePreMitigation" is the rating BEFORE mitigation, using current controls only. Quote it whenever the user asks what the risk was before, or how much mitigation bought.
+- Severity, Occurrence and Detection are separate ratings; never answer a question about one of them with the RPN total alone. If the retrieved data shows only a total, say the per-score breakdown was not retrieved rather than guessing.
+- "RPNReason" holds the per-score justification in the form "S: .. O: .. Baseline D: .. Mitigated D: .. Confidence: ..". Quote the segment for the score being asked about.
+- Modes with Scoring=manual were typed by a user: no baseline, no reasoning. Say that plainly instead of inventing a rationale.
+
 OUTPUT STYLE:
 - Be concise and workshop-ready. Quote project fields when present.
 - For rankings, comparisons, or multi-field lists (e.g. RPN summaries, comparing subsystems), use a GitHub-flavored markdown table. Keep short single answers as prose.
@@ -80,12 +87,12 @@ Do not assume access to any project-specific data unless it is provided.
 const FMECA_TOOLS: ToolDefinition[] = [
     {
         name: 'list_subsystems',
-        description: 'List all subsystems in the project with functional failure counts and top RPN values. Call this first for overview or orientation questions.',
+        description: 'List all subsystems with functional failure counts and the top RPN total in each. Orientation only — returns totals, NOT the S/O/D breakdown, the pre-mitigation baseline, or the scoring rationale. Call this first for overview questions, then call get_rpn_summary or get_failure_modes if the answer needs any individual rating.',
         parameters: { type: 'object', properties: {}, required: [] }
     },
     {
         name: 'get_subsystem_detail',
-        description: 'Get full details of a specific subsystem: specs, function description, and list of all functional failures with mode counts.',
+        description: 'Get a subsystem header: specs, function description, and its functional failures with mode counts and top RPN. Does NOT return individual failure modes or their S/O/D — use get_failure_modes for those.',
         parameters: {
             type: 'object',
             properties: {
@@ -96,7 +103,7 @@ const FMECA_TOOLS: ToolDefinition[] = [
     },
     {
         name: 'get_failure_modes',
-        description: 'Get all failure modes for a subsystem with effect, cause, current controls, mitigation and RPN scores. Optionally filter to a specific functional failure.',
+        description: 'Get every failure mode in a subsystem in full: effect, cause, current controls, mitigation, the post-mitigation Severity/Occurrence/Detection ratings and total, the pre-mitigation baseline S/O/D, the RPN improvement, and the stored RPNReason explaining each rating. Use this for any question about a specific subsystem\'s modes, its S, O or D values, why a score was assigned, or what the risk was before mitigation. Optionally filter to one functional failure.',
         parameters: {
             type: 'object',
             properties: {
@@ -108,7 +115,7 @@ const FMECA_TOOLS: ToolDefinition[] = [
     },
     {
         name: 'search_project',
-        description: 'Search across all project data — subsystems, functional failures, failure modes, effects, causes, current controls, mitigations — for a term or phrase.',
+        description: 'Free-text search across subsystems, functional failures, failure modes, effects, causes, current controls, mitigations and stored RPN reasoning. Every matching mode comes back in full, including S/O/D, the pre-mitigation baseline and the RPNReason. Use when the user names a component, symptom or phrase rather than a subsystem.',
         parameters: {
             type: 'object',
             properties: {
@@ -119,7 +126,7 @@ const FMECA_TOOLS: ToolDefinition[] = [
     },
     {
         name: 'get_rpn_summary',
-        description: 'Get all failure modes ranked by RPN (Risk Priority Number), highest first. Optionally filter by subsystem or set a minimum RPN threshold.',
+        description: 'Get every failure mode ranked by RPN, highest first, each with its Severity/Occurrence/Detection ratings, the pre-mitigation baseline S/O/D, the RPN reduction from mitigation, whether it was AI- or hand-scored, and the stored RPNReason. Use for project-wide risk ranking and for any question about severity, occurrence, detection, scoring rationale, or before-vs-after mitigation. Optionally filter by subsystem or minimum RPN.',
         parameters: {
             type: 'object',
             properties: {
@@ -144,7 +151,8 @@ Levels: "project_header", "subsystem", "functional_failure", "failure_mode"
 Fields (examples):
 - subsystem: name, func, specs
 - functional_failure: desc
-- failure_mode: mode, cause, effect, mitigation, rpn (S/O/D/Total), rpn_reason
+- failure_mode: mode, cause, effect, currentControls, mitigation, rpn, rpn_reason
+  The "rpn" field returns the post-mitigation S, O, D and total, the pre-mitigation baseline S/O/D, the RPN reduction and the stored reasoning together. Always include "rpn" when the question touches severity, occurrence, detection, risk ranking, scoring rationale, or before-vs-after mitigation.
 
 Output JSON schema:
 {
@@ -416,6 +424,11 @@ if (isRagEnabled && activeProject) {
 Your ONLY job is to call the right tool(s) to fetch data that answers the user's question.
 Do NOT answer the question yourself — only call tools.
 If a subsystem name is ambiguous, call list_subsystems first.
+
+ROUTING FOR SCORE QUESTIONS:
+- Only get_failure_modes, get_rpn_summary and search_project return the individual Severity/Occurrence/Detection ratings, the pre-mitigation baseline, and the stored reasoning. list_subsystems and get_subsystem_detail return RPN totals only.
+- If the question mentions severity, occurrence, detection, S, O, D, a baseline, "before mitigation", "after mitigation", or asks WHY a score is what it is, you MUST call one of those three — a total alone cannot answer it.
+- Scoped to one subsystem → get_failure_modes. Ranking or project-wide → get_rpn_summary. Naming a component, symptom or phrase → search_project.
 
 PROJECT INDEX (orientation only):
 """

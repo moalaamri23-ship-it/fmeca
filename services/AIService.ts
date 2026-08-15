@@ -1648,9 +1648,19 @@ Output format:
     : 'no matching uploaded system mode count was available';
   const fallbackReason = `S: ${s} because ${this.cleanSingleFieldText(effect || 'end effect is not clearly stated')} with production, safety, asset, and cost impact reflected where stated. O: ${o} because ${this.cleanSingleFieldText(mode || 'failure mode')} / ${this.cleanSingleFieldText(cause || 'cause not stated')} likelihood is anchored by ${systemModeReason}. Baseline D: ${baseline.d} because ${this.cleanSingleFieldText(currentControls || 'current controls are not stated')}. Mitigated D: ${d} because ${this.cleanSingleFieldText(hasConcreteMitigation ? mitigation : 'no concrete mitigation is credited')}. Confidence: ${confidence}.`;
   const rawReason = typeof parsed.reason === 'string' ? this.cleanSingleFieldText(parsed.reason) : '';
-  const reason = /^S:\s*\d+.*\bO:\s*\d+.*Baseline D:\s*\d+.*Mitigated D:\s*\d+.*Confidence:\s*(high|medium|low)/i.test(rawReason)
-    ? rawReason
-    : fallbackReason;
+  // `[\s\S]` rather than `.` — a multi-line reason is still a valid one, and `.` would
+  // reject every such reply and silently swap in the templated fallback below.
+  const reasonShapeOk = /S\s*[:=]\s*\d+[\s\S]*\bO\s*[:=]\s*\d+[\s\S]*Baseline\s*D\s*[:=]\s*\d+[\s\S]*Mitigated\s*D\s*[:=]\s*\d+[\s\S]*Confidence\s*[:=]\s*(high|medium|low)/i.test(rawReason);
+  // Scores are clamped after parsing (mitigation credit is gated on the regexes above), so
+  // the numbers the model wrote into its prose can disagree with what actually gets stored.
+  // Re-stamp the headline numbers onto the model's own wording.
+  const alignReasonScores = (text: string) => text
+    .replace(/(^|[\s.;,])S\s*[:=]\s*\d+/i, `$1S: ${s}`)
+    .replace(/(^|[\s.;,])O\s*[:=]\s*\d+/i, `$1O: ${o}`)
+    .replace(/(^|[\s.;,])Baseline\s*D\s*[:=]\s*\d+/i, `$1Baseline D: ${baseline.d}`)
+    .replace(/(^|[\s.;,])Mitigated\s*D\s*[:=]\s*\d+/i, `$1Mitigated D: ${d}`)
+    .replace(/(^|[\s.;,])Confidence\s*[:=]\s*(high|medium|low)/i, `$1Confidence: ${confidence}`);
+  const reason = reasonShapeOk ? alignReasonScores(rawReason) : fallbackReason;
 
   return {
     s,
