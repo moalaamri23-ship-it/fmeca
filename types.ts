@@ -38,13 +38,28 @@ export interface Failure {
   sourceTags?: string[];
   sourceBreakdownRowId?: string;
   sourceSnippet?: string;
+  /** Which JA1012 failed state this row covers. Several failures share one breakdown row. */
+  failedState?: FailedStateType;
+  /** Set when generation fell back to a template — the text is a placeholder, not analysis. */
+  needsReview?: boolean;
 }
+
+/** SAE JA1011 5.1 function classes. Secondary functions carry the highest-severity failures. */
+export type FunctionClass = 'primary' | 'containment' | 'protection' | 'control' | 'support' | 'efficiency';
+
+/** JA1012 failed-state types. One function yields several of these. */
+export type FailedStateType = 'total' | 'partial' | 'upper_limit' | 'lower_limit' | 'intermittent' | 'on_demand';
 
 export interface BreakdownRow {
   id: string;
   function: string;  // verb + object
   standard: string;  // value/expectation
   snippet: string;   // verbatim slice from the function description
+  functionClass?: FunctionClass;
+  /** True when `standard` carries a real measurable value; false flags an unauditable standard (JA1011 5.1.2). */
+  quantified?: boolean;
+  /** Hidden functions have no operational evidence of failure and drive failure-finding tasks (JA1011 5.2). */
+  evidence?: 'evident' | 'hidden';
 }
 
 export interface BreakdownMatch {

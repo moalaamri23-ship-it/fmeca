@@ -120,6 +120,23 @@ export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
                                                     {r.standard && (
                                                         <div className="text-xs text-slate-500 mt-0.5">{r.standard}</div>
                                                     )}
+                                                    <div className="flex flex-wrap items-center gap-1 mt-1">
+                                                        {r.functionClass && (
+                                                            <span className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-semibold">
+                                                                {r.functionClass}
+                                                            </span>
+                                                        )}
+                                                        {r.evidence === 'hidden' && (
+                                                            <span title="Hidden function — failure is not evident to operating staff and needs a failure-finding task" className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-800 font-semibold">
+                                                                Hidden
+                                                            </span>
+                                                        )}
+                                                        {r.quantified === false && (
+                                                            <span title="Performance standard is not measurable (JA1011 5.1.2)" className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-100 text-slate-400 font-semibold">
+                                                                Unquantified
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                 </td>
                                                 <td className="p-2 align-top">
                                                     <div className="flex items-start justify-between gap-2">

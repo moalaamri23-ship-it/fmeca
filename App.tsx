@@ -1051,7 +1051,7 @@ render();
         setRedecomposingId(sId);
         const decomposed = await AIService.decomposeFunction(
             sub.func, sub.name, activeProject!.name,
-            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', agentWorkflow === 'structured' ? 'detailed' : 'normal'
+            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', agentWorkflow === 'structured' ? 'detailed' : 'normal', sub.specs || ''
         );
         const rows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
         if (rows.length > 0) {
@@ -1165,7 +1165,7 @@ render();
                     workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId) }, aiProvider, azureEndpoint, '', powerAutomateUrl) || '').trim();
                 }
                 const rows = workingFunc
-                    ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed')).map(r => ({ ...r, id: generateId() }))
+                    ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '')).map(r => ({ ...r, id: generateId() }))
                     : [];
                 if (!rows.length) {
                     alert("Structured Auto-Fill could not decompose the function.");
@@ -1193,7 +1193,9 @@ render();
                     collapsed: false,
                     sourceTags: tags,
                     sourceBreakdownRowId: f.rowId,
-                    sourceSnippet: f.sourceSnippet || rows.find(r => r.id === f.rowId)?.snippet || ''
+                    sourceSnippet: f.sourceSnippet || rows.find(r => r.id === f.rowId)?.snippet || '',
+                    failedState: f.failedState,
+                    needsReview: f.needsReview
                 }));
                 if (!generatedFailures.length) {
                     alert("Structured Auto-Fill generated no functional failures.");
@@ -1330,7 +1332,7 @@ render();
                     let breakdown: BreakdownRow[] = [];
                     if (func) {
                         mark('Decomposing function', s.name);
-                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed');
+                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '');
                         if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                         breakdown = rows.map(r => ({ ...r, id: generateId() }));
                     }
@@ -1361,11 +1363,19 @@ render();
                             modes: [] as Mode[],
                             sourceTags: tags,
                             sourceBreakdownRowId: f.rowId,
-                            sourceSnippet: f.sourceSnippet || breakdown.find(r => r.id === f.rowId)?.snippet || ''
+                            sourceSnippet: f.sourceSnippet || breakdown.find(r => r.id === f.rowId)?.snippet || '',
+                            failedState: f.failedState,
+                            needsReview: f.needsReview
                         }));
-                        breakdownMatches = failures
-                            .filter(f => f.sourceBreakdownRowId)
-                            .map(f => ({ rowId: f.sourceBreakdownRowId as string, failureIds: [f.id] }));
+                        // One row now yields several failed states, so group by row instead
+                        // of emitting a separate match per failure.
+                        const byRow = new Map<string, string[]>();
+                        failures.filter(f => f.sourceBreakdownRowId).forEach(f => {
+                            const rowId = f.sourceBreakdownRowId as string;
+                            if (!byRow.has(rowId)) byRow.set(rowId, []);
+                            byRow.get(rowId)!.push(f.id);
+                        });
+                        breakdownMatches = Array.from(byRow, ([rowId, failureIds]) => ({ rowId, failureIds }));
                     }
                     if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                     if (failures.length === 0) issues.push(`${s.name}: no functional failures generated`);
@@ -1847,6 +1857,20 @@ render();
                                                                                 <div className="flex-1">
 	                                                                                    <SmartInput label="Functional Failure" value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func}} />
 	                                                                                    <SourceBadges tags={fail.sourceTags} />
+                                                                                    {(fail.failedState || fail.needsReview) && (
+                                                                                        <div className="flex flex-wrap items-center gap-1 mt-1">
+                                                                                            {fail.failedState && (
+                                                                                                <span title="JA1011 5.2 failed state covered by this functional failure" className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-semibold">
+                                                                                                    {fail.failedState.replace('_', ' ')}
+                                                                                                </span>
+                                                                                            )}
+                                                                                            {fail.needsReview && (
+                                                                                                <span title="Generation fell back to a template — this text is a placeholder, not analysis" className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-semibold">
+                                                                                                    Needs review
+                                                                                                </span>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    )}
                                                                                     <div className="flex gap-4 mt-1">
                                                                                         <button onClick={(e)=>{e.stopPropagation(); genModes(sub.id, fail.id, sub.name, sub.specs, sub.func, fail.desc)}} disabled={modeGenId === fail.id} className="text-xs text-brand-600 font-bold flex gap-1 items-center hover:underline">{modeGenId === fail.id ? "..." : <span><Icon name="bolt"/> Generate Modes</span>}</button>
                                                                                         <button onClick={(e)=>{e.stopPropagation(); openAttachments('fail', sub, fail)}} className="text-xs text-slate-500 font-bold flex gap-1 items-center hover:text-brand-600"><Icon name="clip" className="w-3 h-3"/> References</button>
