@@ -239,6 +239,13 @@ const collapseAllTree = () => {
         ? getScopedSystemModes(systemModes, { name, specs, func })
         : [];
 
+    // The Specs wand reads whole-package datasheets. Naming the other subsystems
+    // lets the model exclude their values instead of dumping the entire file.
+    const siblingSubsystemNames = (subId: string) => (activeProject?.subsystems || [])
+        .filter(s => s.id !== subId)
+        .map(s => (s.name || '').trim())
+        .filter(Boolean);
+
     const filteredProject = activeProject && mapHiddenSubs.size > 0
         ? { ...activeProject, subsystems: activeProject.subsystems.filter(s => !mapHiddenSubs.has(s.id)) }
         : activeProject;
@@ -1781,7 +1788,7 @@ render();
 	                                                        <SourceBadges tags={sub.sourceTags} />
 	                                                    </div>
 	                                                </div>
-                                                <SmartInput label="Specs" value={sub.specs} onChange={v => updateSub(sub.id, 'specs', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} />
+                                                <SmartInput label="Specs" value={sub.specs} onChange={v => updateSub(sub.id, 'specs', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, subsystemFunction: sub.func, siblingSubsystems: siblingSubsystemNames(sub.id)}} />
                                                 <div className="mt-2 space-y-1">
                                                     <div className="text-[10px] font-semibold uppercase text-slate-500">Subsystem image (AI)</div>
                                                     <div className="flex items-center gap-2 flex-nowrap">

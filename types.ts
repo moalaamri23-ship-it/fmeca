@@ -125,4 +125,6 @@ export interface ContextData {
   currentControls?: string;
   /** Other modes in same functional failure/subsystem — used to exclude sibling-mode barriers. */
   siblingFailureModes?: Array<Pick<Mode, 'mode' | 'cause' | 'effect'>>;
+  /** Names of the project's other subsystems — used to keep Specs inside this subsystem's boundary. */
+  siblingSubsystems?: string[];
 }

@@ -87,6 +87,23 @@ const FMECA_CONCISE_WORDING_RULES = `Professional FMECA wording:
 - Never include internal reasoning, uncertainty, self-correction, reviewer notes, or conversational text such as "wait", "let me", "I think", "reconsider", "analysis", or "reasoning".
 - Do not add labels, prefixes, numbering, bullets, markdown, or commentary unless the output contract requires them.`;
 
+// Specs are extracted from whole-package datasheets loaded as REFERENCE DATA, so
+// without an explicit boundary the model dumps every value in the file onto one
+// subsystem. Specs feed every downstream FF/mode prompt, so a leak here cascades.
+const SPECS_BOUNDARY_RULES = `Subsystem boundary rules:
+- Return ONLY specifications of the named subsystem itself.
+- Exclude parent-system, package, skid, or train totals and ratings.
+- Exclude anything belonging to another subsystem, upstream or downstream equipment, or a separate component listed elsewhere.
+- Include a value only when the reference data attributes it to this subsystem. Ambiguous or package-level values are excluded, not guessed.
+- Return at most 12 "Key: Value Unit" pairs; keep the ones most relevant to this subsystem's function.
+- If no specification in the available context can be attributed to this subsystem, return an empty response.`;
+
+const buildSiblingSubsystemBlock = (siblings?: string[]): string => {
+    const names = (siblings || []).map(n => (n || '').trim()).filter(Boolean);
+    if (!names.length) return '';
+    return `\nOTHER SUBSYSTEMS IN THIS PROJECT (their specifications belong to them, not to the subsystem being generated — do not include them):\n${names.map(n => `- ${n}`).join('\n')}\n`;
+};
+
 const FUNCTION_DESCRIPTION_TECHNICAL_RULES = `Function description rules:
 - Describe intended operation only: what the subsystem provides, controls, transfers, supports, protects, measures, contains, or conditions for the parent system.
 - Start with the subsystem name where natural.
@@ -1074,11 +1091,14 @@ ${formatRule}`;
                 ${FAILURE_MODE_TECHNICAL_RULES}
                 Output strictly the Failure Cause text only.`;
             } else if (lowerLabel.includes("spec")) {
-                corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}".
+                corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Subsystem Function: "${(contextData as any).subsystemFunction || 'Unknown'}".
+                ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems)}
                 The user wrote these specifications: """${currentText}"""
                 Task: Rewrite and enhance them in the correct format.
                 Format: Comma-separated list of "Key: Value Unit".
                 Example: Power: 400 W, Voltage: 415 V, Speed: 3590 RPM, Material: SS316, Protection: IP55.
+                ${SPECS_BOUNDARY_RULES}
+                Precedence: the user's own text is always preserved, even where it looks package-level or exceeds the pair limit. The boundary rules above restrict only what you may ADD from reference data or context.
                 Requirements: Preserve all values the user provided. Do not add values, ratings, materials, limits, or equipment details not present in the user's text. Keep it technical and concise. Do not include the word "Specs:" at the start.
                 Output strictly the specifications text only.`;
             } else {
@@ -1129,10 +1149,14 @@ ${formatRule}`;
                 ${FAILURE_MODE_TECHNICAL_RULES}
                 Output strictly the Failure Cause text only.`;
             } else if (lowerLabel.includes("spec")) {
-                corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}".
-                Task: Generate technical specifications.
+                corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Subsystem Function: "${(contextData as any).subsystemFunction || 'Unknown'}".
+                ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems)}
+                Task: Generate the technical specifications of the subsystem "${contextData.subsystem}" only.
                 Format: Comma-separated list of "Key: Value Unit".
-                Requirements: Use only values, ratings, materials, limits, or equipment details already present in the project context or reference data. If no specifications are provided, return an empty response. Keep it technical and concise. Do not include the word "Specs:" at the start.`;
+                Example: Power: 400 W, Voltage: 415 V, Speed: 3590 RPM, Material: SS316, Protection: IP55.
+                ${SPECS_BOUNDARY_RULES}
+                Requirements: Use only values, ratings, materials, limits, or equipment details already present in the project context or reference data. Do not extract or restate the full contents of the reference data. Keep it technical and concise. Do not include the word "Specs:" at the start.
+                Output strictly the specifications text only.`;
             } else if (lowerLabel.includes("subsystem")) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}".
                 Task: Suggest a Subsystem Name logically related to this System (e.g., if System is Boiler, Subsystem could be Feed Water Pump).
