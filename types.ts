@@ -112,6 +112,8 @@ declare global {
 
 export interface ContextData {
   project?: string;
+  /** The project's Context field — operating philosophy, redundancy, duty. Seeds standby/lead-lag functions. */
+  projectDescription?: string;
   subsystem?: string;
   specs?: string;
   subsystemFunction?: string;

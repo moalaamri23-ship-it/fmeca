@@ -95,21 +95,41 @@ const SPECS_BOUNDARY_RULES = `Subsystem boundary rules:
 - Exclude parent-system, package, skid, or train totals and ratings.
 - Exclude anything belonging to another subsystem, upstream or downstream equipment, or a separate component listed elsewhere.
 - Include a value only when the reference data attributes it to this subsystem. Ambiguous or package-level values are excluded, not guessed.
-- Return at most 12 "Key: Value Unit" pairs; keep the ones most relevant to this subsystem's function.
+- Prefer at most 16 "Key: Value Unit" pairs, keeping the ones most relevant to this subsystem's function. Never drop a value the subsystem's own duty is defined against — inlet/suction and outlet/discharge conditions, rated capacity, design ratings, and protection set points stay even if the list runs long.
 - If no specification in the available context can be attributed to this subsystem, return an empty response.`;
 
-const buildSiblingSubsystemBlock = (siblings?: string[]): string => {
+const buildSiblingSubsystemBlock = (siblings?: string[], noun: string = 'specifications'): string => {
     const names = (siblings || []).map(n => (n || '').trim()).filter(Boolean);
     if (!names.length) return '';
-    return `\nOTHER SUBSYSTEMS IN THIS PROJECT (their specifications belong to them, not to the subsystem being generated — do not include them):\n${names.map(n => `- ${n}`).join('\n')}\n`;
+    return `\nOTHER SUBSYSTEMS IN THIS PROJECT (their ${noun} belong to them, not to the subsystem being generated — do not include them):\n${names.map(n => `- ${n}`).join('\n')}\n`;
 };
 
+// The Context field carries operating philosophy: redundancy, standby/lead-lag
+// duty, and control behaviour. Without it a standby unit reads as a continuous
+// one and "fails to start on demand" can never be derived downstream.
+const buildSystemDescriptionBlock = (desc?: string): string => {
+    const text = (desc || '').trim();
+    if (!text) return '';
+    return `\nSYSTEM CONTEXT (operating philosophy, configuration, redundancy and duty of the parent system — use it to establish this subsystem's duty and protective role, not to describe other subsystems):\n"""\n${text}\n"""\n`;
+};
+
+// The function description is the seed for every functional failure, and
+// decomposeFunction mines it for five separate dimensions. A single sentence
+// carries the primary duty only, so containment, protection and standby duties
+// -- where the high-severity functional failures live -- were unrecoverable
+// downstream. The checklist below is a coverage list, not a menu.
 const FUNCTION_DESCRIPTION_TECHNICAL_RULES = `Function description rules:
-- Describe intended operation only: what the subsystem provides, controls, transfers, supports, protects, measures, contains, or conditions for the parent system.
-- Start with the subsystem name where natural.
-- Use exact values from Specs only when Specs provides them. If Specs is empty or generic, do not invent numbers; use "required", "specified", or "operating range".
-- Do not include functional failures, failure modes, causes, effects, alarms, trips, inspections, PM tasks, controls, mitigations, recommendations, or maintenance wording.
-- Output one concise sentence only.`;
+- Describe intended operation only. Cover each dimension below that the available context supports, and stay silent on the ones it does not:
+  1. Mission: the value, service, conversion, movement, or storage the subsystem must provide, with its performance standard.
+  2. Controlled performance: variables, setpoints, sequences, or demand response it must maintain.
+  3. Operating envelope: measurable ranges, design ratings, or limits within which operation must stay acceptable.
+  4. Containment: what the subsystem must hold in or keep separated — process fluid, lubricant, pressure, heat.
+  5. Protection and duty: protective functions it must perform, and its operating duty (continuous, standby, lead/lag, load/unload, intermittent) when the system context states one.
+- Write the performance standard as an exact value whenever Specs provides one. If Specs is empty or generic, do not invent numbers; use "required", "specified", or "operating range".
+- Absorbed power, design pressure, design temperature, and set points are ratings, limits, or protection thresholds — never deliverables. Do not write them as something the subsystem "delivers" or "provides".
+- Do not include model numbers, serial numbers, or equipment identifiers; they are identity, not function.
+- Do not include functional failures, failure modes, causes, effects, alarms, trips, inspections, PM tasks, controls, mitigations, recommendations, or maintenance wording. A protective function is what the subsystem must do; a trip setting or inspection task is not.
+- Output 2 to 4 plain sentences, no list formatting. Use one sentence per dimension and merge dimensions that read naturally together. Never pad to reach four.`;
 
 const FUNCTION_BREAKDOWN_TECHNICAL_RULES = `Function breakdown rules:
 - Break the subsystem function into reasonable smaller intended actions only when decomposition is part of this workflow.
@@ -1049,6 +1069,8 @@ ${formatRule}`;
         if (currentText && (wordCount > 5 || isFMECAContentField)) {
             if (isFunctionDescriptionField) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
+                ${buildSystemDescriptionBlock((contextData as any).projectDescription)}
+                ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
                 The user wrote this Function Description: """${currentText}"""
                 Task: Rewrite and enhance it as a proper Function Description.
                 ${FMECA_HIERARCHY_RULES}
@@ -1114,7 +1136,9 @@ ${formatRule}`;
         } else {
             if (isFunctionDescriptionField) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
-                Task: Write a Function Description for this subsystem.
+                ${buildSystemDescriptionBlock((contextData as any).projectDescription)}
+                ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
+                Task: Write a Function Description for the subsystem "${contextData.subsystem}".
                 ${FMECA_HIERARCHY_RULES}
                 ${FMECA_CONCISE_WORDING_RULES}
                 ${FUNCTION_DESCRIPTION_TECHNICAL_RULES}
