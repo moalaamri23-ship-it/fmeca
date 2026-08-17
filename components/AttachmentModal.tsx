@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { LocalFileSystemProvider, sanitizeName } from '../services/FileSystem';
+import { LocalFileSystemProvider, sanitizeName, isCancellation } from '../services/FileSystem';
 import { FileEntry } from '../types';
 
 interface AttachmentModalProps {
@@ -13,17 +13,19 @@ interface AttachmentModalProps {
 }
 
 export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClose, entityName, provider, pathParts, projectId }) => {
-    if(!isOpen) return null;
+    // Every hook must run on every render — bail out below the hook list, never above it.
     const [files, setFiles] = useState<FileEntry[]>([]);
     const [loading, setLoading] = useState(false);
     const [mode, setMode] = useState<'view' | 'upload' | 'create'>('view');
     const [customFolder, setCustomFolder] = useState("");
     const [msg, setMsg] = useState("");
+    const [hasRoot, setHasRoot] = useState<boolean | null>(null);
 
     const loadFiles = async () => {
         if(!provider || !projectId) return;
         setLoading(true); setMsg("");
         try {
+            setHasRoot(await provider.hasRoot(projectId));
             const list = await provider.listFiles(projectId, pathParts);
             setFiles(list);
         } catch(e: any) {
@@ -38,16 +40,41 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
         // eslint-disable-next-line
     }, [isOpen, provider, projectId, pathParts.join("|")]);
 
+    // Reset transient UI whenever the modal is reopened on a different entity.
+    useEffect(() => {
+        if(isOpen) { setMode('view'); setCustomFolder(""); }
+    }, [isOpen, pathParts.join("|")]);
+
+    // Opens the OS folder picker. Called straight from the click so the browser
+    // still sees the user gesture the File System Access API requires.
+    const handlePickRoot = async () => {
+        if(!provider || !projectId) return;
+        setMsg("");
+        try {
+            await provider.chooseRoot(projectId);
+            setHasRoot(true);
+            loadFiles();
+        } catch(e: any) {
+            if(isCancellation(e)) return;
+            setMsg(e?.message || "Could not open the folder picker.");
+        }
+    };
+
     const handleCreateFolder = async () => {
         if(!provider || !projectId) return;
+        const finalParts = pathParts.length ? [...pathParts] : ['Attachments'];
+        if(customFolder.trim()) finalParts[finalParts.length-1] = customFolder;
+        setMsg("");
         try {
-            const finalParts = [...pathParts];
-            if(customFolder) finalParts[finalParts.length-1] = customFolder;
             await provider.ensureFolderForEntity(projectId, finalParts);
             setMsg("Folder ready.");
+            setHasRoot(true);
             setMode('view');
             loadFiles();
-        } catch(e: any) { setMsg("Error creating folder: " + e.message); }
+        } catch(e: any) {
+            if(isCancellation(e)) return;
+            setMsg("Error creating folder: " + (e?.message || e));
+        }
     };
 
     const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -58,9 +85,14 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
             await provider.uploadFiles(projectId, pathParts, e.target.files);
             setMsg("Upload successful.");
             loadFiles();
-        } catch(e: any) { setMsg("Upload failed: "+e.message); }
+        } catch(err: any) {
+            if(!isCancellation(err)) setMsg("Upload failed: " + (err?.message || err));
+        }
         setLoading(false);
+        e.target.value = '';
     };
+
+    if(!isOpen) return null;
 
     const DL_EXT=new Set(["doc","docx","dot","dotx","xls","xlsx","xlsm","xltx","ppt","pptx","pptm","pps","ppsx","odt","ods","odp","rtf","zip","rar","7z","tar","gz","bz2","xz","iso","img","exe","msi","dll","bat","cmd","ps1","apk","dmg","pkg"]);
     const dlName=(s:string)=>String(s||"file").replace(/[\\/:*?"<>|]+/g,"_");
@@ -86,6 +118,17 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                 </div>
 
                 {msg && <div className="mb-4 text-xs p-2 bg-yellow-50 text-yellow-700 rounded border border-yellow-200">{msg}</div>}
+
+                {hasRoot === false && (
+                    <div className="p-4 bg-slate-50 rounded border mb-4">
+                        <div className="text-xs text-slate-500 mb-2">
+                            No project folder is linked yet. Pick the folder on your computer where this project's files should live.
+                        </div>
+                        <button onClick={handlePickRoot} className="bg-slate-900 text-white px-4 py-2 rounded text-sm font-bold">
+                            Select Project Folder
+                        </button>
+                    </div>
+                )}
 
                 {mode === 'create' && (
                     <div className="p-4 bg-slate-50 rounded border mb-4">

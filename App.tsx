@@ -11,7 +11,7 @@ import { AttachmentModal } from './components/AttachmentModal';
 import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
-import { LocalFileSystemProvider, sanitizeName } from './services/FileSystem';
+import { LocalFileSystemProvider, sanitizeName, isCancellation } from './services/FileSystem';
 import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch } from './types';
 import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
@@ -522,10 +522,13 @@ setProjects(
         if(!storageProvider) return;
         if(!activeProject) return alert("Please open a project first.");
         try {
-            const h = await window.showDirectoryPicker();
-            await storageProvider.setRoot(activeProject.id, h);
+            await storageProvider.chooseRoot(activeProject.id);
             alert("Base folder set successfully.");
-        } catch(e) { console.error(e); }
+        } catch(e: any) {
+            if(isCancellation(e)) return;
+            console.error(e);
+            alert(e?.message || "Could not set the base folder.");
+        }
     };
 
     const openAttachments = async (type: 'sub' | 'fail', sub: Subsystem, fail: Failure | null = null) => {

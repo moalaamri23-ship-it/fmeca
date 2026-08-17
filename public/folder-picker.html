@@ -1,20 +1,42 @@
 <!DOCTYPE html>
 <html>
 <head><title>Select Folder</title></head>
-<body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8fafc;color:#334155">
+<body style="font-family:sans-serif;display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8fafc;color:#334155">
 <button id="btn" style="padding:12px 28px;font-size:16px;font-weight:600;background:#4f46e5;color:#fff;border:none;border-radius:8px;cursor:pointer">
   Select Project Folder
 </button>
+<div id="err" style="font-size:12px;color:#b91c1c;text-align:center;max-width:340px"></div>
 <script>
-document.getElementById('btn').addEventListener('click', async function () {
-  try {
-    var handle = await window.showDirectoryPicker({ mode: 'readwrite' });
-    window.opener.postMessage({ type: 'fmeca-folder-picked', handle: handle }, window.location.origin);
-  } catch (e) {
-    window.opener.postMessage({ type: 'fmeca-folder-cancelled', error: (e && e.message) || 'cancelled' }, window.location.origin);
+var replied = false;
+
+function reply(msg) {
+  if (replied) return;
+  replied = true;
+  if (window.opener && !window.opener.closed) {
+    window.opener.postMessage(msg, window.location.origin);
+    window.close();
+  } else {
+    // No opener to answer — keep the window up so the user sees why.
+    document.getElementById('err').textContent =
+      'Lost the connection to FMECA Studio. Close this window and try again.';
   }
-  window.close();
+}
+
+document.getElementById('btn').addEventListener('click', async function () {
+  document.getElementById('err').textContent = '';
+  var handle;
+  try {
+    handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+  } catch (e) {
+    if (e && e.name === 'AbortError') { reply({ type: 'fmeca-folder-cancelled' }); return; }
+    document.getElementById('err').textContent = (e && e.message) || 'Could not open the folder picker.';
+    return;
+  }
+  reply({ type: 'fmeca-folder-picked', handle: handle });
 });
+
+// Closing the window without picking counts as a cancellation.
+window.addEventListener('pagehide', function () { reply({ type: 'fmeca-folder-cancelled' }); });
 </script>
 </body>
 </html>
