@@ -58,6 +58,16 @@ const getProjectHandle = async (projectId: string): Promise<FileSystemDirectoryH
     });
 };
 
+const deleteProjectHandle = async (projectId: string): Promise<void> => {
+    const db = await initDB();
+    return new Promise((resolve) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        tx.objectStore(STORE_NAME).delete(projectId);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve(); // best-effort cleanup
+    });
+};
+
 // Thrown when the user closes the picker without choosing — callers treat this as a no-op.
 export class FolderSelectionCancelled extends Error {
     constructor() { super('Folder selection cancelled.'); this.name = 'FolderSelectionCancelled'; }
@@ -65,6 +75,20 @@ export class FolderSelectionCancelled extends Error {
 
 export const isCancellation = (err: any): boolean =>
     !!err && (err.name === 'AbortError' || err.name === 'FolderSelectionCancelled');
+
+const WRITE_DENIED_MSG =
+    'Write access to that folder was refused. Browsers block writing to folders like Documents, Desktop, or Downloads directly — create a subfolder (e.g. Documents/FMECA) and pick that instead.';
+
+// Confirms the handle is actually writable, prompting once if the browser allows it.
+const ensureWritable = async (handle: FileSystemDirectoryHandle): Promise<boolean> => {
+    const opts: FileSystemHandlePermissionDescriptor = { mode: 'readwrite' };
+    try {
+        if ((await handle.queryPermission(opts)) === 'granted') return true;
+        return (await handle.requestPermission(opts)) === 'granted';
+    } catch {
+        return false;
+    }
+};
 
 // Opens a popup (top-level context) to call showDirectoryPicker on behalf of the iframe.
 const pickFolderViaPopup = (): Promise<FileSystemDirectoryHandle> => {
@@ -123,9 +147,14 @@ export class LocalFileSystemProvider {
         if (!handle) return null;
         try {
             const opts: FileSystemHandlePermissionDescriptor = { mode: 'readwrite' };
-            if ((await handle.queryPermission(opts)) === 'granted') { this.liveRoots.set(projectId, handle); return handle; }
-            // In standalone mode, try requesting permission (may show browser prompt).
-            // In iframe mode, requestPermission is blocked — skip it.
+            const state = await handle.queryPermission(opts);
+            if (state === 'granted') { this.liveRoots.set(projectId, handle); return handle; }
+            // Write access denied outright (e.g. the handle was picked read-only by an
+            // older version, or points at a protected folder like Documents). The handle
+            // is unusable — purge it so the user gets a fresh picker instead of a dead cache.
+            if (state === 'denied') { await deleteProjectHandle(projectId); return null; }
+            // state === 'prompt': in standalone mode, try requesting permission
+            // (may show browser prompt). In iframe mode, requestPermission is blocked — skip it.
             if (!isInIframe()) {
                 if ((await handle.requestPermission(opts)) === 'granted') { this.liveRoots.set(projectId, handle); return handle; }
             }
@@ -142,6 +171,9 @@ export class LocalFileSystemProvider {
     // no awaiting before opening the picker, so the user activation is still valid.
     async chooseRoot(projectId: string): Promise<FileSystemDirectoryHandle> {
         const handle = await pickFolder();
+        // Never save a handle that can't be written to — a read-only root would make
+        // every later upload/create fail with an opaque NotAllowedError.
+        if (!(await ensureWritable(handle))) throw new Error(WRITE_DENIED_MSG);
         this.liveRoots.set(projectId, handle);
         await saveProjectHandle(projectId, handle);
         return handle;
@@ -159,24 +191,43 @@ export class LocalFileSystemProvider {
         await saveProjectHandle(projectId, handle);
     }
 
+    // A NotAllowedError mid-write means the root lost (or never had) write access.
+    // Drop the dead handle so the next attempt re-prompts, and explain the cause.
+    private async writeFailed(projectId: string, err: any): Promise<never> {
+        if (err?.name === 'NotAllowedError') {
+            this.liveRoots.delete(projectId);
+            await deleteProjectHandle(projectId);
+            throw new Error(WRITE_DENIED_MSG);
+        }
+        throw err;
+    }
+
     async ensureFolderForEntity(projectId: string, pathParts: string[]): Promise<FileSystemDirectoryHandle> {
         const root = await this.getRoot(projectId);
-        let curr = root;
-        for(const part of pathParts) {
-            const clean = sanitizeName(part);
-            curr = await curr.getDirectoryHandle(clean, { create: true });
+        try {
+            let curr = root;
+            for(const part of pathParts) {
+                const clean = sanitizeName(part);
+                curr = await curr.getDirectoryHandle(clean, { create: true });
+            }
+            return curr;
+        } catch(err: any) {
+            return this.writeFailed(projectId, err);
         }
-        return curr;
     }
 
     async uploadFiles(projectId: string, pathParts: string[], files: FileList): Promise<void> {
         const dir = await this.ensureFolderForEntity(projectId, pathParts);
-        for(let i=0; i<files.length; i++) {
-            const file = files[i];
-            const fileHandle = await dir.getFileHandle(file.name, { create: true });
-            const writable = await fileHandle.createWritable();
-            await writable.write(file);
-            await writable.close();
+        try {
+            for(let i=0; i<files.length; i++) {
+                const file = files[i];
+                const fileHandle = await dir.getFileHandle(file.name, { create: true });
+                const writable = await fileHandle.createWritable();
+                await writable.write(file);
+                await writable.close();
+            }
+        } catch(err: any) {
+            await this.writeFailed(projectId, err);
         }
     }
 

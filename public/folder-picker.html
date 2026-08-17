@@ -32,6 +32,16 @@ document.getElementById('btn').addEventListener('click', async function () {
     document.getElementById('err').textContent = (e && e.message) || 'Could not open the folder picker.';
     return;
   }
+  // Confirm write access here, in a top-level window where the permission prompt works.
+  try {
+    var state = await handle.queryPermission({ mode: 'readwrite' });
+    if (state !== 'granted') state = await handle.requestPermission({ mode: 'readwrite' });
+    if (state !== 'granted') {
+      document.getElementById('err').textContent =
+        'Write access to that folder was refused. Create a subfolder (e.g. Documents/FMECA) and pick that instead.';
+      return;
+    }
+  } catch (e) { /* older browsers without queryPermission — let the app find out */ }
   reply({ type: 'fmeca-folder-picked', handle: handle });
 });
 
