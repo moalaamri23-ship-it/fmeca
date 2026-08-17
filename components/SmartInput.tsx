@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from './Icon';
+import { CiteButton } from './CiteButton';
+import type { CiteState } from './CiteButton';
 import { AIService } from '../services/AIService';
 import { ContextData } from '../types';
 
@@ -22,9 +24,13 @@ interface SmartInputProps {
     azureEndpoint?: string;
     systemContext?: string;
     powerAutomateUrl?: string;
+    /** Citation state for this field. Omitted where a field cannot be cited. */
+    citeState?: CiteState;
+    citeCount?: number;
+    onCite?: () => void;
 }
 
-export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value, onChange, isTextArea, heightClass, onBlur, apiKey, modelName, placeholder, aiSourceMode = 'ai', referenceFileText = '', contextData = {}, aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = '' }) => {
+export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value, onChange, isTextArea, heightClass, onBlur, apiKey, modelName, placeholder, aiSourceMode = 'ai', referenceFileText = '', contextData = {}, aiProvider = '', azureEndpoint = '', systemContext = '', powerAutomateUrl = '', citeState = 'none', citeCount = 0, onCite }) => {
     const [loading, setLoading] = useState(false);
     const [expanded, setExpanded] = useState(false);
     const modalTextRef = useRef<HTMLTextAreaElement>(null);
@@ -63,6 +69,9 @@ export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value
                 <button onClick={(e)=>{e.stopPropagation(); handleAI();}} className="absolute right-2 top-2 text-slate-300 hover:text-brand-600 bg-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition border border-transparent hover:border-slate-200">
                     {loading?"...":<Icon name="wand"/>}
                 </button>
+                {onCite && (
+                    <CiteButton state={citeState} count={citeCount} onClick={onCite} className="right-9" />
+                )}
             </div>
             {expanded && createPortal((
                 <div className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-6" onClick={(e) => { e.stopPropagation(); setExpanded(false); }}>

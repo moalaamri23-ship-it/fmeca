@@ -28,6 +28,8 @@ export interface Mode {
   rpnReason?: string;
   /** Optional source/provenance labels shown only when Hybrid labels are enabled. */
   sourceTags?: string[];
+  /** Evidence found for this mode's fields, keyed by field name. */
+  citations?: Record<string, FieldCitations>;
 }
 
 export interface Failure {
@@ -42,6 +44,8 @@ export interface Failure {
   failedState?: FailedStateType;
   /** Set when generation fell back to a template — the text is a placeholder, not analysis. */
   needsReview?: boolean;
+  /** Evidence found for this failure's fields, keyed by field name. */
+  citations?: Record<string, FieldCitations>;
 }
 
 /** SAE JA1011 5.1 function classes. Secondary functions carry the highest-severity failures. */
@@ -82,6 +86,8 @@ export interface Subsystem {
   breakdownMatches?: BreakdownMatch[];
   funcHashAtBreakdown?: string;
   sourceTags?: string[];
+  /** Evidence found for this subsystem's fields, keyed by field name. */
+  citations?: Record<string, FieldCitations>;
 }
 
 export interface Project {
@@ -139,9 +145,6 @@ export type SendFilesMode = 'text' | 'all';
  * A pointer from somewhere in the app back to an exact passage inside a
  * reference file. The viewer locates `quote` (or `anchor`) in the document and
  * highlights it; `page`/`line` only speed that search up and label the card.
- *
- * Attachments open with no citations today. The type is the contract the
- * per-field citations will arrive on, which is why the panel exists already.
  */
 export interface ViewerCitation {
   id: string;
@@ -149,6 +152,8 @@ export interface ViewerCitation {
   index: number;
   /** File the passage lives in — matched against the folder listing by name. */
   fileName: string;
+  /** Which searched source this came from. Survives two files sharing a name. */
+  sourceId?: string;
   /** Text the citation points at. */
   anchor: string;
   /** The document's own wording, when it is known exactly. */
@@ -159,8 +164,44 @@ export interface ViewerCitation {
   line?: number;
   /** Where this citation came from, e.g. "Subsystem function". */
   label?: string;
+  /** The model's one clause on how this passage supports the field. */
+  why?: string;
   /** True when the anchor had to be shortened to be located. */
   approximate?: boolean;
+}
+
+/**
+ * Where a cited passage can come from. The first two are the app-wide knowledge
+ * files; the last two are the documents filed under a subsystem or one of its
+ * functional failures.
+ */
+export type CitedSourceKind = 'knowledge' | 'checklist' | 'subsystem' | 'function';
+
+/** A source that was searched, recorded so the modal can reopen it later. */
+export interface CitedSourceRef {
+  id: string;
+  kind: CitedSourceKind;
+  fileName: string;
+  /** Folder the file lives in. Empty for the knowledge and checklist text. */
+  pathParts: string[];
+}
+
+/**
+ * The evidence found for ONE field, stored on the entity that owns the field.
+ *
+ * Citations are not produced by generation — they are searched for afterwards,
+ * against the field's text as it stands. `textHash` records which text that
+ * was, so an edit afterwards shows the evidence as stale rather than silently
+ * pointing at wording nobody cited.
+ */
+export interface FieldCitations {
+  textHash: string;
+  generatedAt: string;
+  items: ViewerCitation[];
+  /** Every source searched, including the ones that answered nothing. */
+  sources: CitedSourceRef[];
+  /** Names of the sources that yielded no passage. */
+  emptySources?: string[];
 }
 
 // Minimal types for File System Access API if not present in environment

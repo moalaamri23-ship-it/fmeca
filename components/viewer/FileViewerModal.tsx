@@ -6,6 +6,8 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { DocumentSearchBar, DocumentSearchProvider, SmartSearchPanel } from './documentSearch';
 import { useSmartPanelActive } from './searchContext';
 import { fileKey as makeFileKey, useFileBytes } from './useFileBytes';
+import type { BytesState } from './useFileBytes';
+import type { CiteSource } from '../../services/CitationCorpus';
 import { extractDocumentText } from '../../services/DocumentText';
 import { buildDocumentPayload } from '../../services/DocumentPayload';
 import type { DocumentPayload } from '../../services/DocumentPayload';
@@ -51,13 +53,16 @@ const ReferenceCard: React.FC<{
                 {citation.quote || citation.snippet || citation.anchor}
             </p>
         )}
+        {citation.why && (
+            <p className="mt-1 text-[10px] leading-relaxed text-slate-400 italic">{citation.why}</p>
+        )}
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-slate-400">
             {locationLabel(citation) && <span>{locationLabel(citation)}</span>}
             {citation.approximate && (
                 <span className="rounded-full border border-amber-200 bg-amber-50 px-1.5 text-amber-700">approximate</span>
             )}
             {missing && (
-                <span className="rounded-full border border-slate-200 bg-slate-100 px-1.5">not in this folder</span>
+                <span className="rounded-full border border-slate-200 bg-slate-100 px-1.5">no longer available</span>
             )}
         </div>
     </button>
@@ -66,30 +71,45 @@ const ReferenceCard: React.FC<{
 /**
  * The citations list.
  *
- * Attachments open with nothing in it yet — per-field citations are what will
- * fill it, and the panel is here now so that arriving feature has its place and
- * this one has a reason to keep the layout it needs.
+ * Opened from a field's cite button it holds that field's evidence, across
+ * every source that was searched; opened from the References panel it is empty,
+ * because nothing has cited that folder yet.
  */
 const ReferencePanel: React.FC<{
     groups: [string, ViewerCitation[]][];
     known: Set<string>;
     activeId: string | null;
     onSelect: (id: string) => void;
-}> = ({ groups, known, activeId, onSelect }) => {
+    /** Sources searched that supported nothing — worth saying, not worth a card. */
+    emptySources?: string[];
+    onRecite?: () => void;
+    reciting?: boolean;
+}> = ({ groups, known, activeId, onSelect, emptySources = [], onRecite, reciting = false }) => {
     // Smart results take the same slot while they are on screen, so the two
     // panels never compete for the viewer's width.
     if (useSmartPanelActive()) return null;
 
     return (
         <aside className="flex w-80 shrink-0 flex-col border-l border-slate-200 bg-slate-50">
-            <div className="border-b border-slate-200 px-3 py-2">
+            <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-3 py-2">
                 <p className="text-[10px] font-bold uppercase text-slate-400">Citations</p>
+                {onRecite && (
+                    <button
+                        onClick={onRecite}
+                        disabled={reciting}
+                        title="Search the sources again for this field"
+                        className="flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-brand-600 transition hover:bg-brand-50 disabled:cursor-not-allowed disabled:text-slate-300"
+                    >
+                        <Icon name={reciting ? 'spinner' : 'rotate'} className={cn('w-3 h-3', reciting && 'animate-spin')} />
+                        {reciting ? 'Searching…' : 'Re-search'}
+                    </button>
+                )}
             </div>
             <div className="flex-1 space-y-3 overflow-y-auto scroll-thin px-3 py-3">
                 {groups.length === 0 ? (
                     <p className="px-1 py-4 text-[11px] leading-relaxed text-slate-400 italic">
-                        No citations point at this folder yet. Once a field cites a reference file, its passage
-                        will be listed here and highlighted in the document.
+                        Nothing in the sources supported this text. Re-search after editing the field, or attach
+                        the document this came from to the subsystem.
                     </p>
                 ) : (
                     groups.map(([fileName, list]) => (
@@ -108,6 +128,13 @@ const ReferencePanel: React.FC<{
                             ))}
                         </div>
                     ))
+                )}
+                {emptySources.length > 0 && (
+                    <div className="border-t border-slate-200 pt-2">
+                        <p className="text-[10px] leading-relaxed text-slate-400">
+                            Searched, nothing found: {emptySources.join(', ')}
+                        </p>
+                    </div>
                 )}
             </div>
         </aside>
@@ -129,12 +156,23 @@ export const FileViewerModal: React.FC<{
     /** Every file in the open folder — a citation names one of these. */
     files: FileEntry[];
     pathParts: string[];
+    /**
+     * Citing a field reaches past one folder: the knowledge file, the checklist,
+     * the subsystem's documents and the failure's. When these are given they
+     * replace `files` as what the viewer can open and jump between.
+     */
+    sources?: CiteSource[];
     /** The file that was clicked. A selected citation can point at another. */
     openName: string | null;
     onOpenName: (name: string) => void;
     citations?: ViewerCitation[];
     activeCitationId?: string | null;
     onSelectCitation?: (id: string) => void;
+    /** Sources that were searched and supported nothing. */
+    emptySources?: string[];
+    /** Run the citation search again for the same field. */
+    onRecite?: () => void;
+    reciting?: boolean;
     /** Live AI settings, for smart search. Null disables it with a reason. */
     ai?: SmartSearchConfig | null;
     /** How much of the file may be sent to the AI. */
@@ -142,9 +180,9 @@ export const FileViewerModal: React.FC<{
     /** What these references belong to, e.g. a subsystem name. */
     entityName?: string | null;
 }> = ({
-    isOpen, onClose, provider, files, pathParts, openName, onOpenName,
-    citations = [], activeCitationId = null, onSelectCitation, ai = null,
-    sendFiles = 'text', entityName,
+    isOpen, onClose, provider, files, pathParts, sources, openName, onOpenName,
+    citations = [], activeCitationId = null, onSelectCitation, emptySources = [],
+    onRecite, reciting = false, ai = null, sendFiles = 'text', entityName,
 }) => {
     const [panelOpen, setPanelOpen] = useState(true);
     const [text, setText] = useState<{ key: string; value: string } | null>(null);
@@ -158,21 +196,68 @@ export const FileViewerModal: React.FC<{
         [citations, activeCitationId]
     );
 
-    // A selected citation decides which file is shown, as long as the folder has
-    // it; otherwise the file the reader clicked stays open.
-    const shownName = useMemo(() => {
-        if (active && files.some(f => f.name === active.fileName)) return active.fileName;
-        return openName;
-    }, [active, files, openName]);
+    /**
+     * Every document this viewer can open, whether that is one folder's files or
+     * the whole set a field was cited against. `id` is the folder-qualified key,
+     * so two documents of the same name in different folders never collide — and
+     * it is also the bytes cache key, which is what `forgetFileBytes` deletes.
+     */
+    const docs = useMemo(
+        () =>
+            sources
+                ? sources.map(source => ({
+                      id: source.id,
+                      fileName: source.fileName,
+                      entry: source.entry ?? null,
+                      text: source.text,
+                  }))
+                : files.map(file => ({
+                      id: makeFileKey(pathParts, file.name),
+                      fileName: file.name,
+                      entry: file,
+                      text: undefined as string | undefined,
+                  })),
+        [sources, files, pathParts]
+    );
 
-    const entry = useMemo(() => files.find(f => f.name === shownName) ?? null, [files, shownName]);
+    // A selected citation decides which document is shown — by the source it was
+    // found in, falling back to the name. Otherwise the file the reader clicked
+    // stays open.
+    const doc = useMemo(() => {
+        if (active) {
+            const bySource = active.sourceId ? docs.find(d => d.id === active.sourceId) : undefined;
+            if (bySource) return bySource;
+            const byName = docs.find(d => d.fileName === active.fileName);
+            if (byName) return byName;
+        }
+        return docs.find(d => d.fileName === openName) ?? (sources ? docs[0] ?? null : null);
+    }, [active, docs, openName, sources]);
+
+    const shownName = doc?.fileName ?? null;
+    const entry = doc?.entry ?? null;
     const category = shownName ? categoryFor(shownName) : 'unsupported';
-    const key = shownName ? makeFileKey(pathParts, shownName) : '';
-    const bytes = useFileBytes(isOpen ? provider : null, isOpen ? entry : null, key);
-    // The citation only applies to the document it names.
-    const citation = active && active.fileName === shownName ? active : null;
+    const key = doc?.id ?? '';
 
-    const known = useMemo(() => new Set(files.map(f => f.name)), [files]);
+    // The knowledge and checklist sources are text, not files. Encoding them as
+    // bytes lets them travel the same path as everything else — the text
+    // renderer decodes them, and smart search reads them, with no special case.
+    const virtualBytes = useMemo(
+        () => (doc?.text != null ? (new TextEncoder().encode(doc.text).buffer as ArrayBuffer) : null),
+        [doc]
+    );
+    const fileBytes = useFileBytes(
+        isOpen && !virtualBytes ? provider : null,
+        isOpen && !virtualBytes ? entry : null,
+        key
+    );
+    const bytes: BytesState = virtualBytes ? { status: 'ready', bytes: virtualBytes } : fileBytes;
+
+    // The citation only applies to the document it was found in.
+    const citation = active && doc && (active.sourceId ? active.sourceId === doc.id : active.fileName === doc.fileName)
+        ? active
+        : null;
+
+    const known = useMemo(() => new Set(docs.map(d => d.fileName)), [docs]);
 
     // Grouped by file, so citations spanning several references read clearly.
     const groups = useMemo(() => {
@@ -347,6 +432,9 @@ export const FileViewerModal: React.FC<{
                                 groups={groups}
                                 known={known}
                                 activeId={activeCitationId}
+                                emptySources={emptySources}
+                                onRecite={onRecite}
+                                reciting={reciting}
                                 onSelect={id => {
                                     onSelectCitation?.(id);
                                     const target = citations.find(c => c.id === id);

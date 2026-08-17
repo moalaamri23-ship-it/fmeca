@@ -8,12 +8,16 @@ import { SystemModesModal } from './components/SystemModesModal';
 import { TreeNode } from './components/TreeNode';
 import { HybridMapView } from './components/HybridMapView';
 import { AttachmentModal } from './components/AttachmentModal';
+import { CitationModal } from './components/CitationModal';
+import type { CiteState } from './components/CiteButton';
 import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
 import { LocalFileSystemProvider, sanitizeName, isCancellation } from './services/FileSystem';
 import { RICH_LIBRARY } from './constants';
-import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch, SendFilesMode } from './types';
+import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch, SendFilesMode, FieldCitations } from './types';
+import { collectCiteSources, rehydrateSources, type CiteSource, type CorpusRequest } from './services/CitationCorpus';
+import { citationsAreStale, citeField, isCitable } from './services/CitationService';
 import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
 import { RcmRegisterModal, type RcmRegisterSubmit } from './components/RcmRegisterModal';
 import { ImportProjectModal } from './components/ImportProjectModal';
@@ -539,6 +543,176 @@ setProjects(
     const openAttachments = async (type: 'sub' | 'fail', sub: Subsystem, fail: Failure | null = null) => {
         if(!storageProvider) return;
         setAttachModal({ open: true, type, entity: fail || sub, sub });
+    };
+
+    /* ── CITATIONS ───────────────────────────────────────────────────────────
+     *
+     * A field's citations are searched for on demand, never as a side effect of
+     * generation: the button asks "what in the references supports what this
+     * field says", and the answer is stored on the entity that owns the field.
+     * One state machine drives the button, the run and the modal.
+     */
+
+    /** Which field a citation run or modal belongs to. */
+    interface CiteTarget {
+        subId: string;
+        failId?: string;
+        modeId?: string;
+        /** The property on the entity, e.g. 'mitigation'. */
+        field: string;
+        /** What the reader sees, e.g. "Mitigation". */
+        label: string;
+    }
+
+    const [citeModal, setCiteModal] = useState<{ target: CiteTarget; sources: CiteSource[] } | null>(null);
+    /** The field being searched right now — only one runs at a time. */
+    const [citeRunning, setCiteRunning] = useState<string | null>(null);
+    const [citeError, setCiteError] = useState<string | null>(null);
+
+    const citeKey = (t: CiteTarget) => [t.subId, t.failId ?? '', t.modeId ?? '', t.field].join('|');
+
+    /** The entity that owns a field, and the field's current text. */
+    const citeEntity = (target: CiteTarget): { citations?: Record<string, FieldCitations>; text: string } | null => {
+        const sub = activeProject?.subsystems.find(s => s.id === target.subId);
+        if (!sub) return null;
+        if (!target.failId) return { citations: sub.citations, text: String((sub as any)[target.field] ?? '') };
+        const fail = sub.failures.find(f => f.id === target.failId);
+        if (!fail) return null;
+        if (!target.modeId) return { citations: fail.citations, text: String((fail as any)[target.field] ?? '') };
+        const mode = fail.modes.find(m => m.id === target.modeId);
+        if (!mode) return null;
+        return { citations: mode.citations, text: String((mode as any)[target.field] ?? '') };
+    };
+
+    const storedCitations = (target: CiteTarget): FieldCitations | undefined =>
+        citeEntity(target)?.citations?.[target.field];
+
+    /** Write a field's citations back onto its entity, immutably. */
+    const setStoredCitations = (target: CiteTarget, found: FieldCitations) => {
+        setActiveProject(p => {
+            if (!p) return p;
+            const merge = (existing: Record<string, FieldCitations> | undefined) => ({
+                ...(existing || {}),
+                [target.field]: found,
+            });
+            return touchProject({
+                ...p,
+                subsystems: p.subsystems.map(s => {
+                    if (s.id !== target.subId) return s;
+                    if (!target.failId) return { ...s, citations: merge(s.citations) };
+                    return {
+                        ...s,
+                        failures: s.failures.map(f => {
+                            if (f.id !== target.failId) return f;
+                            if (!target.modeId) return { ...f, citations: merge(f.citations) };
+                            return {
+                                ...f,
+                                modes: f.modes.map(m =>
+                                    m.id === target.modeId ? { ...m, citations: merge(m.citations) } : m
+                                ),
+                            };
+                        }),
+                    };
+                }),
+            });
+        });
+    };
+
+    /**
+     * What the field's button shows right now. The owner is handed in rather
+     * than looked up: this runs for every field on screen, and the row being
+     * rendered already has its subsystem, failure or mode in hand.
+     */
+    const citeStateFor = (
+        target: CiteTarget,
+        owner: { citations?: Record<string, FieldCitations> }
+    ): { state: CiteState; count: number } => {
+        if (citeRunning === citeKey(target)) return { state: 'running', count: 0 };
+        const stored = owner.citations?.[target.field];
+        if (!stored || stored.items.length === 0) return { state: 'none', count: 0 };
+        const text = String((owner as any)[target.field] ?? '');
+        return { state: citationsAreStale(stored, text) ? 'stale' : 'cited', count: stored.items.length };
+    };
+
+    /** The knowledge, checklist and attachment scope a field is cited against. */
+    const citeCorpusRequest = (target: CiteTarget): CorpusRequest | null => {
+        const sub = activeProject?.subsystems.find(s => s.id === target.subId);
+        if (!sub) return null;
+        const fail = target.failId ? sub.failures.find(f => f.id === target.failId) : undefined;
+        return {
+            provider: storageProvider,
+            projectId: activeProject?.id ?? null,
+            subName: sub.name,
+            failDesc: fail?.desc,
+            knowledgeName: globalFileName,
+            knowledgeText: globalFileText,
+            checklistName: checklistFileName,
+            checklistText: checklistText,
+        };
+    };
+
+    /** Search every source in scope, store what is found, and show it. */
+    const runCitation = async (target: CiteTarget) => {
+        const key = citeKey(target);
+        if (citeRunning) return;
+        const entity = citeEntity(target);
+        const corpus = citeCorpusRequest(target);
+        if (!entity || !corpus) return;
+        if (!isCitable(entity.text)) {
+            setCiteError('There is not enough text in this field to cite.');
+            return;
+        }
+        setCiteError(null);
+        setCiteRunning(key);
+        try {
+            const sources = await collectCiteSources(corpus);
+            const found = await citeField({
+                fieldLabel: target.label,
+                fieldText: entity.text,
+                sources,
+                provider: storageProvider,
+                ai: { apiKey, model: modelName, provider: aiProvider as any, azureEndpoint, powerAutomateUrl },
+                sendFiles: sendFilesMode,
+            });
+            setStoredCitations(target, {
+                textHash: found.textHash,
+                generatedAt: found.generatedAt,
+                items: found.items,
+                sources: found.sources,
+                emptySources: found.emptySources,
+            });
+            setCiteModal({ target, sources });
+            if (found.failures.length > 0) {
+                setCiteError(
+                    `Could not read ${found.failures.map(f => f.fileName).join(', ')}. The rest were searched.`
+                );
+            }
+        } catch (e: any) {
+            setCiteError(e?.message || 'The citation search failed.');
+        } finally {
+            setCiteRunning(null);
+        }
+    };
+
+    /**
+     * The button's one action. Nothing found yet means search first; evidence
+     * already found opens straight onto it, and re-searching lives in the modal.
+     */
+    const openCitations = async (target: CiteTarget) => {
+        const stored = storedCitations(target);
+        if (!stored || stored.items.length === 0) {
+            await runCitation(target);
+            return;
+        }
+        const corpus = citeCorpusRequest(target);
+        if (!corpus) return;
+        setCiteModal({ target, sources: await rehydrateSources(stored.sources, corpus) });
+    };
+
+    /** Props for one field's cite button — spread straight onto SmartInput. */
+    const citeProps = (target: CiteTarget, owner: { citations?: Record<string, FieldCitations> }) => {
+        const { state, count } = citeStateFor(target, owner);
+        return { citeState: state, citeCount: count, onCite: () => { void openCitations(target); } };
     };
 
     const getAttachmentPath = () => {
@@ -1846,7 +2020,7 @@ render();
 	                                                        <SourceBadges tags={sub.sourceTags} />
 	                                                    </div>
 	                                                </div>
-                                                <SmartInput label="Specs" value={sub.specs} onChange={v => updateSub(sub.id, 'specs', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, subsystemFunction: sub.func, siblingSubsystems: siblingSubsystemNames(sub.id)}} />
+                                                <SmartInput label="Specs" value={sub.specs} onChange={v => updateSub(sub.id, 'specs', v)} {...citeProps({subId: sub.id, field: 'specs', label: 'Specs'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, subsystemFunction: sub.func, siblingSubsystems: siblingSubsystemNames(sub.id)}} />
                                                 <div className="mt-2 space-y-1">
                                                     <div className="text-[10px] font-semibold uppercase text-slate-500">Subsystem image (AI)</div>
                                                     <div className="flex items-center gap-2 flex-nowrap">
@@ -1888,7 +2062,7 @@ render();
                                         </div>
                                         {!sub.collapsed && (
                                             <div className="animate-enter">
-                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" labelAddon={<button onClick={(e) => { e.stopPropagation(); setBreakdownSubId(sub.id); }} title="View Function Breakdown" className="text-slate-400 hover:text-brand-600 transition text-[11px] leading-none">⊞</button>} value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, projectDescription: activeProject.desc, subsystem: sub.name, specs: sub.specs, siblingSubsystems: siblingSubsystemNames(sub.id)}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2">{genId===sub.id ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
+                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" labelAddon={<button onClick={(e) => { e.stopPropagation(); setBreakdownSubId(sub.id); }} title="View Function Breakdown" className="text-slate-400 hover:text-brand-600 transition text-[11px] leading-none">⊞</button>} value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} {...citeProps({subId: sub.id, field: 'func', label: 'Function'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, projectDescription: activeProject.desc, subsystem: sub.name, specs: sub.specs, siblingSubsystems: siblingSubsystemNames(sub.id)}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2">{genId===sub.id ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full text-left text-sm border-collapse">
                                                         <thead className="bg-slate-50 text-slate-500 text-xs font-bold uppercase"><tr><th className="p-2 border-r w-1/5">Functional Failure</th><th className="p-2 border-r w-1/6">Mode</th><th className="p-2 border-r w-1/6">Effect</th><th className="p-2 border-r w-1/6">Cause</th><th className="p-2 border-r w-1/5">Controls &amp; Mitigation</th>{showRPN && <th className="p-2 text-center">RPN</th>}<th className="p-2 text-center">Edit</th></tr></thead>
@@ -1900,7 +2074,7 @@ render();
                                                                             <div className="flex items-start p-2 gap-2 group">
                                                                                 <button onClick={(e)=>{e.stopPropagation(); toggleFail(sub.id, fail.id)}} className="mt-1 text-slate-400"><Icon name={fail.collapsed?"chevronDown":"chevronUp"}/></button>
                                                                                 <div className="flex-1">
-	                                                                                    <SmartInput label="Functional Failure" value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func}} />
+	                                                                                    <SmartInput label="Functional Failure" value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} {...citeProps({subId: sub.id, failId: fail.id, field: 'desc', label: 'Functional Failure'}, fail)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func}} />
 	                                                                                    <SourceBadges tags={fail.sourceTags} />
                                                                                     {(fail.failedState || fail.needsReview) && (
                                                                                         <div className="flex flex-wrap items-center gap-1 mt-1">
@@ -1928,10 +2102,10 @@ render();
                                                                     {!fail.collapsed && fail.modes.map((mode, mIdx) => (
                                                                         <tr key={mode.id} className="group hover:bg-slate-50">
                                                                             <td className="p-2 border-r bg-slate-50/10 text-right text-xs text-slate-300">M{mIdx+1}</td>
-	                                                                            <td className="p-2 border-r"><SmartInput label="Failure Mode" value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={scopedSystemContext(sub.name, sub.specs, sub.func)} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /><SourceBadges tags={mode.sourceTags} /></td>
-                                                                            <td className="p-2 border-r"><SmartInput label="Failure Effect" value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
-                                                                            <td className="p-2 border-r"><SmartInput label="Failure Cause" value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
-	                                                                            <td className="p-2 border-r"><div className="mb-2"><MitigationBuilder label="Current Controls" placeholder="Existing controls (D scored against these)..." value={mode.currentControls || ""} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'currentControls', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></div><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, detectionScore: Number(mode.rpn?.d) || 5, currentControls: mode.currentControls || "", siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
+	                                                                            <td className="p-2 border-r"><SmartInput label="Failure Mode" value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'mode', label: 'Failure Mode'}, mode)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={scopedSystemContext(sub.name, sub.specs, sub.func)} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /><SourceBadges tags={mode.sourceTags} /></td>
+                                                                            <td className="p-2 border-r"><SmartInput label="Failure Effect" value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'effect', label: 'Failure Effect'}, mode)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
+                                                                            <td className="p-2 border-r"><SmartInput label="Failure Cause" value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'cause', label: 'Failure Cause'}, mode)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
+	                                                                            <td className="p-2 border-r"><div className="mb-2"><MitigationBuilder label="Current Controls" placeholder="Existing controls (D scored against these)..." value={mode.currentControls || ""} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'currentControls', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'currentControls', label: 'Current Controls'}, mode)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></div><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'mitigation', label: 'Mitigation'}, mode)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, detectionScore: Number(mode.rpn?.d) || 5, currentControls: mode.currentControls || "", siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
                                                                             {showRPN && <td className="p-2 text-center"><div className="flex justify-center gap-0.5 mb-1"><RpnScoreInput mode={mode} scoreKey="s" value={mode.rpn.s} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, s:v})}/><RpnScoreInput mode={mode} scoreKey="o" value={mode.rpn.o} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, o:v})}/><RpnScoreInput mode={mode} scoreKey="d" value={mode.rpn.d} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, d:v})}/></div><RpnTotalBadge mode={mode} colorClass={getRpnColor(rpnTotal(mode.rpn))} /></td>}
                                                                             <td className="p-2 text-center opacity-0 group-hover:opacity-100"><div className="flex flex-col items-center gap-1"><button onClick={(e)=>{e.stopPropagation();deleteMode(sub.id,fail.id,mode.id)}} className="text-red-500 mb-2"><Icon name="trash"/></button><button onClick={(e)=>{e.stopPropagation();aiScoreModeRpn(sub.id,fail.id,mode.id)}} className={`text-blue-500 text-sm ${rpnLoadingId===String(mode.id) ? "animate-pulse scale-110 drop-shadow-[0_0_6px_rgba(59,130,246,0.6)]" : ""}`} title="AI score S/O/D">🤖</button></div></td>
                                                                         </tr>
@@ -2132,6 +2306,31 @@ render();
                         ai={{ apiKey, model: modelName, provider: aiProvider, azureEndpoint, powerAutomateUrl }}
                         sendFiles={sendFilesMode}
                     />
+                    {citeModal && (() => {
+                        const stored = storedCitations(citeModal.target);
+                        const subName = activeProject.subsystems.find(s => s.id === citeModal.target.subId)?.name || '';
+                        return (
+                            <CitationModal
+                                isOpen={true}
+                                onClose={() => setCiteModal(null)}
+                                provider={storageProvider}
+                                sources={citeModal.sources}
+                                citations={stored?.items || []}
+                                emptySources={stored?.emptySources}
+                                onRecite={() => { void runCitation(citeModal.target); }}
+                                reciting={citeRunning === citeKey(citeModal.target)}
+                                ai={{ apiKey, model: modelName, provider: aiProvider as any, azureEndpoint, powerAutomateUrl }}
+                                sendFiles={sendFilesMode}
+                                entityName={[citeModal.target.label, subName].filter(Boolean).join(' · ')}
+                            />
+                        );
+                    })()}
+                    {citeError && (
+                        <div className="fixed bottom-4 left-1/2 z-[10000] -translate-x-1/2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800 shadow-lg flex items-center gap-3">
+                            <span>{citeError}</span>
+                            <button onClick={() => setCiteError(null)} className="font-bold text-amber-600 hover:text-amber-800">×</button>
+                        </div>
+                    )}
                 </div>
             )}
             {showSystemModes && (

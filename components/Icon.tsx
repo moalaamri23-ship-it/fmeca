@@ -15,7 +15,8 @@ export const Icon = ({ name, className="w-5 h-5" }: { name: string, className?: 
         rotate: "M4 4v5h5M4 9a8 8 0 1114.9 4", undo: "M3 10h11a4 4 0 010 8h-3M3 10l4-4M3 10l4 4",
         sparkles: "M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z",
         panelRight: "M4 6a2 2 0 012-2h12a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm11-2v16",
-        spinner: "M12 3a9 9 0 019 9"
+        spinner: "M12 3a9 9 0 019 9",
+        quote: "M9 7H6a2 2 0 00-2 2v3h5V7zm0 0v5a5 5 0 01-5 5m16-10h-3a2 2 0 00-2 2v3h5V7zm0 0v5a5 5 0 01-5 5"
     };
     return (<svg className={className + ` ${name === 'wand' ? 'text-brand-500' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={paths[name] || ""} /></svg>);
 };
