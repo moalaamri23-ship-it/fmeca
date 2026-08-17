@@ -193,21 +193,39 @@ export class LocalFileSystemProvider {
         } finally { done(); }
     }
 
+    /** Standalone only: write files already chosen by the app's own file input. */
     async uploadFiles(projectId: string, pathParts: string[], files: FileList): Promise<void> {
-        // Read the bytes before opening the window so the transfer is quick, but
-        // open the window first so the click's activation is still live.
         const { rootPromise, done } = this.beginWrite(projectId);
         try {
-            const payload: Array<{ name: string; blob: Blob }> = [];
-            for (let i = 0; i < files.length; i++) payload.push({ name: files[i].name, blob: files[i] });
             const root = await rootPromise;
             const dir = await walk(root, pathParts, true);
             if (!dir) throw new Error('Could not open that folder for writing.');
-            for (const item of payload) {
-                const fileHandle = await dir.getFileHandle(item.name, { create: true });
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const fileHandle = await dir.getFileHandle(file.name, { create: true });
                 const writable = await fileHandle.createWritable();
-                try { await writable.write(item.blob); } finally { await writable.close(); }
+                try { await writable.write(file); } finally { await writable.close(); }
             }
+        } finally { done(); }
+    }
+
+    /**
+     * Embedded: choose the files in the helper window and write them there.
+     *
+     * A file input's `change` event is not an activation-triggering event, so the
+     * frame cannot open the helper window once its own picker has run — that is
+     * what surfaced as "pop-up blocked" on upload. Selecting the files inside the
+     * helper keeps every gesture-gated call on a genuine click.
+     *
+     * Must be called straight from the Upload click.
+     */
+    async uploadViaHelper(projectId: string, pathParts: string[]): Promise<number> {
+        const { rootPromise, done } = this.beginWrite(projectId);
+        try {
+            const root = await rootPromise;
+            if (!root.pickAndWrite) throw new Error('The folder helper window is unavailable.');
+            const result = await root.pickAndWrite(pathParts);
+            return result.written;
         } finally { done(); }
     }
 

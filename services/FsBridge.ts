@@ -30,6 +30,8 @@ export interface DirHandleLike {
     removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>;
     queryPermission?(descriptor: { mode: 'read' | 'readwrite' }): Promise<PermissionState>;
     requestPermission?(descriptor: { mode: 'read' | 'readwrite' }): Promise<PermissionState>;
+    /** Only on bridge proxies: choose files in the helper window and write them. */
+    pickAndWrite?(pathParts: string[]): Promise<{ written: number }>;
 }
 
 interface PickerWindow {
@@ -80,7 +82,7 @@ function pickViaPopup(projectId: string): Promise<DirHandleLike | null> {
     const popup = window.open(
         `${PICKER_PAGE}?project=${encodeURIComponent(projectId)}`,
         CHANNEL,
-        'popup=yes,width=260,height=110,left=240,top=240'
+        'popup=yes,width=480,height=360,left=200,top=180'
     );
     if (!popup) throw popupBlockedError();
 
@@ -140,7 +142,7 @@ export function openWritableRootBridge(rootHandle: DirHandleLike, projectId: str
     const popup = window.open(
         `${PICKER_PAGE}?mode=bridge&session=${encodeURIComponent(session)}&project=${encodeURIComponent(projectId)}`,
         `${CHANNEL}-writer`,
-        'popup=yes,width=260,height=110,left=240,top=240'
+        'popup=yes,width=480,height=360,left=200,top=180'
     );
     if (!popup) throw popupBlockedError();
 
@@ -215,6 +217,9 @@ export function openWritableRootBridge(rootHandle: DirHandleLike, projectId: str
                 return fileProxy(child);
             },
             async removeEntry(name, options) { await call('directory.removeEntry', handle.handleId, [name, options]); },
+            async pickAndWrite(pathParts) {
+                return (await call('directory.pickAndWrite', handle.handleId, [pathParts])) as { written: number };
+            },
             async queryPermission(descriptor) {
                 return (await call('handle.queryPermission', handle.handleId, [descriptor])) as PermissionState;
             },

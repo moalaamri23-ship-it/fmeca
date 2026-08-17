@@ -82,6 +82,20 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
         }
     };
 
+    // Embedded: the helper window does the choosing as well as the writing, because
+    // a file input's change event carries no user activation to open it with.
+    const handleUploadEmbedded = async () => {
+        if(!provider || !projectId) return;
+        setMsg("");
+        try {
+            const written = await provider.uploadViaHelper(projectId, pathParts);
+            setMsg(`Saved ${written} file${written > 1 ? 's' : ''}.`);
+            await loadFiles();
+        } catch(err: any) {
+            if(!isCancellation(err)) setMsg("Upload failed: " + (err?.message || err));
+        }
+    };
+
     const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const input = e.target;
         if(!provider || !projectId || !input.files?.length) return;
@@ -139,7 +153,11 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                         {!hasRoot && (
                             <button onClick={()=>setMode('create')} className={`px-3 py-1 rounded text-sm font-bold ${mode==='create'?'bg-brand-600 text-white':'bg-slate-100'}`}>Create Folder</button>
                         )}
-                        <label className="px-3 py-1 rounded text-sm font-bold bg-slate-100 cursor-pointer hover:bg-brand-50">Upload <input type="file" multiple className="hidden" onChange={handleUpload}/></label>
+                        {provider?.embedded ? (
+                            <button onClick={handleUploadEmbedded} className="px-3 py-1 rounded text-sm font-bold bg-slate-100 hover:bg-brand-50">Upload</button>
+                        ) : (
+                            <label className="px-3 py-1 rounded text-sm font-bold bg-slate-100 cursor-pointer hover:bg-brand-50">Upload <input type="file" multiple className="hidden" onChange={handleUpload}/></label>
+                        )}
                         {hasRoot && (
                             <button onClick={handlePickRoot} title="Choose a different project folder"
                                 className="px-3 py-1 rounded text-sm font-bold bg-slate-100 hover:bg-brand-50 ml-auto">Change Folder</button>

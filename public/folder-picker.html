@@ -132,6 +132,74 @@
           return { kind: handle.kind, name: handle.name, handleId: handleId }
         }
 
+        // Must match sanitizeName in services/FileSystem.ts, or the app would list a
+        // different folder than the one written to.
+        function sanitizeName(n) {
+          var cleaned = String(n == null ? '' : n).replace(/[^a-z0-9 \-_]/gi, '_').trim()
+          if (!cleaned || cleaned === '.' || cleaned === '..') return 'Untitled'
+          return cleaned
+        }
+
+        function walk(dir, pathParts, create) {
+          return (pathParts || []).reduce(function (p, part) {
+            return p.then(function (d) {
+              return d.getDirectoryHandle(sanitizeName(part), { create: !!create })
+            })
+          }, Promise.resolve(dir))
+        }
+
+        /**
+         * Choosing files also has to happen here.
+         *
+         * A file input's `change` event is not an activation-triggering event, so a
+         * frame that opens the picker itself has no user activation left to open this
+         * window with — the upload died as "pop-up blocked". Selecting the files in
+         * this top-level window keeps every gesture-gated call on a real click.
+         */
+        function pickAndWrite(root, pathParts) {
+          return new Promise(function (resolve, reject) {
+            actEl.textContent = 'Click to Add Files'
+            actEl.hidden = false
+            actEl.focus()
+            actEl.onclick = function () {
+              actEl.onclick = null // one dialog per request, however eagerly it is clicked
+              var input = document.createElement('input')
+              input.type = 'file'
+              input.multiple = true
+              input.style.display = 'none'
+              document.body.appendChild(input)
+              input.oncancel = function () {
+                input.remove()
+                reject(new DOMException('No files were chosen.', 'AbortError'))
+              }
+              input.onchange = function () {
+                var files = Array.prototype.slice.call(input.files || [])
+                input.remove()
+                if (!files.length) {
+                  reject(new DOMException('No files were chosen.', 'AbortError'))
+                  return
+                }
+                actEl.hidden = true
+                walk(root, pathParts, true)
+                  .then(function (dir) {
+                    return files.reduce(function (chain, file) {
+                      return chain.then(function () {
+                        return dir.getFileHandle(file.name, { create: true }).then(function (fh) {
+                          return fh.createWritable().then(function (w) {
+                            return w.write(file).then(function () { return w.close() })
+                          })
+                        })
+                      })
+                    }, Promise.resolve())
+                  })
+                  .then(function () { resolve({ written: files.length }) })
+                  .catch(reject)
+              }
+              input.click()
+            }
+          })
+        }
+
         function bridgeError(error, type, requestId) {
           post({
             bridge: true,
@@ -198,6 +266,10 @@
             case 'directory.removeEntry':
               await handle.removeEntry(args[0], args[1])
               return null
+            // Composite: choose the files here too, because the frame cannot open
+            // this window from a file input's change event.
+            case 'directory.pickAndWrite':
+              return pickAndWrite(handle, args[0] || [])
             case 'handle.queryPermission':
               return handle.queryPermission ? handle.queryPermission(args[0]) : 'granted'
             case 'handle.requestPermission':
