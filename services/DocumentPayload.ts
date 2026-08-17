@@ -18,7 +18,7 @@
 
 import { pdfjsLib } from '../components/viewer/pdfjs';
 import { fileExt } from '../components/viewer/util';
-import type { FileCategory } from '../types';
+import type { FileCategory, SendFilesMode } from '../types';
 
 /** Pages rendered for a text-less PDF. Enough to answer from, bounded in cost. */
 const MAX_PAGE_IMAGES = 6;
@@ -125,11 +125,16 @@ export async function buildDocumentPayload(
     category: FileCategory,
     bytes: ArrayBuffer,
     text: string,
-    options: { provider: string }
+    options: { provider: string; mode: SendFilesMode }
 ): Promise<DocumentPayload> {
     const ext = fileExt(name);
     const thin = isTextThin(text);
     const payload: DocumentPayload = { text, images: [], textThin: thin };
+
+    // Text Only means exactly that: nothing but the extracted text leaves the
+    // browser, so a file with no text has nothing to send and says so rather
+    // than quietly falling back to shipping the document.
+    if (options.mode === 'text') return payload;
 
     try {
         if (category === 'image') {

@@ -13,7 +13,7 @@ import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
 import { LocalFileSystemProvider, sanitizeName, isCancellation } from './services/FileSystem';
 import { RICH_LIBRARY } from './constants';
-import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch } from './types';
+import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch, SendFilesMode } from './types';
 import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
 import { RcmRegisterModal, type RcmRegisterSubmit } from './components/RcmRegisterModal';
 import { ImportProjectModal } from './components/ImportProjectModal';
@@ -113,6 +113,9 @@ const App = () => {
     });
     const [modelsFetching, setModelsFetching] = useState(false);
     const [enableChatbot, setEnableChatbot] = useState(true);
+    // How much of a reference file may leave the browser when the AI is asked
+    // about it. Text Only by default: All Files ships whole documents.
+    const [sendFilesMode, setSendFilesMode] = useState<SendFilesMode>('text');
     const [chatbotStyle, setChatbotStyle] = useState<ChatbotResponseStyle>("normal");
     const [agentWorkflow, setAgentWorkflow] = useState<AgentWorkflow>('fast');
     const [showHybridSourceLabels, setShowHybridSourceLabels] = useState(true);
@@ -311,6 +314,7 @@ setProjects(
     setRcmReaderUrl(localStorage.getItem('rcm_reader_flow_url') || '');
     setEngineerEmail(localStorage.getItem('rcm_engineer_email') || '');
     setEnableChatbot(localStorage.getItem('rcm_enable_chatbot') !== 'false');
+    setSendFilesMode(localStorage.getItem('fmeca_send_files_v1') === 'all' ? 'all' : 'text');
     const storedStyle = localStorage.getItem('rcm_chatbot_style');
     setChatbotStyle((storedStyle === 'one_sentence' ? 'tldr' : storedStyle as ChatbotResponseStyle) || 'normal');
     const storedWorkflow = localStorage.getItem('rcm_agent_workflow') as AgentWorkflow | null;
@@ -391,6 +395,7 @@ setProjects(
         localStorage.setItem('rcm_model_name_v1', modelName);
         localStorage.setItem('rcm_ai_source_mode', aiSourceMode);
         localStorage.setItem('rcm_ai_provider', aiProvider);
+        localStorage.setItem('fmeca_send_files_v1', sendFilesMode);
         localStorage.setItem('rcm_azure_endpoint', azureEndpoint);
         localStorage.setItem('rcm_power_automate_url', powerAutomateUrl);
         localStorage.setItem('rcm_register_flow_url', rcmRegisterUrl);
@@ -407,7 +412,7 @@ setProjects(
         localStorage.setItem('rcm_system_type', systemType);
         localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
-    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, azureEndpoint, powerAutomateUrl, rcmRegisterUrl, rcmReaderUrl, engineerEmail, enableChatbot, chatbotStyle, agentWorkflow, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
+    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, sendFilesMode, azureEndpoint, powerAutomateUrl, rcmRegisterUrl, rcmReaderUrl, engineerEmail, enableChatbot, chatbotStyle, agentWorkflow, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
 
     const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic', 'openrouter'] as const;
     type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
@@ -1613,6 +1618,43 @@ render();
                                     </div>
                                 </div>
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
+                                    <h2 className="text-lg font-semibold mb-4">Send files to agent</h2>
+                                    <div className="space-y-2">
+                                        {([
+                                            {
+                                                value: 'text' as SendFilesMode,
+                                                label: 'Text Only',
+                                                desc: 'Only the extracted text of a PDF, Word or text file travels, inside the prompt. The agent answers from it and quotes it back, and those quotes become the citations. A scan, a photo or a drawing has no text, so nothing is sent for it.',
+                                            },
+                                            {
+                                                value: 'all' as SendFilesMode,
+                                                label: 'All Files',
+                                                desc: 'The file itself travels: pages as images for any provider with a vision channel, and the original document for Copilot, which opens it directly. Needed for scans and drawings.',
+                                            },
+                                        ]).map(option => (
+                                            <label key={option.value}
+                                                className={`block rounded border p-3 cursor-pointer transition ${sendFilesMode === option.value ? 'border-brand-500 ring-2 ring-brand-100 bg-brand-50' : 'border-slate-200 hover:bg-slate-50'}`}>
+                                                <div className="flex items-center gap-2">
+                                                    <input type="radio" name="send-files" value={option.value}
+                                                        checked={sendFilesMode === option.value}
+                                                        onChange={() => setSendFilesMode(option.value)}
+                                                        className="w-4 h-4 text-brand-600 focus:ring-brand-500"/>
+                                                    <span className="text-sm font-bold text-slate-700">{option.label}</span>
+                                                </div>
+                                                <p className="text-xs text-slate-500 mt-1 ml-6">{option.desc}</p>
+                                            </label>
+                                        ))}
+                                    </div>
+                                    {/* Only the Copilot flow keeps state between calls, so only it can be
+                                        told about a file once. Saying so beats implying savings that the
+                                        stateless HTTP APIs cannot give. */}
+                                    <p className="text-xs text-slate-400 mt-3">
+                                        {aiProvider === 'copilot'
+                                            ? 'Files are uploaded once per conversation and reused for later questions. The conversation is renewed after 25 minutes idle, or as soon as the agent shows it has lost the thread, and the files go again then.'
+                                            : 'This provider has no file channel and keeps no state between calls, so in All Files mode the pages ride as images on every question.'}
+                                    </p>
+                                </div>
+                                <div className="bg-white p-6 rounded border max-w-xl mt-4">
                                     <h2 className="text-lg font-semibold mb-4">FMECA Generation</h2>
                                     <label className="block text-xs font-semibold text-slate-500 mb-1">Agent Workflow</label>
                                     <select
@@ -2088,6 +2130,7 @@ render();
                         projectId={activeProject && activeProject.id}
                         pathParts={getAttachmentPath()}
                         ai={{ apiKey, model: modelName, provider: aiProvider, azureEndpoint, powerAutomateUrl }}
+                        sendFiles={sendFilesMode}
                     />
                 </div>
             )}

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { LocalFileSystemProvider, WriteSession, sanitizeName, isCancellation, describePickerFailure } from '../services/FileSystem';
-import { FileEntry, ViewerCitation } from '../types';
+import { FileEntry, SendFilesMode, ViewerCitation } from '../types';
 import { fileKey, forgetFileBytes } from './viewer/useFileBytes';
 import type { SmartSearchConfig } from '../services/SmartSearchService';
 
@@ -20,11 +20,13 @@ interface AttachmentModalProps {
     projectId: string | null;
     /** Live AI settings, for the viewer's smart search. */
     ai?: SmartSearchConfig | null;
+    /** How much of a file may be sent to the AI. */
+    sendFiles?: SendFilesMode;
     /** Citations pointing into this folder — the viewer lists them beside the file. */
     citations?: ViewerCitation[];
 }
 
-export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClose, entityName, provider, pathParts, projectId, ai = null, citations = [] }) => {
+export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClose, entityName, provider, pathParts, projectId, ai = null, sendFiles = 'text', citations = [] }) => {
     // Every hook must run on every render — bail out below the hook list, never above it.
     const [files, setFiles] = useState<FileEntry[]>([]);
     const [loading, setLoading] = useState(false);
@@ -401,6 +403,7 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                     activeCitationId={activeCitation}
                     onSelectCitation={setActiveCitation}
                     ai={ai}
+                    sendFiles={sendFiles}
                     entityName={entityName}
                 />
             </Suspense>

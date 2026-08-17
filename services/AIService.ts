@@ -1,6 +1,15 @@
 import { ContextData, FunctionClass, FailedStateType } from '../types';
 import { RICH_LIBRARY } from '../constants';
 import { buildCopilotPrompt, parseCopilotReply, getCopilotSessionId } from './copilotHelper';
+import {
+    carriesSpreadsheet,
+    copilotSessionId,
+    looksLikeLostSession,
+    markAttachmentsSent,
+    pendingAttachments,
+    rotateCopilotSession,
+} from './CopilotSession';
+import { pngAttachmentName, toPngPayload } from './imagePng';
 import type { SystemMode } from './SystemModesService';
 
 /*
@@ -1892,37 +1901,69 @@ Output format:
 
         const fullPrompt = this.attachContext(rawPrompt, req.mode, req.refText ?? '', req.responseFormat);
 
-        const payload: Record<string, unknown> = {
-            sessionId: req.sessionId ?? crypto.randomUUID(),
-            prompt: fullPrompt,
-            responseFormat: req.responseFormat ?? 'text',
+        const attachments = req.attachments ?? [];
+        // A spreadsheet finishes the conversation it lands in, so it gets one of
+        // its own and the shared session survives.
+        const oneShot = carriesSpreadsheet(attachments);
+        // Sending nothing keeps the caller's own id (the chatbot passes a literal
+        // one), so existing features keep behaving exactly as they did.
+        const sessionFor = () =>
+            attachments.length > 0 || !req.sessionId ? copilotSessionId({ oneShot }) : req.sessionId;
+
+        const send = async (sessionId: string, files: FilePayload[]): Promise<string> => {
+            const payload: Record<string, unknown> = {
+                sessionId,
+                prompt: fullPrompt,
+                responseFormat: req.responseFormat ?? 'text',
+            };
+
+            // The flow maps these onto the "A list of attachments" input of
+            // Execute Agent, so the agent opens the real document instead of our
+            // extracted text — which is what a scan or a drawing needs.
+            if (files.length > 0) {
+                payload.attachments = files;
+                console.log(
+                    '[AIService] Copilot attachments sent:',
+                    files
+                        .map(a => `${a.name} (${a.contentType}, ${Math.round((a.contentBytes.length * 3) / 4 / 1024)} KB)`)
+                        .join(', ')
+                );
+            } else if (attachments.length > 0) {
+                console.log(`[AIService] Copilot: ${attachments.length} attachment(s) already held by this conversation`);
+            }
+
+            const res = await fetch(req.powerAutomateUrl!, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+
+            if (!res.ok) {
+                const errText = await res.text();
+                throw new Error(`Power Automate Error: ${res.statusText}${errText ? ` — ${errText}` : ''}`);
+            }
+            return res.text();
         };
 
-        // The flow maps these onto the "A list of attachments" input of Execute
-        // Agent, so the agent opens the real document instead of our extracted
-        // text — which is what a scan or a drawing needs.
-        if (req.attachments?.length) {
-            payload.attachments = req.attachments;
-            console.log(
-                '[AIService] Copilot attachments sent:',
-                req.attachments
-                    .map(a => `${a.name} (${a.contentType}, ${Math.round((a.contentBytes.length * 3) / 4 / 1024)} KB)`)
-                    .join(', ')
-            );
+        const sessionId = sessionFor();
+        // Only what this conversation is not already holding travels again.
+        const toSend = oneShot ? attachments : pendingAttachments(attachments);
+        const reply = await send(sessionId, toSend);
+
+        // A one-shot conversation holds nothing worth remembering.
+        if (!oneShot && toSend.length > 0) markAttachmentsSent(toSend);
+
+        // Skipped an upload and the agent answered as if it had no file: the
+        // conversation is gone. Start a clean one, send everything, once.
+        const skipped = attachments.length > toSend.length;
+        if (skipped && looksLikeLostSession(reply)) {
+            console.warn('[AIService] Copilot conversation looks expired — reattaching and retrying once');
+            const retryReply = await send(rotateCopilotSession(), attachments);
+            markAttachmentsSent(attachments);
+            return retryReply;
         }
 
-        const res = await fetch(req.powerAutomateUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-
-        if (!res.ok) {
-            const errText = await res.text();
-            throw new Error(`Power Automate Error: ${res.statusText}${errText ? ` — ${errText}` : ''}`);
-        }
-
-        return res.text();
+        return reply;
     },
 
     async _directChat(req: AIRequestPayload): Promise<string> {
@@ -2061,23 +2102,36 @@ Output format:
 
         // The flow takes text plus real files; images become attachments too, so
         // the agent still sees the pages rather than a description of them.
+        //
+        // Every image leaves as PNG: the Copilot agent only analyses PNG, and a
+        // JPEG page render is accepted by the flow and then silently ignored —
+        // the answer comes back as if nothing had been attached.
         if (req.provider === 'copilot') {
             const images = turns.flatMap(imagesOf);
-            const attachments = [
-                ...(req.attachments ?? []),
-                ...images.map((url, i) => ({
-                    name: `page-${i + 1}.jpg`,
-                    contentType: (url.match(/^data:([^;]+);/) || [, 'image/jpeg'])[1] as string,
-                    contentBytes: url.split(',')[1] || '',
-                })),
-            ].filter(a => a.contentBytes);
+            const pages: FilePayload[] = [];
+            for (const [i, url] of images.entries()) {
+                try {
+                    const png = await toPngPayload(url);
+                    pages.push({ name: pngAttachmentName(`page-${i + 1}`, i), ...png });
+                } catch (e) {
+                    // One undecodable image must not take down the whole turn.
+                    console.warn('[AIService] skipping an image the agent could not be sent', e);
+                }
+            }
+            const attachments = [...(req.attachments ?? []), ...pages].filter(a => a.contentBytes);
+            // Name what was sent, so the agent can say which file it did or did
+            // not receive instead of quietly answering from nothing.
+            const manifest = attachments.length
+                ? `\n\nAttached, read the files themselves rather than any extracted text:\n${attachments.map(a => `- ${a.name}`).join('\n')}`
+                : '';
+            // Folded into the one user message on purpose: the flow transport
+            // reads only the last user message for any feature but the chatbot,
+            // so a separate system message would be dropped on the floor.
+            const prompt = [system, turns.map(textOf).join('\n\n')].filter(Boolean).join('\n\n') + manifest;
             return this._powerAutomateRequest({
                 ...req,
                 attachments,
-                messages: [
-                    ...(system ? [{ role: 'system', content: system }] : []),
-                    { role: 'user', content: turns.map(textOf).join('\n\n') },
-                ],
+                messages: [{ role: 'user', content: prompt }],
             });
         }
 

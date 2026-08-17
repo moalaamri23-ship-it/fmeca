@@ -122,6 +122,20 @@ export interface FileEntry {
 export type FileCategory = 'pdf' | 'docx' | 'sheet' | 'image' | 'text' | 'unsupported';
 
 /**
+ * How much of a reference file may leave the browser when the AI is asked about
+ * it.
+ *
+ * `text` — only the extracted text of a PDF, Word file or text file travels, in
+ * the prompt itself. The agent answers from that and quotes it back, which is
+ * what a citation resolves against.
+ *
+ * `all` — the file itself travels: pages as images for any provider with a
+ * vision channel, and the original document for the Copilot flow, which can open
+ * one. Needed for a scan, a photo or a drawing, where there is no text to send.
+ */
+export type SendFilesMode = 'text' | 'all';
+
+/**
  * A pointer from somewhere in the app back to an exact passage inside a
  * reference file. The viewer locates `quote` (or `anchor`) in the document and
  * highlights it; `page`/`line` only speed that search up and label the card.

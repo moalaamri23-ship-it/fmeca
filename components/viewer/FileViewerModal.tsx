@@ -11,7 +11,7 @@ import { buildDocumentPayload } from '../../services/DocumentPayload';
 import type { DocumentPayload } from '../../services/DocumentPayload';
 import type { SmartSearchConfig } from '../../services/SmartSearchService';
 import type { LocalFileSystemProvider } from '../../services/FileSystem';
-import type { FileEntry, ViewerCitation } from '../../types';
+import type { FileEntry, SendFilesMode, ViewerCitation } from '../../types';
 
 function locationLabel(citation: ViewerCitation): string {
     const parts: string[] = [];
@@ -137,11 +137,14 @@ export const FileViewerModal: React.FC<{
     onSelectCitation?: (id: string) => void;
     /** Live AI settings, for smart search. Null disables it with a reason. */
     ai?: SmartSearchConfig | null;
+    /** How much of the file may be sent to the AI. */
+    sendFiles?: SendFilesMode;
     /** What these references belong to, e.g. a subsystem name. */
     entityName?: string | null;
 }> = ({
     isOpen, onClose, provider, files, pathParts, openName, onOpenName,
-    citations = [], activeCitationId = null, onSelectCitation, ai = null, entityName,
+    citations = [], activeCitationId = null, onSelectCitation, ai = null,
+    sendFiles = 'text', entityName,
 }) => {
     const [panelOpen, setPanelOpen] = useState(true);
     const [text, setText] = useState<{ key: string; value: string } | null>(null);
@@ -212,13 +215,14 @@ export const FileViewerModal: React.FC<{
         let cancelled = false;
         void buildDocumentPayload(shownName, category, loadedBytes, documentText, {
             provider: ai?.provider ?? '',
+            mode: sendFiles,
         }).then(value => {
             if (!cancelled) setPayload({ key, value });
         });
         return () => {
             cancelled = true;
         };
-    }, [isOpen, loadedBytes, key, category, documentText, shownName, ai?.provider]);
+    }, [isOpen, loadedBytes, key, category, documentText, shownName, ai?.provider, sendFiles]);
 
     const documentPayload = payload?.key === key ? payload.value : null;
 
@@ -275,6 +279,7 @@ export const FileViewerModal: React.FC<{
                     documentText={searchable ? (documentText ?? '') : ''}
                     documentName={shownName}
                     payload={documentPayload}
+                    sendFiles={sendFiles}
                     ai={ai}
                     onStateChange={onStateChange}
                 >

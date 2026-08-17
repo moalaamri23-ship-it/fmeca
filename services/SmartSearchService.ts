@@ -113,9 +113,18 @@ function jsonList(raw: string, key: string): unknown[] {
     return Array.isArray(value) ? value : [];
 }
 
-/** One text-only call. */
+/**
+ * One text-only call.
+ *
+ * Goes through `chatMultimodal` rather than `chat`. `chat`'s direct transport is
+ * built for single-prompt features: it takes `messages[0]` as the whole prompt
+ * and, on OpenAI, replaces the last message with it — so a (system, user) pair
+ * arrives as the system prompt twice and the user message, carrying the document,
+ * is dropped. Smart search returned nothing at all for exactly that reason.
+ * `chatMultimodal` keeps the messages and maps the system prompt per provider.
+ */
 async function ask(config: SmartSearchConfig, system: string, user: string): Promise<string> {
-    return AIService.chat({
+    return AIService.chatMultimodal({
         feature: 'document-smart-search',
         provider: config.provider,
         model: config.model,

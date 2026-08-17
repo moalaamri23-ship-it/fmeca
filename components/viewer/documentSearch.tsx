@@ -6,6 +6,7 @@ import { smartSearchDocument } from '../../services/SmartSearchService';
 import type { SmartSearchConfig } from '../../services/SmartSearchService';
 import { payloadIsUsable } from '../../services/DocumentPayload';
 import type { DocumentPayload } from '../../services/DocumentPayload';
+import type { SendFilesMode } from '../../types';
 import { SearchContext, useDocumentSearch } from './searchContext';
 import type { SearchApi, SmartSearchState } from './searchContext';
 
@@ -39,6 +40,8 @@ export const DocumentSearchProvider: React.FC<{
      * itself where the transport can carry one. Null until it is built.
      */
     payload?: DocumentPayload | null;
+    /** The Send-files setting, so an unusable payload can explain itself. */
+    sendFiles?: SendFilesMode;
     /** Live AI settings, or null when the app has no key configured. */
     ai?: SmartSearchConfig | null;
     /**
@@ -47,7 +50,10 @@ export const DocumentSearchProvider: React.FC<{
      */
     onStateChange?: (state: { open: boolean; close: () => void }) => void;
     children: ReactNode;
-}> = ({ hotkey = false, documentText = '', documentName = 'document', payload = null, ai = null, onStateChange, children }) => {
+}> = ({
+    hotkey = false, documentText = '', documentName = 'document', payload = null,
+    sendFiles = 'text', ai = null, onStateChange, children,
+}) => {
     const [open, setOpen] = useState(false);
     const [input, setInputState] = useState('');
     const [query, setQuery] = useState('');
@@ -115,10 +121,14 @@ export const DocumentSearchProvider: React.FC<{
     const readable = payloadIsUsable(payload);
     const hasAi = !!ai && (!!ai.apiKey || ai.provider === 'copilot');
     const smartAvailable = readable && hasAi;
-    const smartHint = !readable
-        ? 'Smart search is still reading this document'
-        : !hasAi
-          ? 'Smart search needs an AI provider — add an API key in Settings'
+    const smartHint = !hasAi
+        ? 'Smart search needs an AI provider — add an API key in Settings'
+        : !readable
+          ? payload == null
+            ? 'Smart search is still reading this document'
+            : sendFiles === 'text'
+              ? 'This file has no text to send. Set “Send files to agent” to All Files to have the pages read.'
+              : 'Nothing in this file can be sent to a model'
           : payload && payload.textThin
             ? 'Smart search — the pages are sent as images, since this file has no text layer (⌘↵)'
             : 'Smart search — find what you mean, not just these words (⌘↵)';
