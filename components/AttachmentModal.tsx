@@ -2,6 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { LocalFileSystemProvider, WriteSession, sanitizeName, isCancellation, describePickerFailure } from '../services/FileSystem';
 import { FileEntry } from '../types';
 
+// Set only once a browser has proved it keeps no user activation for the saving
+// window after opening the file dialog. Then the window opens with the panel.
+const FLOW_KEY = 'fmeca_upload_flow_v2';
+
 interface AttachmentModalProps {
     isOpen: boolean;
     onClose: () => void;
@@ -24,12 +28,14 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
     const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
     // Chosen, but with no window open to write them through.
     const [pending, setPending] = useState<File[]>([]);
+    const [windowWithPanel, setWindowWithPanel] = useState<boolean>(() => {
+        try { return localStorage.getItem(FLOW_KEY) === 'panel'; } catch { return false; }
+    });
     const inputRef = useRef<HTMLInputElement>(null);
-    // One saving window for the whole panel, so that a second upload needs no
-    // window of its own and the click can go straight to the file dialog.
+    // The saving window, open only while there is something for it to do.
     const sessionRef = useRef<WriteSession | null>(null);
-    // Whether that window was opened by the panel or by an upload — a window this
-    // upload opened is this upload's to close when the dialog is dismissed.
+    // Whether it belongs to the panel or to the operation that opened it — one
+    // opened for an operation closes itself when that operation is done.
     const panelOwnsSession = useRef(false);
 
     const loadFiles = async () => {
@@ -86,23 +92,28 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
     }, [isOpen, projectId]);
 
     /**
-     * Open the saving window with the panel.
+     * Fallback: open the saving window with the panel, and keep it for as long as
+     * the panel lives.
      *
-     * Chromium spends a click's user activation on the first thing it opens, and
-     * Upload's click has to go to the file dialog. So the window cannot follow the
-     * dialog; it has to be there already, and the click that opened References is
-     * what pays for it. Then chosen files save themselves, with no click of their
-     * own. Only for a project that has a folder — nothing pops up otherwise.
+     * Only for a browser that would not open one on the upload's own pointerdown,
+     * and only for a project that has a folder — nothing pops up otherwise.
      */
     useEffect(() => {
-        if(!isOpen || !provider?.embedded || !projectId) return;
+        if(!isOpen || !windowWithPanel || !provider?.embedded || !projectId) return;
         if(liveSession() || !provider.isLinkedSync(projectId)) return;
         try {
             ensureSession();
             panelOwnsSession.current = true;
         } catch { /* Upload will report it, and can retry */ }
         // eslint-disable-next-line
-    }, [isOpen, provider, projectId]);
+    }, [isOpen, windowWithPanel, provider, projectId]);
+
+    // Asked for once, then remembered: a browser that spends the click on the file
+    // dialog will spend the next one the same way.
+    const rememberWindowWithPanel = () => {
+        setWindowWithPanel(true);
+        try { localStorage.setItem(FLOW_KEY, 'panel'); } catch { /* preference only */ }
+    };
 
     /** The saving window, if there is still one there. */
     const liveSession = (): WriteSession | null => {
@@ -156,30 +167,52 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
             await provider.ensureFolderForEntity(projectId, finalParts, session ?? undefined);
             setMsg("Folder ready.");
             setMode('view');
+            releaseSession();
             await loadFiles();
         } catch(e: any) {
+            releaseSession();
             if(isCancellation(e)) return;
             setMsg("Could not create the folder: " + (e?.message || e));
         }
     };
 
     /**
-     * Upload is one click: it opens the file dialog, here in the app. What is
-     * chosen then saves itself through the window the panel already opened.
+     * Upload is one click: it opens the file dialog, here in the app.
      *
-     * The window is only opened here for a folder linked after the panel was —
-     * and if the browser has spent the click on the dialog and refuses it, the
-     * files wait for a click of their own rather than being lost.
+     * Whether the saving window can then be opened on the same click depends on
+     * what the browser charged for the dialog. Chromium hands out one user
+     * activation per press, and spends it on the first thing opened — so the
+     * answer is read off the activation itself rather than guessed: still active,
+     * and the window opens for this upload alone and closes when it is saved;
+     * spent, and the panel carries a window from now on, which costs this one
+     * upload a click on Save.
      */
     const handleUploadClick = () => {
         if(!provider || !projectId) return;
         setMsg(""); setPending([]);
         inputRef.current?.click();
         if(!provider.embedded || liveSession()) return;
+        if(navigator.userActivation && !navigator.userActivation.isActive) {
+            rememberWindowWithPanel();
+            return;
+        }
         try {
             ensureSession();
             panelOwnsSession.current = false;
-        } catch { /* The dialog is open regardless; handleUpload takes it from there. */ }
+        } catch {
+            // The dialog is open regardless; handleUpload keeps what it returns.
+            rememberWindowWithPanel();
+        }
+    };
+
+    /** A window opened for one operation goes when that operation is done. */
+    const releaseSession = () => {
+        if(panelOwnsSession.current) return;
+        // Long enough to read what it says it saved, short enough not to linger.
+        const session = sessionRef.current;
+        if(!session) return;
+        sessionRef.current = null;
+        window.setTimeout(() => session.done(), 1500);
     };
 
     const writeFiles = async (picked: File[], session: WriteSession | null) => {
@@ -189,6 +222,7 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
             const written = await provider.writeChosenFiles(projectId, pathParts, picked, session ?? undefined);
             setPending([]);
             setMsg(`Saved ${written} file${written > 1 ? 's' : ''}.`);
+            releaseSession();
             await loadFiles();
         } catch(err: any) {
             if(isCancellation(err)) return;
@@ -234,8 +268,10 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
             const session = ensureSession();
             await provider.deleteFile(projectId, pathParts, name, session ?? undefined);
             setMsg(`Deleted ${name}.`);
+            releaseSession();
             await loadFiles();
         } catch(err: any) {
+            releaseSession();
             if(!isCancellation(err)) setMsg("Could not delete " + name + ": " + (err?.message || err));
         }
     };

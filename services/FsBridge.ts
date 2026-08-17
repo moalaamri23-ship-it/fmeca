@@ -155,7 +155,9 @@ export function openWritableRootBridge(
             : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const popup = window.open(
         `${PICKER_PAGE}?mode=bridge&session=${encodeURIComponent(session)}&project=${encodeURIComponent(projectId)}`,
-        `${CHANNEL}-writer`,
+        // Named per session: a window still closing after one operation must not
+        // be reused — and then closed out from under — by the next.
+        `${CHANNEL}-writer-${session}`,
         'popup=yes,width=480,height=360,left=200,top=180'
     );
     if (!popup) throw popupBlockedError();
