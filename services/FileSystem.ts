@@ -3,6 +3,7 @@ import {
     DirHandleLike,
     FileHandleLike,
     IN_IFRAME,
+    PICK_IN_BRIDGE,
     WritableRootBridge,
     hasPermission,
     openWritableRootBridge,
@@ -195,21 +196,55 @@ export class LocalFileSystemProvider {
      * MUST be called synchronously from the click, before any await. The caller
      * may keep the session for several operations, and must call done() once.
      */
-    beginWrite(projectId: string): WriteSession {
-        const linkedRoot = this.getCachedRoot(projectId).then(root => {
-            if (!root) throw new Error('No project folder is linked yet. Pick one first.');
-            return root;
+    /**
+     * Opens the write channel around a folder the helper window picks itself.
+     *
+     * Embedded, this is how a folder is chosen at all: the window that asks for
+     * it stays on as the writer, so the upload that follows needs no window — and
+     * therefore no click — of its own. `picked` resolves once the user has chosen.
+     */
+    beginPick(projectId: string): WriteSession & { picked: Promise<DirHandleLike> } {
+        let resolvePicked: (handle: DirHandleLike) => void = () => {};
+        const picked = new Promise<DirHandleLike>(resolve => { resolvePicked = resolve; });
+        const session = this.beginWrite(projectId, PICK_IN_BRIDGE, handle => {
+            this.liveRoots.set(projectId, handle);
+            markLinked(projectId, true);
+            void saveProjectHandle(projectId, handle);
+            resolvePicked(handle);
         });
-        if (!this.embedded) return { rootPromise: linkedRoot, done: () => {}, isLive: () => true };
+        // A window closed before anything was chosen must not leave a promise
+        // that never settles.
+        session.rootPromise.catch(() => {});
+        return Object.assign(session, { picked });
+    }
+
+    beginWrite(
+        projectId: string,
+        source?: typeof PICK_IN_BRIDGE,
+        onPicked?: (handle: DirHandleLike) => void
+    ): WriteSession {
+        const linkedRoot = source === PICK_IN_BRIDGE
+            ? PICK_IN_BRIDGE
+            : this.getCachedRoot(projectId).then(root => {
+                if (!root) throw new Error('No project folder is linked yet. Pick one first.');
+                return root;
+            });
+        if (!this.embedded) {
+            const rootPromise = linkedRoot === PICK_IN_BRIDGE
+                ? Promise.reject(new Error('Folder picking runs in this window when the app is not embedded.'))
+                : linkedRoot;
+            rootPromise.catch(() => {});
+            return { rootPromise, done: () => {}, isLive: () => true };
+        }
         // The bridge only listens for the folder once the window is up; keep a
         // handler on the promise meanwhile so a failure is never left unhandled.
-        linkedRoot.catch(() => {});
+        if (linkedRoot !== PICK_IN_BRIDGE) linkedRoot.catch(() => {});
 
         let bridge: WritableRootBridge | null = null;
         let finished = false;
         let lost = false;
         // The window opens on this click; the folder catches up with it.
-        const rootPromise = openWritableRootBridge(linkedRoot, projectId, () => { lost = true; }).then(b => {
+        const rootPromise = openWritableRootBridge(linkedRoot, projectId, () => { lost = true; }, onPicked).then(b => {
             bridge = b;
             // A caller that already gave up must not leave the window hanging around.
             if (finished) { b.close(); throw new FolderSelectionCancelled(); }

@@ -73,6 +73,9 @@ export interface WritableRootBridge {
     close(): void;
 }
 
+/** Ask the helper window to find the folder before it starts serving writes. */
+export const PICK_IN_BRIDGE = 'pick' as const;
+
 function popupBlockedError(): Error {
     return new Error(
         'FMECA Studio is embedded in another page, so it opens a small window to reach the project folder — and that window was blocked. Allow pop-ups for this site and try again.'
@@ -145,16 +148,18 @@ function pickViaPopup(projectId: string): Promise<DirHandleLike | null> {
  * is for once the handle arrives, so a click need not wait on IndexedDB.
  */
 export function openWritableRootBridge(
-    rootHandle: DirHandleLike | Promise<DirHandleLike>,
+    rootHandle: DirHandleLike | Promise<DirHandleLike> | typeof PICK_IN_BRIDGE,
     projectId: string,
-    onLost?: () => void
+    onLost?: () => void,
+    onPicked?: (handle: DirHandleLike) => void
 ): Promise<WritableRootBridge> {
     const session =
         typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
             ? crypto.randomUUID()
             : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const picking = rootHandle === PICK_IN_BRIDGE;
     const popup = window.open(
-        `${PICKER_PAGE}?mode=bridge&session=${encodeURIComponent(session)}&project=${encodeURIComponent(projectId)}`,
+        `${PICKER_PAGE}?mode=bridge${picking ? '&pick=1' : ''}&session=${encodeURIComponent(session)}&project=${encodeURIComponent(projectId)}`,
         // Named per session: a window still closing after one operation must not
         // be reused — and then closed out from under — by the next.
         `${CHANNEL}-writer-${session}`,
@@ -271,8 +276,16 @@ export function openWritableRootBridge(
                 return;
             }
 
+            // The window found the folder itself, and is about to serve writes
+            // through it. The handle comes back so the app can read and store it.
+            if (data.type === 'picked' && data.handle) {
+                onPicked?.(data.handle as DirHandleLike);
+                return;
+            }
+
             if (data.type === 'connect') {
-                Promise.resolve(rootHandle).then(
+                if (picking) return;
+                Promise.resolve(rootHandle as DirHandleLike | Promise<DirHandleLike>).then(
                     handle => {
                         if (closed) return;
                         popup.postMessage(

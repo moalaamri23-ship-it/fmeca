@@ -74,6 +74,9 @@
         var STORE = 'project_handles'
         var params = new URLSearchParams(window.location.search)
         var bridgeMode = params.get('mode') === 'bridge'
+        // A bridge that has to find the folder first, and then serves the writes
+        // through the same window rather than handing over to a second one.
+        var pickFirst = params.get('pick') === '1'
         var session = params.get('session') || ''
         var projectId = params.get('project') || ''
         var actEl = document.getElementById('act')
@@ -255,6 +258,48 @@
           post({ bridge: true, session: session, type: 'connect' })
         }
 
+        /**
+         * Find the folder, then stay and write to it.
+         *
+         * The app cannot open the picker itself — a cross-origin frame is refused —
+         * and it cannot open a window later either, because by then its click is
+         * spent. So this one window does both jobs: it asks for the folder the
+         * moment it opens, hands the app the handle, and becomes the write bridge
+         * without a second window ever being opened.
+         */
+        function pickForBridge() {
+          if (typeof window.showDirectoryPicker !== 'function') {
+            bridgeError(new DOMException('This browser cannot open a folder.', 'NotSupportedError'))
+            return
+          }
+          showMsg('Choose the folder for this project.')
+          window
+            .showDirectoryPicker({ id: 'fmeca-project-folder', mode: 'readwrite', startIn: 'documents' })
+            .then(function (handle) {
+              showMsg('Using <b>' + escapeHtml(handle.name) + '</b>')
+              post({ bridge: true, session: session, type: 'picked', handle: handle })
+              prepareBridge(handle)
+            })
+            .catch(function (error) {
+              // A window opened by a click does not always inherit that click's
+              // activation. That is the one failure worth asking about rather than
+              // reporting, so the button is offered instead.
+              if (needsGesture(error) && !retryShown) {
+                retryShown = true
+                showMsg('Choose the folder for this project.')
+                actEl.textContent = 'Click to Select a Folder'
+                actEl.hidden = false
+                actEl.onclick = function () {
+                  actEl.hidden = true
+                  pickForBridge()
+                }
+                actEl.focus()
+                return
+              }
+              bridgeError(error)
+            })
+        }
+
         async function runBridgeOperation(data) {
           var args = Array.isArray(data.args) ? data.args : []
           var handle = handles.get(data.handleId)
@@ -277,11 +322,18 @@
               return entries
             }
             case 'directory.getDirectoryHandle':
+              if (args[1] && args[1].create) {
+                showMsg('Creating folder <b>' + escapeHtml(args[0]) + '</b>')
+              }
               return registerHandle(await handle.getDirectoryHandle(args[0], args[1]))
             case 'directory.getFileHandle':
               return registerHandle(await handle.getFileHandle(args[0], args[1]))
+            // Each operation says what it is doing: a deletion reported as a save
+            // is worse than no report at all.
             case 'directory.removeEntry':
+              showMsg('Deleting <b>' + escapeHtml(args[0]) + '</b>')
               await handle.removeEntry(args[0], args[1])
+              showMsg('Deleted <b>' + escapeHtml(args[0]) + '</b>')
               return null
             // The app picked the files itself, in one click. Only the writing,
             // which a third-party frame is refused, has to happen here.
@@ -387,7 +439,10 @@
         // button that could not do anything.
         if (!window.opener) return
 
-        if (bridgeMode) connectBridge()
+        // Picking runs first of all, while whatever activation this window was
+        // given is still there to spend.
+        if (bridgeMode && pickFirst) pickForBridge()
+        else if (bridgeMode) connectBridge()
         else pick()
       })()
     </script>
