@@ -289,6 +289,18 @@ export interface ToolChatResult {
     calls?: ToolCall[];
 }
 
+/**
+ * A real file handed to a transport that can open one for itself. Only the
+ * Power Automate flow behind the Copilot provider has such a channel; every
+ * other provider takes images inline instead.
+ */
+export interface FilePayload {
+    name: string;
+    contentType: string;
+    /** Base64, without a data-URL prefix. */
+    contentBytes: string;
+}
+
 export interface AIRequestPayload {
     sessionId?: string;
     feature: string; // Identifier for the feature calling the service
@@ -302,6 +314,8 @@ export interface AIRequestPayload {
     contextData?: any;
     responseFormat?: 'json' | 'text';
     apiKey: string;
+    /** Files for the Copilot flow's attachment input. Ignored by other providers. */
+    attachments?: FilePayload[];
 }
 
 type SystemModeRow = Pick<SystemMode, 'component' | 'mode' | 'count'>;
@@ -1878,11 +1892,24 @@ Output format:
 
         const fullPrompt = this.attachContext(rawPrompt, req.mode, req.refText ?? '', req.responseFormat);
 
-        const payload = {
+        const payload: Record<string, unknown> = {
             sessionId: req.sessionId ?? crypto.randomUUID(),
             prompt: fullPrompt,
             responseFormat: req.responseFormat ?? 'text',
         };
+
+        // The flow maps these onto the "A list of attachments" input of Execute
+        // Agent, so the agent opens the real document instead of our extracted
+        // text — which is what a scan or a drawing needs.
+        if (req.attachments?.length) {
+            payload.attachments = req.attachments;
+            console.log(
+                '[AIService] Copilot attachments sent:',
+                req.attachments
+                    .map(a => `${a.name} (${a.contentType}, ${Math.round((a.contentBytes.length * 3) / 4 / 1024)} KB)`)
+                    .join(', ')
+            );
+        }
 
         const res = await fetch(req.powerAutomateUrl, {
             method: 'POST',
@@ -2009,6 +2036,139 @@ Output format:
                 return data.candidates[0].content.parts[0].text;
             }
         } catch (e) { throw e as Error; }
+    },
+
+    /**
+     * A chat turn that may carry images, and — for Copilot — the file itself.
+     *
+     * `chat()` flattens message content to strings, which is right for text but
+     * throws away every picture. This keeps the parts and translates them into
+     * each provider's own multimodal shape: the OpenAI array schema for
+     * OpenAI/Azure/OpenRouter, `inlineData` parts for Gemini, image blocks for
+     * Anthropic, and attachments on the Power Automate payload for Copilot.
+     *
+     * Any number of images per message, unlike `vision()`, which was written for
+     * one photo of one nameplate.
+     */
+    async chatMultimodal(req: AIRequestPayload): Promise<string> {
+        const parts = (m: AIMessage) => (Array.isArray(m.content) ? m.content : [{ type: 'text', text: m.content }]);
+        const textOf = (m: AIMessage) =>
+            parts(m).filter(p => p.type === 'text').map(p => p.text || '').join('\n');
+        const imagesOf = (m: AIMessage) =>
+            parts(m).filter(p => p.type === 'image_url' && p.image_url).map(p => p.image_url!.url);
+        const system = req.messages.filter(m => m.role === 'system').map(textOf).join('\n\n');
+        const turns = req.messages.filter(m => m.role !== 'system');
+
+        // The flow takes text plus real files; images become attachments too, so
+        // the agent still sees the pages rather than a description of them.
+        if (req.provider === 'copilot') {
+            const images = turns.flatMap(imagesOf);
+            const attachments = [
+                ...(req.attachments ?? []),
+                ...images.map((url, i) => ({
+                    name: `page-${i + 1}.jpg`,
+                    contentType: (url.match(/^data:([^;]+);/) || [, 'image/jpeg'])[1] as string,
+                    contentBytes: url.split(',')[1] || '',
+                })),
+            ].filter(a => a.contentBytes);
+            return this._powerAutomateRequest({
+                ...req,
+                attachments,
+                messages: [
+                    ...(system ? [{ role: 'system', content: system }] : []),
+                    { role: 'user', content: turns.map(textOf).join('\n\n') },
+                ],
+            });
+        }
+
+        if (req.provider === 'gemini') {
+            const model = (req.model && req.model.trim()) || 'gemini-2.0-flash';
+            const contents = turns.map(m => ({
+                role: m.role === 'assistant' ? 'model' : 'user',
+                parts: [
+                    { text: textOf(m) },
+                    ...imagesOf(m).map(url => ({
+                        inlineData: {
+                            mimeType: (url.match(/^data:([^;]+);/) || [, 'image/jpeg'])[1],
+                            data: url.split(',')[1] || '',
+                        },
+                    })),
+                ],
+            }));
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${req.apiKey}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents,
+                    ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+                }),
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error.message);
+            if (!data.candidates?.length) throw new Error('No response');
+            return data.candidates[0].content.parts.map((p: any) => p.text || '').join('');
+        }
+
+        if (req.provider === 'anthropic') {
+            const res = await fetch('https://api.anthropic.com/v1/messages', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': req.apiKey,
+                    'anthropic-version': '2023-06-01',
+                    'anthropic-dangerous-direct-browser-access': 'true',
+                },
+                body: JSON.stringify({
+                    model: (req.model && req.model.trim()) || 'claude-sonnet-4-20250514',
+                    max_tokens: 4096,
+                    ...(system ? { system } : {}),
+                    messages: turns.map(m => ({
+                        role: m.role === 'assistant' ? 'assistant' : 'user',
+                        content: [
+                            { type: 'text', text: textOf(m) },
+                            ...imagesOf(m).map(url => ({
+                                type: 'image',
+                                source: {
+                                    type: 'base64',
+                                    media_type: (url.match(/^data:([^;]+);/) || [, 'image/jpeg'])[1],
+                                    data: url.split(',')[1] || '',
+                                },
+                            })),
+                        ],
+                    })),
+                }),
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error.message || 'Anthropic error');
+            return (data.content || []).map((c: any) => c.text || '').join('');
+        }
+
+        // OpenAI, Azure OpenAI and OpenRouter all take the OpenAI array schema.
+        const messages = [
+            ...(system ? [{ role: 'system', content: system }] : []),
+            ...turns.map(m => ({ role: m.role, content: parts(m) })),
+        ];
+        const body: any = { model: req.model, messages };
+        if (req.responseFormat === 'json') body.response_format = { type: 'json_object' };
+
+        let url = 'https://api.openai.com/v1/chat/completions';
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (req.provider === 'azure') {
+            if (!req.azureEndpoint) throw new Error('Azure endpoint is required.');
+            url = `${req.azureEndpoint.replace(/\/$/, '')}/openai/deployments/${req.model}/chat/completions?api-version=2024-08-01-preview`;
+            headers['api-key'] = req.apiKey;
+            delete body.model;
+        } else if (req.provider === 'openrouter') {
+            url = 'https://openrouter.ai/api/v1/chat/completions';
+            headers['Authorization'] = `Bearer ${req.apiKey}`;
+        } else {
+            headers['Authorization'] = `Bearer ${req.apiKey}`;
+        }
+
+        const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        return data.choices[0].message.content;
     },
 
     async _directVision(req: AIRequestPayload): Promise<string> {

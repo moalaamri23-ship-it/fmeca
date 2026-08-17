@@ -16,8 +16,9 @@
  */
 
 import { AIService } from './AIService';
-import type { AIRequestPayload } from './AIService';
+import type { AIMessage, AIRequestPayload } from './AIService';
 import { findMatches, normalizeQuery } from '../components/viewer/textSearch';
+import type { DocumentPayload } from './DocumentPayload';
 
 /** Excerpt window size, in characters — a few paragraphs of context. */
 const WINDOW_CHARS = 1600;
@@ -42,6 +43,11 @@ export interface SmartHit {
     count: number;
     /** A term the expansion produced, rather than a passage the model chose. */
     fromTerm?: boolean;
+    /**
+     * Read off the picture rather than out of extracted text, so it could not be
+     * verified and may not highlight. Shown as such in the panel.
+     */
+    fromImage?: boolean;
 }
 
 /** What smart search needs to reach a model — the app's live AI settings. */
@@ -70,6 +76,25 @@ Rules:
 
 Return ONLY JSON: {"results":[{"quote":"...","why":"..."}]}`;
 
+/**
+ * Reading a document that has no usable text: the pages themselves are attached
+ * as images (or, for Copilot, the file itself). Quotes cannot be verified against
+ * extracted text here, so the prompt insists on transcription rather than
+ * paraphrase — that is the only thing that gives a quote a chance of matching
+ * once the reader searches for it.
+ */
+const READ_IMAGE_PROMPT = `You find passages in a document that answer a reader's search intent.
+The document is attached as page images (and possibly as the original file). It has no machine-readable text, so READ the pages.
+Select the passages that satisfy the intent, most relevant first.
+
+Rules:
+- "quote" MUST be TRANSCRIBED exactly as the words appear on the page — same words, same order, same spelling, same numbers and units. Never paraphrase and never summarize.
+- Quote 3-25 words: enough to be unique, short enough to be one idea.
+- "why" is one short clause saying how it answers the intent, and names the page number when you can see it.
+- If nothing on the pages answers the intent, return an empty list.
+
+Return ONLY JSON: {"results":[{"quote":"...","why":"..."}]}`;
+
 /** The first JSON object in a model reply, fences and prose included. */
 function extractJsonObject(raw: string): Record<string, unknown> | null {
     const text = (raw || '').replace(/^\s*```[a-zA-Z]*\s*/m, '').replace(/```\s*$/m, '');
@@ -88,6 +113,7 @@ function jsonList(raw: string, key: string): unknown[] {
     return Array.isArray(value) ? value : [];
 }
 
+/** One text-only call. */
 async function ask(config: SmartSearchConfig, system: string, user: string): Promise<string> {
     return AIService.chat({
         feature: 'document-smart-search',
@@ -101,6 +127,34 @@ async function ask(config: SmartSearchConfig, system: string, user: string): Pro
         messages: [
             { role: 'system', content: system },
             { role: 'user', content: user },
+        ],
+    });
+}
+
+/** One call that carries the document itself — pages as images, or the file. */
+async function askWithPayload(
+    config: SmartSearchConfig,
+    system: string,
+    user: string,
+    payload: DocumentPayload
+): Promise<string> {
+    const content: Exclude<AIMessage['content'], string> = [
+        { type: 'text', text: user },
+        ...payload.images.map(url => ({ type: 'image_url', image_url: { url } })),
+    ];
+    return AIService.chatMultimodal({
+        feature: 'document-smart-search',
+        provider: config.provider,
+        model: config.model,
+        apiKey: config.apiKey,
+        azureEndpoint: config.azureEndpoint,
+        powerAutomateUrl: config.powerAutomateUrl,
+        mode: 'ai',
+        responseFormat: 'json',
+        attachments: payload.file ? [payload.file] : undefined,
+        messages: [
+            { role: 'system', content: system },
+            { role: 'user', content },
         ],
     });
 }
@@ -198,6 +252,33 @@ export function verifyQuotes(
     return hits;
 }
 
+/**
+ * Results read off the pages, where there is no extracted text to verify them
+ * against. They are kept as the model transcribed them and marked `fromImage`,
+ * because an unverifiable answer is still an answer — it just cannot promise a
+ * highlight. A transcription that happens to match the rendered text layer will
+ * highlight anyway, since the canvases search for the quote like any other term.
+ */
+function collectImageQuotes(candidates: { quote: string; why: string }[]): SmartHit[] {
+    const hits: SmartHit[] = [];
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+        const quote = candidate.quote.trim();
+        const key = normalizeQuery(quote);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        hits.push({
+            id: `smart-img-${hits.length}-${key.slice(0, 40)}`,
+            quote,
+            why: candidate.why.trim(),
+            count: 0,
+            fromImage: true,
+        });
+        if (hits.length >= MAX_SMART_RESULTS) break;
+    }
+    return hits;
+}
+
 export interface SmartSearchResult {
     hits: SmartHit[];
     /** Every phrase the expansion produced, whether or not it occurs. */
@@ -205,20 +286,57 @@ export interface SmartSearchResult {
 }
 
 /**
- * Run a smart search over one document's extracted text. Throws only when the
- * reading call itself fails; an empty `hits` list means the model found nothing
- * that survives verification.
+ * Run a smart search over one document.
+ *
+ * Which channel is read depends on what the document actually has. A digital
+ * PDF, a Word file or a spreadsheet is read as text. A photo, a scan or a
+ * drawing has none, so its pages ride as images (and, on Copilot, the file
+ * itself) and the model reads them — an attachment is not always text.
+ *
+ * Throws only when the reading call itself fails; an empty `hits` list means the
+ * model found nothing.
  */
 export async function smartSearchDocument(
     documentName: string,
-    text: string,
+    payload: DocumentPayload,
     intent: string,
     config: SmartSearchConfig
 ): Promise<SmartSearchResult> {
     const trimmedIntent = intent.trim();
-    if (!trimmedIntent || !text.trim()) return { hits: [], terms: [] };
+    const text = payload.text;
+    const hasText = text.trim().length > 0 && !payload.textThin;
+    const carriesDocument = payload.images.length > 0 || !!payload.file;
+    if (!trimmedIntent || (!hasText && !carriesDocument)) return { hits: [], terms: [] };
 
     const terms = await expandIntent(trimmedIntent, config);
+
+    // Nothing readable as text — send the document and have the model read it.
+    if (!hasText) {
+        const reply = await askWithPayload(
+            config,
+            READ_IMAGE_PROMPT,
+            [
+                `Document: ${documentName}`,
+                `Search intent: ${trimmedIntent}`,
+                `Related wording to watch for: ${terms.join(', ')}`,
+                payload.images.length > 0
+                    ? `${payload.images.length} page image${payload.images.length === 1 ? '' : 's'} attached, in page order.`
+                    : 'The original file is attached.',
+                text.trim() ? `\nWhat little text could be extracted:\n${text.slice(0, 4000)}` : '',
+            ]
+                .filter(Boolean)
+                .join('\n'),
+            payload
+        );
+        const candidates = jsonList(reply, 'results')
+            .map(entry => {
+                const row = entry as { quote?: unknown; why?: unknown };
+                return { quote: String(row?.quote ?? ''), why: String(row?.why ?? '') };
+            })
+            .filter(row => row.quote.trim().length > 0);
+        return { hits: collectImageQuotes(candidates), terms };
+    }
+
     const excerpts = excerptPayload(text, terms);
 
     const reply = await ask(

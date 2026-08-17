@@ -7,6 +7,8 @@ import { DocumentSearchBar, DocumentSearchProvider, SmartSearchPanel } from './d
 import { useSmartPanelActive } from './searchContext';
 import { fileKey as makeFileKey, useFileBytes } from './useFileBytes';
 import { extractDocumentText } from '../../services/DocumentText';
+import { buildDocumentPayload } from '../../services/DocumentPayload';
+import type { DocumentPayload } from '../../services/DocumentPayload';
 import type { SmartSearchConfig } from '../../services/SmartSearchService';
 import type { LocalFileSystemProvider } from '../../services/FileSystem';
 import type { FileEntry, ViewerCitation } from '../../types';
@@ -143,6 +145,7 @@ export const FileViewerModal: React.FC<{
 }) => {
     const [panelOpen, setPanelOpen] = useState(true);
     const [text, setText] = useState<{ key: string; value: string } | null>(null);
+    const [payload, setPayload] = useState<{ key: string; value: DocumentPayload } | null>(null);
 
     // Escape belongs to the find bar while it is open, and to the modal otherwise.
     const searchState = useRef<{ open: boolean; close: () => void }>({ open: false, close: () => {} });
@@ -201,6 +204,24 @@ export const FileViewerModal: React.FC<{
 
     const documentText = text?.key === key ? text.value : null;
 
+    // Once the text is known, build what smart search may send: an image or a
+    // scanned PDF has no text worth reading, so its pages go as images instead —
+    // and on Copilot the original file rides along, since that flow can open one.
+    useEffect(() => {
+        if (!isOpen || !loadedBytes || !key || documentText == null || !shownName) return;
+        let cancelled = false;
+        void buildDocumentPayload(shownName, category, loadedBytes, documentText, {
+            provider: ai?.provider ?? '',
+        }).then(value => {
+            if (!cancelled) setPayload({ key, value });
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, loadedBytes, key, category, documentText, shownName, ai?.provider]);
+
+    const documentPayload = payload?.key === key ? payload.value : null;
+
     const download = useCallback(() => {
         if (bytes.status !== 'ready' || !shownName) return;
         const url = URL.createObjectURL(new Blob([bytes.bytes]));
@@ -233,8 +254,11 @@ export const FileViewerModal: React.FC<{
 
     if (!isOpen || !shownName) return null;
 
-    // Images have no text to find in; every other renderer shows searchable content.
+    // An image has no text to find in, but smart search can still read it, so the
+    // bar appears as soon as there is something to send. ⌘F stays off there —
+    // there is nothing for a literal find to match.
     const searchable = category !== 'image';
+    const showSearchBar = searchable || documentPayload != null;
     const size = bytes.status === 'ready' ? bytes.bytes.byteLength : null;
     const showPanel = panelOpen;
 
@@ -250,6 +274,7 @@ export const FileViewerModal: React.FC<{
                     hotkey={searchable}
                     documentText={searchable ? (documentText ?? '') : ''}
                     documentName={shownName}
+                    payload={documentPayload}
                     ai={ai}
                     onStateChange={onStateChange}
                 >
@@ -271,7 +296,7 @@ export const FileViewerModal: React.FC<{
                                           .join(' · ')}
                             </p>
                         </div>
-                        {searchable && <DocumentSearchBar />}
+                        {showSearchBar && <DocumentSearchBar />}
                         <button
                             onClick={download}
                             disabled={bytes.status !== 'ready'}

@@ -4,6 +4,8 @@ import { Icon } from '../Icon';
 import { cn } from './util';
 import { smartSearchDocument } from '../../services/SmartSearchService';
 import type { SmartSearchConfig } from '../../services/SmartSearchService';
+import { payloadIsUsable } from '../../services/DocumentPayload';
+import type { DocumentPayload } from '../../services/DocumentPayload';
 import { SearchContext, useDocumentSearch } from './searchContext';
 import type { SearchApi, SmartSearchState } from './searchContext';
 
@@ -29,9 +31,14 @@ const Spinner: React.FC<{ className?: string }> = ({ className = 'w-3.5 h-3.5' }
 export const DocumentSearchProvider: React.FC<{
     /** Bind ⌘F / Ctrl+F to the find bar (only while the viewer is on screen). */
     hotkey?: boolean;
-    /** The document's extracted text — what smart search reads. */
+    /** The document's extracted text — what find-in-document searches. */
     documentText?: string;
     documentName?: string;
+    /**
+     * What smart search may send: the text, the pages as images, and the file
+     * itself where the transport can carry one. Null until it is built.
+     */
+    payload?: DocumentPayload | null;
     /** Live AI settings, or null when the app has no key configured. */
     ai?: SmartSearchConfig | null;
     /**
@@ -40,7 +47,7 @@ export const DocumentSearchProvider: React.FC<{
      */
     onStateChange?: (state: { open: boolean; close: () => void }) => void;
     children: ReactNode;
-}> = ({ hotkey = false, documentText = '', documentName = 'document', ai = null, onStateChange, children }) => {
+}> = ({ hotkey = false, documentText = '', documentName = 'document', payload = null, ai = null, onStateChange, children }) => {
     const [open, setOpen] = useState(false);
     const [input, setInputState] = useState('');
     const [query, setQuery] = useState('');
@@ -103,22 +110,26 @@ export const DocumentSearchProvider: React.FC<{
         setSmart(IDLE_SMART);
     }, []);
 
-    const hasText = documentText.trim().length > 0;
+    // Readable means text OR the document itself: a photo and a scan carry no
+    // text, and smart search reads their pages instead of refusing to run.
+    const readable = payloadIsUsable(payload);
     const hasAi = !!ai && (!!ai.apiKey || ai.provider === 'copilot');
-    const smartAvailable = hasText && hasAi;
-    const smartHint = !hasText
-        ? "Smart search needs this document's text"
+    const smartAvailable = readable && hasAi;
+    const smartHint = !readable
+        ? 'Smart search is still reading this document'
         : !hasAi
           ? 'Smart search needs an AI provider — add an API key in Settings'
-          : 'Smart search — find what you mean, not just these words (⌘↵)';
+          : payload && payload.textThin
+            ? 'Smart search — the pages are sent as images, since this file has no text layer (⌘↵)'
+            : 'Smart search — find what you mean, not just these words (⌘↵)';
 
     const runSmart = useCallback(() => {
         const intent = input.trim();
-        if (!intent || !smartAvailable || !ai) return;
+        if (!intent || !smartAvailable || !ai || !payload) return;
         const token = ++runToken.current;
         setActive(0);
         setSmart({ status: 'running', intent, hits: [], error: null, focused: null });
-        void smartSearchDocument(documentName, documentText, intent, ai).then(
+        void smartSearchDocument(documentName, payload, intent, ai).then(
             result => {
                 if (runToken.current !== token) return;
                 setSmart({ status: 'done', intent, hits: result.hits, error: null, focused: null });
@@ -134,7 +145,7 @@ export const DocumentSearchProvider: React.FC<{
                 });
             }
         );
-    }, [input, smartAvailable, ai, documentName, documentText]);
+    }, [input, smartAvailable, ai, documentName, payload]);
 
     const focusSmartHit = useCallback((id: string | null) => {
         setActive(0);
@@ -347,8 +358,15 @@ export const SmartSearchPanel: React.FC = () => {
                                         {index + 1}
                                     </span>
                                     <span className="text-[10px] font-mono text-slate-400">
-                                        {hit.count} match{hit.count === 1 ? '' : 'es'}
+                                        {hit.fromImage
+                                            ? 'read from the page'
+                                            : `${hit.count} match${hit.count === 1 ? '' : 'es'}`}
                                     </span>
+                                    {hit.fromImage && (
+                                        <span className="rounded-full border border-amber-200 bg-amber-50 px-1.5 text-[10px] font-mono text-amber-700">
+                                            not verified
+                                        </span>
+                                    )}
                                     {hit.fromTerm && (
                                         <span className="rounded-full border border-slate-200 bg-slate-100 px-1.5 text-[10px] font-mono text-slate-400">
                                             term
