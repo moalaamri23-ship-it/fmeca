@@ -179,12 +179,13 @@
         }
 
         /**
-         * Choosing files also has to happen here.
+         * Write the files, wherever they were chosen, and report the progress.
          *
-         * A file input's `change` event is not an activation-triggering event, so a
-         * frame that opens the picker itself has no user activation left to open this
-         * window with — the upload died as "pop-up blocked". Selecting the files in
-         * this top-level window keeps every gesture-gated call on a real click.
+         * The frame picks them itself whenever it can: this window is already open
+         * by then, so its `change` event — which carries no user activation — never
+         * has to open anything. Only when a browser refuses to serve one click to
+         * both the window and the picker does the choosing fall back to this side,
+         * through pickAndWrite below.
          */
         function writeFiles(root, pathParts, files) {
           showMsg('Uploading ' + files.length + ' file' + (files.length > 1 ? 's' : '') + ' to' + pathLabel(pathParts))
@@ -288,10 +289,17 @@
         async function runBridgeOperation(data) {
           var args = Array.isArray(data.args) ? data.args : []
           var handle = handles.get(data.handleId)
-          if (!String(data.op).startsWith('writable.') && !handle) {
+          var op = String(data.op)
+          if (!op.startsWith('writable.') && !op.startsWith('ui.') && !handle) {
             throw new DOMException('Unknown filesystem handle.', 'NotFoundError')
           }
           switch (data.op) {
+            // The window stays open for as long as the app may write, so it says
+            // what it is waiting for rather than sitting there blank.
+            case 'ui.status':
+              actEl.hidden = true
+              showMsg(escapeHtml(args[0] == null ? '' : args[0]))
+              return null
             case 'directory.entries': {
               var entries = []
               for await (var entry of handle.entries()) {
@@ -310,6 +318,10 @@
             // this window from a file input's change event.
             case 'directory.pickAndWrite':
               return pickAndWrite(handle, args[0] || [])
+            // The frame picked the files itself, in one click. Files survive
+            // postMessage, so only the writing has to happen here.
+            case 'directory.writeFiles':
+              return writeFiles(handle, args[0] || [], Array.prototype.slice.call(args[1] || []))
             case 'handle.queryPermission':
               return handle.queryPermission ? handle.queryPermission(args[0]) : 'granted'
             case 'handle.requestPermission':

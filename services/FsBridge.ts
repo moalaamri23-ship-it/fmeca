@@ -32,6 +32,16 @@ export interface DirHandleLike {
     requestPermission?(descriptor: { mode: 'read' | 'readwrite' }): Promise<PermissionState>;
     /** Only on bridge proxies: choose files in the helper window and write them. */
     pickAndWrite?(pathParts: string[]): Promise<{ written: number }>;
+    /**
+     * Only on bridge proxies: write files the frame already chose.
+     *
+     * A File survives postMessage as a reference to the same bytes, so handing
+     * the selection to the helper costs nothing and keeps the frame's own picker
+     * — the one the user reached in a single click — in the flow.
+     */
+    writeFiles?(pathParts: string[], files: File[]): Promise<{ written: number }>;
+    /** Only on bridge proxies: say what the helper window is currently waiting on. */
+    setStatus?(text: string): Promise<void>;
 }
 
 interface PickerWindow {
@@ -132,9 +142,14 @@ function pickViaPopup(projectId: string): Promise<DirHandleLike | null> {
  * stays in the allowed top-level context too.
  *
  * Call this directly from the click that starts the write: opening a popup after
- * an await would lose transient user activation and be blocked.
+ * an await would lose transient user activation and be blocked. The root itself
+ * may still be on its way — the window is opened first and told which folder it
+ * is for once the handle arrives, so a click need not wait on IndexedDB.
  */
-export function openWritableRootBridge(rootHandle: DirHandleLike, projectId: string): Promise<WritableRootBridge> {
+export function openWritableRootBridge(
+    rootHandle: DirHandleLike | Promise<DirHandleLike>,
+    projectId: string
+): Promise<WritableRootBridge> {
     const session =
         typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
             ? crypto.randomUUID()
@@ -220,6 +235,10 @@ export function openWritableRootBridge(rootHandle: DirHandleLike, projectId: str
             async pickAndWrite(pathParts) {
                 return (await call('directory.pickAndWrite', handle.handleId, [pathParts])) as { written: number };
             },
+            async writeFiles(pathParts, files) {
+                return (await call('directory.writeFiles', handle.handleId, [pathParts, files])) as { written: number };
+            },
+            async setStatus(text) { await call('ui.status', handle.handleId, [text]); },
             async queryPermission(descriptor) {
                 return (await call('handle.queryPermission', handle.handleId, [descriptor])) as PermissionState;
             },
@@ -252,9 +271,18 @@ export function openWritableRootBridge(rootHandle: DirHandleLike, projectId: str
             }
 
             if (data.type === 'connect') {
-                popup.postMessage(
-                    { source: CHANNEL, bridge: true, session, type: 'root', handle: rootHandle },
-                    window.location.origin
+                Promise.resolve(rootHandle).then(
+                    handle => {
+                        if (closed) return;
+                        popup.postMessage(
+                            { source: CHANNEL, bridge: true, session, type: 'root', handle },
+                            window.location.origin
+                        );
+                    },
+                    (error: Error) => {
+                        if (!ready) reject(error);
+                        cleanup(error);
+                    }
                 );
                 return;
             }

@@ -1,6 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { LocalFileSystemProvider, sanitizeName, isCancellation, describePickerFailure } from '../services/FileSystem';
+import React, { useState, useEffect, useRef } from 'react';
+import { LocalFileSystemProvider, WriteSession, sanitizeName, isCancellation, describePickerFailure } from '../services/FileSystem';
 import { FileEntry } from '../types';
+
+// Which side picks the files when embedded. Starts on the frame's own picker —
+// one click to the file dialog — and drops to the helper window's picker only
+// for a browser that will not serve a single click to both.
+const FLOW_KEY = 'fmeca_upload_flow_v1';
 
 interface AttachmentModalProps {
     isOpen: boolean;
@@ -22,6 +27,13 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
     const [hasRoot, setHasRoot] = useState<boolean | null>(null);
     const [rootName, setRootName] = useState<string | null>(null);
     const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+    const [pickInFrame, setPickInFrame] = useState<boolean>(() => {
+        try { return localStorage.getItem(FLOW_KEY) !== 'helper'; } catch { return true; }
+    });
+    const inputRef = useRef<HTMLInputElement>(null);
+    // One helper window for the whole panel. Held open so that later clicks can
+    // spend their user activation on the file picker rather than on a window.
+    const sessionRef = useRef<WriteSession | null>(null);
 
     const loadFiles = async () => {
         if(!provider || !projectId) return;
@@ -54,9 +66,74 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
         if(hasRoot && mode === 'create') setMode('view');
     }, [hasRoot, mode]);
 
+    const closeSession = () => {
+        sessionRef.current?.done();
+        sessionRef.current = null;
+    };
+
+    // The helper window belongs to this panel and to this project only.
+    useEffect(() => {
+        if(!isOpen) closeSession();
+        return closeSession;
+    }, [isOpen, projectId]);
+
+    /**
+     * Open the helper window with the panel, for browsers that cannot spare a
+     * click for both it and the file picker.
+     *
+     * The click that opened References is still the current gesture here, so the
+     * window costs nothing that Upload will need. Only for a project whose folder
+     * is already in hand — nothing should pop up for a project that has none.
+     */
+    useEffect(() => {
+        if(!isOpen || pickInFrame || !provider?.embedded || !projectId) return;
+        if(sessionRef.current || !provider.hasLiveRoot(projectId)) return;
+        try { ensureSession(); } catch { /* Upload will report it, and can retry */ }
+        // eslint-disable-next-line
+    }, [isOpen, pickInFrame, provider, projectId]);
+
+    /**
+     * The open write channel, opening one if this is the first write.
+     *
+     * MUST be called straight from a click: opening the helper window is itself
+     * gesture-gated. Throws when the window is blocked.
+     */
+    const ensureSession = (): WriteSession | null => {
+        if(sessionRef.current) return sessionRef.current;
+        if(!provider || !projectId) return null;
+        const session = provider.beginWrite(projectId);
+        sessionRef.current = session;
+        const where = [rootName || 'the project folder', ...pathParts].join(' / ');
+        void provider.describeWrite(session, 'Saving to ' + where + '. This window stays open while References is.');
+        return session;
+    };
+
+    /**
+     * Open the file dialog here in the app. Returns false when the browser has no
+     * user activation left to open it with — which is what happens on the click
+     * that also had to open the helper window.
+     */
+    const openPicker = (): boolean => {
+        const input = inputRef.current as (HTMLInputElement & { showPicker?: () => void }) | null;
+        if(!input) return false;
+        // showPicker reports the refusal; the legacy click only fails silently.
+        if(typeof input.showPicker === 'function') {
+            try { input.showPicker(); return true; } catch { return false; }
+        }
+        input.click();
+        return true;
+    };
+
+    const rememberHelperPick = () => {
+        setPickInFrame(false);
+        try { localStorage.setItem(FLOW_KEY, 'helper'); } catch { /* preference only */ }
+    };
+
     const handlePickRoot = async () => {
         if(!provider || !projectId) return;
         setMsg("");
+        // A new root leaves the open helper holding the old one.
+        closeSession();
         try {
             await provider.chooseRoot(projectId);
             await loadFiles();
@@ -72,7 +149,8 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
         if(customFolder.trim()) finalParts[finalParts.length-1] = customFolder.trim();
         setMsg("");
         try {
-            await provider.ensureFolderForEntity(projectId, finalParts);
+            const session = ensureSession();
+            await provider.ensureFolderForEntity(projectId, finalParts, session ?? undefined);
             setMsg("Folder ready.");
             setMode('view');
             await loadFiles();
@@ -82,13 +160,36 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
         }
     };
 
-    // Embedded: the helper window does the choosing as well as the writing, because
-    // a file input's change event carries no user activation to open it with.
-    const handleUploadEmbedded = async () => {
+    /**
+     * One click from Upload to the file dialog.
+     *
+     * The helper window opens first, because writing is only allowed there. The
+     * picker then runs here, so the files are chosen in the app and the window is
+     * left doing what it is good for: showing where they are going. Should the
+     * browser spend the click's activation on the window and leave none for the
+     * picker, the helper picks instead — one extra click, remembered so the next
+     * upload starts that way.
+     */
+    const handleUploadClick = () => {
         if(!provider || !projectId) return;
         setMsg("");
+        if(!provider.embedded) { openPicker(); return; }
+        const reused = !!sessionRef.current;
+        let session: WriteSession | null;
+        try { session = ensureSession(); }
+        catch(e: any) { setMsg(describePickerFailure(e)); return; }
+        if(!session) return;
+        // An already-open window costs this click nothing, so the picker can run
+        // here whatever the remembered preference is.
+        if((pickInFrame || reused) && openPicker()) return;
+        if(!reused) rememberHelperPick();
+        void runHelperPick(session);
+    };
+
+    const runHelperPick = async (session: WriteSession) => {
+        if(!provider || !projectId) return;
         try {
-            const written = await provider.uploadViaHelper(projectId, pathParts);
+            const written = await provider.uploadViaHelper(projectId, pathParts, session);
             setMsg(`Saved ${written} file${written > 1 ? 's' : ''}.`);
             await loadFiles();
         } catch(err: any) {
@@ -98,24 +199,25 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
 
     const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const input = e.target;
-        if(!provider || !projectId || !input.files?.length) return;
-        const picked = input.files;
-        setMsg("");
+        const picked = Array.from(input.files || []);
+        input.value = '';
+        if(!provider || !projectId || !picked.length) return;
+        setMsg(`Saving ${picked.length} file${picked.length > 1 ? 's' : ''}...`);
         try {
-            await provider.uploadFiles(projectId, pathParts, picked);
-            setMsg(`Saved ${picked.length} file${picked.length > 1 ? 's' : ''}.`);
+            const written = await provider.writeChosenFiles(projectId, pathParts, picked, sessionRef.current ?? undefined);
+            setMsg(`Saved ${written} file${written > 1 ? 's' : ''}.`);
             await loadFiles();
         } catch(err: any) {
             if(!isCancellation(err)) setMsg("Upload failed: " + (err?.message || err));
         }
-        input.value = '';
     };
 
     const handleDelete = async (name: string) => {
         if(!provider || !projectId) return;
         setConfirmDelete(null); setMsg("");
         try {
-            await provider.deleteFile(projectId, pathParts, name);
+            const session = ensureSession();
+            await provider.deleteFile(projectId, pathParts, name, session ?? undefined);
             setMsg(`Deleted ${name}.`);
             await loadFiles();
         } catch(err: any) {
@@ -153,11 +255,13 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                         {!hasRoot && (
                             <button onClick={()=>setMode('create')} className={`px-3 py-1 rounded text-sm font-bold ${mode==='create'?'bg-brand-600 text-white':'bg-slate-100'}`}>Create Folder</button>
                         )}
-                        {provider?.embedded ? (
-                            <button onClick={handleUploadEmbedded} className="px-3 py-1 rounded text-sm font-bold bg-slate-100 hover:bg-brand-50">Upload</button>
-                        ) : (
-                            <label className="px-3 py-1 rounded text-sm font-bold bg-slate-100 cursor-pointer hover:bg-brand-50">Upload <input type="file" multiple className="hidden" onChange={handleUpload}/></label>
-                        )}
+                        <button onClick={handleUploadClick} disabled={hasRoot === false}
+                            title={hasRoot === false ? 'Link a project folder first' : 'Add files to this folder'}
+                            className="px-3 py-1 rounded text-sm font-bold bg-slate-100 hover:bg-brand-50 disabled:opacity-40 disabled:cursor-not-allowed">Upload</button>
+                        {/* Kept in the layout rather than display:none, so the browser
+                            never has reason to refuse to open its dialog. */}
+                        <input ref={inputRef} type="file" multiple onChange={handleUpload}
+                            className="w-0 h-0 opacity-0 overflow-hidden" tabIndex={-1} aria-hidden="true"/>
                         {hasRoot && (
                             <button onClick={handlePickRoot} title="Choose a different project folder"
                                 className="px-3 py-1 rounded text-sm font-bold bg-slate-100 hover:bg-brand-50 ml-auto">Change Folder</button>

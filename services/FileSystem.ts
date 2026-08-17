@@ -29,6 +29,16 @@ export class FolderSelectionCancelled extends Error {
     constructor() { super('Folder selection cancelled.'); this.name = 'FolderSelectionCancelled'; }
 }
 
+/**
+ * An open write channel. Embedded, it owns the helper window; standalone it is
+ * nothing at all. Held open for as long as the app may write, so that later
+ * clicks can spend their user activation on the file picker instead.
+ */
+export interface WriteSession {
+    rootPromise: Promise<DirHandleLike>;
+    done: () => void;
+}
+
 export const isCancellation = (err: any): boolean =>
     !!err && (err.name === 'AbortError' || err.name === 'FolderSelectionCancelled');
 
@@ -96,13 +106,13 @@ export class LocalFileSystemProvider {
     /** True when the browser bars this context from writing to disk directly. */
     readonly embedded: boolean = IN_IFRAME;
 
-    // Kept in memory so a click handler can reach the root without awaiting IndexedDB
-    // first — opening the write bridge after an await would lose user activation.
+    // Kept in memory so the app can tell whether a project has a usable folder
+    // without going back to IndexedDB for every listing.
     private liveRoots = new Map<string, DirHandleLike>();
 
-    /** The root as known right now, with no awaiting. Null until loadRoot has run. */
-    rootSync(projectId: string): DirHandleLike | null {
-        return this.liveRoots.get(projectId) ?? null;
+    /** Whether the root is already in hand, with no awaiting. */
+    hasLiveRoot(projectId: string): boolean {
+        return this.liveRoots.has(projectId);
     }
 
     /** Loads the saved root and confirms it is still usable. Never prompts. */
@@ -154,24 +164,26 @@ export class LocalFileSystemProvider {
     }
 
     /**
-     * Opens the write channel for one operation. Embedded, that is a short-lived
-     * top-level window; standalone, the root handle is already writable.
+     * Opens the write channel. Embedded, that is a top-level window; standalone,
+     * the root handle is already writable.
      *
-     * MUST be called synchronously from the click, before any await.
+     * MUST be called synchronously from the click, before any await. The caller
+     * may keep the session for several operations, and must call done() once.
      */
-    beginWrite(projectId: string): { rootPromise: Promise<DirHandleLike>; done: () => void } {
-        const root = this.rootSync(projectId);
-        if (!root) {
-            return {
-                rootPromise: Promise.reject(new Error('No project folder is linked yet. Pick one first.')),
-                done: () => {},
-            };
-        }
-        if (!this.embedded) return { rootPromise: Promise.resolve(root), done: () => {} };
+    beginWrite(projectId: string): WriteSession {
+        const linkedRoot = this.getCachedRoot(projectId).then(root => {
+            if (!root) throw new Error('No project folder is linked yet. Pick one first.');
+            return root;
+        });
+        if (!this.embedded) return { rootPromise: linkedRoot, done: () => {} };
+        // The bridge only listens for the folder once the window is up; keep a
+        // handler on the promise meanwhile so a failure is never left unhandled.
+        linkedRoot.catch(() => {});
 
         let bridge: WritableRootBridge | null = null;
         let finished = false;
-        const rootPromise = openWritableRootBridge(root, projectId).then(b => {
+        // The window opens on this click; the folder catches up with it.
+        const rootPromise = openWritableRootBridge(linkedRoot, projectId).then(b => {
             bridge = b;
             // A caller that already gave up must not leave the window hanging around.
             if (finished) { b.close(); throw new FolderSelectionCancelled(); }
@@ -183,60 +195,86 @@ export class LocalFileSystemProvider {
         };
     }
 
-    /** Creates the folder chain for an entity. Call beginWrite from the click. */
-    async ensureFolderForEntity(projectId: string, pathParts: string[]): Promise<void> {
-        const { rootPromise, done } = this.beginWrite(projectId);
-        try {
-            const root = await rootPromise;
-            const dir = await walk(root, pathParts, true);
-            if (!dir) throw new Error('Could not create that folder.');
-        } finally { done(); }
+    /**
+     * Runs one write against a session, opening a throwaway one when the caller
+     * has none. A session the caller owns is left open for its next operation.
+     */
+    private async withWrite<T>(
+        projectId: string,
+        session: WriteSession | undefined,
+        run: (root: DirHandleLike) => Promise<T>
+    ): Promise<T> {
+        const active = session ?? this.beginWrite(projectId);
+        try { return await run(await active.rootPromise); }
+        finally { if (!session) active.done(); }
     }
 
-    /** Standalone only: write files already chosen by the app's own file input. */
-    async uploadFiles(projectId: string, pathParts: string[], files: FileList): Promise<void> {
-        const { rootPromise, done } = this.beginWrite(projectId);
-        try {
-            const root = await rootPromise;
+    /** Creates the folder chain for an entity. Call beginWrite from the click. */
+    async ensureFolderForEntity(projectId: string, pathParts: string[], session?: WriteSession): Promise<void> {
+        return this.withWrite(projectId, session, async root => {
+            const dir = await walk(root, pathParts, true);
+            if (!dir) throw new Error('Could not create that folder.');
+        });
+    }
+
+    /**
+     * Writes files the app's own file input already chose.
+     *
+     * Embedded, the helper window does the writing and reports the progress —
+     * File objects survive postMessage as references to the same bytes, so
+     * nothing is copied on the way there.
+     */
+    async writeChosenFiles(
+        projectId: string,
+        pathParts: string[],
+        files: File[],
+        session?: WriteSession
+    ): Promise<number> {
+        return this.withWrite(projectId, session, async root => {
+            if (root.writeFiles) return (await root.writeFiles(pathParts, files)).written;
             const dir = await walk(root, pathParts, true);
             if (!dir) throw new Error('Could not open that folder for writing.');
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
+            for (const file of files) {
                 const fileHandle = await dir.getFileHandle(file.name, { create: true });
                 const writable = await fileHandle.createWritable();
                 try { await writable.write(file); } finally { await writable.close(); }
             }
-        } finally { done(); }
+            return files.length;
+        });
     }
 
     /**
-     * Embedded: choose the files in the helper window and write them there.
+     * Embedded fallback: choose the files in the helper window and write them there.
      *
-     * A file input's `change` event is not an activation-triggering event, so the
-     * frame cannot open the helper window once its own picker has run — that is
-     * what surfaced as "pop-up blocked" on upload. Selecting the files inside the
-     * helper keeps every gesture-gated call on a genuine click.
-     *
-     * Must be called straight from the Upload click.
+     * Used only where a browser will not serve one click to both the helper window
+     * and the frame's own file picker. Selecting inside the helper keeps every
+     * gesture-gated call on a genuine click, at the cost of that second click.
      */
-    async uploadViaHelper(projectId: string, pathParts: string[]): Promise<number> {
-        const { rootPromise, done } = this.beginWrite(projectId);
-        try {
-            const root = await rootPromise;
+    async uploadViaHelper(projectId: string, pathParts: string[], session?: WriteSession): Promise<number> {
+        return this.withWrite(projectId, session, async root => {
             if (!root.pickAndWrite) throw new Error('The folder helper window is unavailable.');
             const result = await root.pickAndWrite(pathParts);
             return result.written;
-        } finally { done(); }
+        });
     }
 
-    async deleteFile(projectId: string, pathParts: string[], name: string): Promise<void> {
-        const { rootPromise, done } = this.beginWrite(projectId);
+    /** Tells the helper window what it is waiting for. Silent when there is none. */
+    async describeWrite(session: WriteSession, text: string): Promise<void> {
         try {
-            const root = await rootPromise;
+            const root = await session.rootPromise;
+            if (root.setStatus) await root.setStatus(text);
+        } catch {
+            // Purely cosmetic — a session that cannot say this has bigger problems,
+            // and the operation that needs it will report them itself.
+        }
+    }
+
+    async deleteFile(projectId: string, pathParts: string[], name: string, session?: WriteSession): Promise<void> {
+        return this.withWrite(projectId, session, async root => {
             const dir = await walk(root, pathParts, false);
             if (!dir) return;
             await dir.removeEntry(name, { recursive: true });
-        } finally { done(); }
+        });
     }
 
     /**
