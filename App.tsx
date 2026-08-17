@@ -2087,6 +2087,7 @@ render();
                         provider={storageProvider}
                         projectId={activeProject && activeProject.id}
                         pathParts={getAttachmentPath()}
+                        ai={{ apiKey, model: modelName, provider: aiProvider, azureEndpoint, powerAutomateUrl }}
                     />
                 </div>
             )}

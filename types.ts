@@ -118,6 +118,37 @@ export interface FileEntry {
   handle?: { kind: 'file'; name: string; getFile(): Promise<File> };
 }
 
+/** Which renderer the document viewer uses for a file. */
+export type FileCategory = 'pdf' | 'docx' | 'sheet' | 'image' | 'text' | 'unsupported';
+
+/**
+ * A pointer from somewhere in the app back to an exact passage inside a
+ * reference file. The viewer locates `quote` (or `anchor`) in the document and
+ * highlights it; `page`/`line` only speed that search up and label the card.
+ *
+ * Attachments open with no citations today. The type is the contract the
+ * per-field citations will arrive on, which is why the panel exists already.
+ */
+export interface ViewerCitation {
+  id: string;
+  /** 1-based badge number shown on the card. */
+  index: number;
+  /** File the passage lives in — matched against the folder listing by name. */
+  fileName: string;
+  /** Text the citation points at. */
+  anchor: string;
+  /** The document's own wording, when it is known exactly. */
+  quote?: string;
+  /** Surrounding context, for the card. */
+  snippet?: string;
+  page?: number;
+  line?: number;
+  /** Where this citation came from, e.g. "Subsystem function". */
+  label?: string;
+  /** True when the anchor had to be shortened to be located. */
+  approximate?: boolean;
+}
+
 // Minimal types for File System Access API if not present in environment
 declare global {
   interface Window {

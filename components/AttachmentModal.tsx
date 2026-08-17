@@ -1,6 +1,14 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { LocalFileSystemProvider, WriteSession, sanitizeName, isCancellation, describePickerFailure } from '../services/FileSystem';
-import { FileEntry } from '../types';
+import { FileEntry, ViewerCitation } from '../types';
+import { fileKey, forgetFileBytes } from './viewer/useFileBytes';
+import type { SmartSearchConfig } from '../services/SmartSearchService';
+
+// The renderers behind the viewer (PDF.js, the Word renderer, the sheet parser)
+// are megabytes. They load the first time a file is opened, not on page load.
+const FileViewerModal = lazy(() =>
+    import('./viewer/FileViewerModal').then(m => ({ default: m.FileViewerModal }))
+);
 
 interface AttachmentModalProps {
     isOpen: boolean;
@@ -10,9 +18,13 @@ interface AttachmentModalProps {
     provider: LocalFileSystemProvider | null;
     pathParts: string[];
     projectId: string | null;
+    /** Live AI settings, for the viewer's smart search. */
+    ai?: SmartSearchConfig | null;
+    /** Citations pointing into this folder — the viewer lists them beside the file. */
+    citations?: ViewerCitation[];
 }
 
-export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClose, entityName, provider, pathParts, projectId }) => {
+export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClose, entityName, provider, pathParts, projectId, ai = null, citations = [] }) => {
     // Every hook must run on every render — bail out below the hook list, never above it.
     const [files, setFiles] = useState<FileEntry[]>([]);
     const [loading, setLoading] = useState(false);
@@ -24,6 +36,9 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
     const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
     // Chosen, but with no window open to write them through — recovery only.
     const [pending, setPending] = useState<File[]>([]);
+    // The file open in the viewer, and which citation it is showing.
+    const [viewing, setViewing] = useState<string | null>(null);
+    const [activeCitation, setActiveCitation] = useState<string | null>(null);
     const inputRef = useRef<HTMLInputElement>(null);
     // The helper window, open for as long as this panel is.
     const sessionRef = useRef<WriteSession | null>(null);
@@ -53,7 +68,7 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
 
     // Reset transient UI whenever the modal is reopened on a different entity.
     useEffect(() => {
-        if(isOpen) { setMode('view'); setCustomFolder(""); setConfirmDelete(null); }
+        if(isOpen) { setMode('view'); setCustomFolder(""); setConfirmDelete(null); setViewing(null); }
     }, [isOpen, pathParts.join("|")]);
 
     // Linking a folder retires the Create Folder tab, so don't strand its panel.
@@ -212,6 +227,8 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
         setMsg(`Saving ${picked.length} file${picked.length > 1 ? 's' : ''}...`);
         try {
             const written = await provider.writeChosenFiles(projectId, pathParts, picked, session ?? undefined);
+            // An upload can overwrite a file the viewer has already read.
+            for (const file of picked) forgetFileBytes(fileKey(pathParts, file.name));
             setPending([]);
             setMsg(`Saved ${written} file${written > 1 ? 's' : ''}.`);
             await loadFiles();
@@ -260,6 +277,8 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
         try {
             const session = ensureSession();
             await provider.deleteFile(projectId, pathParts, name, session ?? undefined);
+            forgetFileBytes(fileKey(pathParts, name));
+            if(viewing === name) setViewing(null);
             setMsg(`Deleted ${name}.`);
             await loadFiles();
         } catch(err: any) {
@@ -269,20 +288,8 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
 
     if(!isOpen) return null;
 
-    const DL_EXT=new Set(["doc","docx","dot","dotx","xls","xlsx","xlsm","xltx","ppt","pptx","pptm","pps","ppsx","odt","ods","odp","rtf","zip","rar","7z","tar","gz","bz2","xz","iso","img","exe","msi","dll","bat","cmd","ps1","apk","dmg","pkg"]);
-    const dlName=(s:string)=>String(s||"file").replace(/[\\/:*?"<>|]+/g,"_");
-    const openFile=async(f:FileEntry)=>{
-        if(!provider) return;
-        let file: Blob;
-        try { file = await provider.readFile(f); }
-        catch(err: any){ setMsg(err?.message || "Could not open that file."); return; }
-        const n=f.name||"file"; const ext=(n.toLowerCase().split(".").pop()||""); const url=URL.createObjectURL(file);
-        if(ext&&DL_EXT.has(ext)){ const a=document.createElement("a"); a.href=url; a.download=dlName(n); document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),3000); return; }
-        const w=window.open("","_blank"); if(!w){ window.open(url,"_blank"); setTimeout(()=>URL.revokeObjectURL(url),60000); return; }
-        w.document.title=n; w.document.body.style.margin="0"; w.document.body.innerHTML=`<iframe src="${url}" style="border:0;width:100vw;height:100vh"></iframe>`; setTimeout(()=>URL.revokeObjectURL(url),60000);
-    };
-
     return (
+        <>
         <div className="modal-backdrop" onClick={onClose}>
             <div className="modal-content" onClick={e=>e.stopPropagation()}>
                 <div className="flex justify-between items-center mb-4 border-b pb-2">
@@ -357,7 +364,8 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                                         </div>
                                     ) : (
                                         <div className="flex items-center gap-2 shrink-0">
-                                            <button onClick={()=>openFile(f)} className="text-xs bg-brand-50 text-brand-700 px-2 py-1 rounded font-bold hover:bg-brand-100">Open</button>
+                                            {/* Opens in the viewer — nothing is downloaded to be read. */}
+                                            <button onClick={()=>setViewing(f.name)} className="text-xs bg-brand-50 text-brand-700 px-2 py-1 rounded font-bold hover:bg-brand-100">Open</button>
                                             <button onClick={()=>setConfirmDelete(f.name)} title="Delete file"
                                                 className="text-slate-300 hover:text-red-500 transition p-1 opacity-0 group-hover:opacity-100">✕</button>
                                         </div>
@@ -372,5 +380,31 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                 </div>
             </div>
         </div>
+        {/* Reading happens here, on top of this panel — and OUTSIDE the backdrop
+            above, whose click handler would otherwise close the panel underneath
+            on every click inside the viewer. */}
+        {viewing && (
+            <Suspense fallback={
+                <div className="fixed inset-0 z-[9999] bg-black/40 grid place-items-center">
+                    <div className="bg-white rounded-xl px-6 py-4 border text-sm text-slate-500">Opening…</div>
+                </div>
+            }>
+                <FileViewerModal
+                    isOpen={true}
+                    onClose={()=>{ setViewing(null); setActiveCitation(null); }}
+                    provider={provider}
+                    files={files}
+                    pathParts={pathParts}
+                    openName={viewing}
+                    onOpenName={setViewing}
+                    citations={citations}
+                    activeCitationId={activeCitation}
+                    onSelectCitation={setActiveCitation}
+                    ai={ai}
+                    entityName={entityName}
+                />
+            </Suspense>
+        )}
+        </>
     );
 };
