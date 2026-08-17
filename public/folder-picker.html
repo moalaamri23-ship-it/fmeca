@@ -13,7 +13,18 @@
         justify-content: center;
         height: 100vh;
         background: #f8fafc;
-        font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: #334155;
+        font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main { text-align: center; padding: 1rem; max-width: 26rem; }
+      #msg { margin: 0 0 0.85rem; }
+      #msg b { color: #1e293b; word-break: break-word; }
+      #msg .path {
+        display: block;
+        margin-top: 0.3rem;
+        font-weight: 600;
+        color: #2563eb;
+        word-break: break-word;
       }
       button {
         font: inherit;
@@ -48,7 +59,10 @@
       folder is chosen. The button appears only when the browser declines to treat
       the new window as user-initiated, which needs one more click to satisfy.
     -->
-    <button id="act" hidden type="button">Click to Select a Folder</button>
+    <main>
+      <p id="msg" hidden></p>
+      <button id="act" hidden type="button">Click to Select a Folder</button>
+    </main>
 
     <script>
       (function () {
@@ -62,6 +76,22 @@
         var session = params.get('session') || ''
         var projectId = params.get('project') || ''
         var actEl = document.getElementById('act')
+        var msgEl = document.getElementById('msg')
+
+        function showMsg(html) {
+          msgEl.innerHTML = html
+          msgEl.hidden = !html
+        }
+
+        function escapeHtml(s) {
+          return String(s).replace(/[&<>"']/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+          })
+        }
+
+        function pathLabel(pathParts) {
+          return '<span class="path">' + escapeHtml((pathParts || []).join(' / ')) + '</span>'
+        }
         var answered = false
         var retryShown = false
         var bridgeReady = false
@@ -156,8 +186,32 @@
          * window with — the upload died as "pop-up blocked". Selecting the files in
          * this top-level window keeps every gesture-gated call on a real click.
          */
+        function writeFiles(root, pathParts, files) {
+          showMsg('Uploading ' + files.length + ' file' + (files.length > 1 ? 's' : '') + ' to' + pathLabel(pathParts))
+          actEl.hidden = true
+          return walk(root, pathParts, true).then(function (dir) {
+            return files.reduce(function (chain, file, index) {
+              return chain.then(function () {
+                showMsg(
+                  'Uploading ' + (index + 1) + ' of ' + files.length + ' — <b>' + escapeHtml(file.name) + '</b> to' +
+                  pathLabel(pathParts)
+                )
+                return dir.getFileHandle(file.name, { create: true }).then(function (fh) {
+                  return fh.createWritable().then(function (w) {
+                    return w.write(file).then(function () { return w.close() })
+                  })
+                })
+              })
+            }, Promise.resolve())
+          }).then(function () {
+            showMsg('Saved ' + files.length + ' file' + (files.length > 1 ? 's' : '') + ' to' + pathLabel(pathParts))
+            return { written: files.length }
+          })
+        }
+
         function pickAndWrite(root, pathParts) {
           return new Promise(function (resolve, reject) {
+            showMsg('Add files to' + pathLabel(pathParts))
             actEl.textContent = 'Click to Add Files'
             actEl.hidden = false
             actEl.focus()
@@ -179,21 +233,7 @@
                   reject(new DOMException('No files were chosen.', 'AbortError'))
                   return
                 }
-                actEl.hidden = true
-                walk(root, pathParts, true)
-                  .then(function (dir) {
-                    return files.reduce(function (chain, file) {
-                      return chain.then(function () {
-                        return dir.getFileHandle(file.name, { create: true }).then(function (fh) {
-                          return fh.createWritable().then(function (w) {
-                            return w.write(file).then(function () { return w.close() })
-                          })
-                        })
-                      })
-                    }, Promise.resolve())
-                  })
-                  .then(function () { resolve({ written: files.length }) })
-                  .catch(reject)
+                writeFiles(root, pathParts, files).then(resolve, reject)
               }
               input.click()
             }
