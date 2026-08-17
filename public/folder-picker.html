@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>FMECA Studio</title>
+    <style>
+      body {
+        margin: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        background: #f8fafc;
+        font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      button {
+        font: inherit;
+        font-weight: 600;
+        padding: 0.5rem 1.1rem;
+        border: 0;
+        border-radius: 0.5rem;
+        background: #2563eb;
+        color: #fff;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      button:hover { opacity: 0.9; }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <!--
+      The folder picker cannot run inside a cross-origin frame, and FMECA Studio
+      is embedded in one. This page is a top-level window of the app's own origin
+      opened by the click on "Select Project Folder": it runs the picker where the
+      browser allows it and hands the directory handle back to the app.
+
+      Chromium then lets the embedded app read through that handle, but refuses
+      every write — getDirectoryHandle({create:true}), createWritable, removeEntry —
+      because the frame is still a third-party context. So this page has a second
+      job: in bridge mode it performs those writes on the frame's behalf and hands
+      back opaque proxies, keeping each nested call in the allowed top-level window.
+
+      The window carries nothing but a button, and usually not even that: it opens
+      behind the operating system's folder dialog and closes itself the moment a
+      folder is chosen. The button appears only when the browser declines to treat
+      the new window as user-initiated, which needs one more click to satisfy.
+    -->
+    <button id="act" hidden type="button">Click to Select a Folder</button>
+
+    <script>
+      (function () {
+        'use strict'
+
+        var CHANNEL = 'fmeca-folder-picker'
+        var DB_NAME = 'FmecaPro_FS'
+        var STORE = 'project_handles'
+        var params = new URLSearchParams(window.location.search)
+        var bridgeMode = params.get('mode') === 'bridge'
+        var session = params.get('session') || ''
+        var projectId = params.get('project') || ''
+        var actEl = document.getElementById('act')
+        var answered = false
+        var retryShown = false
+        var bridgeReady = false
+        var handles = new Map()
+        var writables = new Map()
+        var nextHandle = 0
+
+        function post(payload) {
+          if (!window.opener) return
+          window.opener.postMessage(
+            Object.assign({ source: CHANNEL }, payload),
+            window.location.origin
+          )
+        }
+
+        // The handle is a filesystem capability, so it goes to one place only:
+        // the window that opened this one, and only with our own origin as the
+        // target. A cross-origin embedder cannot read the message.
+        function reply(payload) {
+          if (answered) return
+          answered = true
+          try {
+            post(payload)
+          } catch (e) {
+            // Nothing useful left to do — the app falls back to a timeout.
+          }
+          window.setTimeout(function () { window.close() }, 60)
+        }
+
+        function needsGesture(error) {
+          return (
+            error &&
+            error.name === 'SecurityError' &&
+            /user gesture|user activation/i.test(String(error.message))
+          )
+        }
+
+        function openDatabase() {
+          return new Promise(function (resolve, reject) {
+            var request = indexedDB.open(DB_NAME, 2)
+            request.onupgradeneeded = function () {
+              var db = request.result
+              if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE)
+              if (!db.objectStoreNames.contains('blob_files')) db.createObjectStore('blob_files')
+            }
+            request.onsuccess = function () { resolve(request.result) }
+            request.onerror = function () { reject(request.error) }
+          })
+        }
+
+        // Saving here means a later bridge window can recover the folder even if
+        // the frame's own copy of the handle is gone.
+        function saveRootHandle(handle) {
+          if (!projectId) return Promise.resolve()
+          return openDatabase().then(function (db) {
+            return new Promise(function (resolve, reject) {
+              var transaction = db.transaction(STORE, 'readwrite')
+              transaction.objectStore(STORE).put(handle, projectId)
+              transaction.oncomplete = resolve
+              transaction.onerror = function () { reject(transaction.error) }
+            })
+          })
+        }
+
+        function registerHandle(handle) {
+          var handleId = 'h' + (++nextHandle)
+          handles.set(handleId, handle)
+          return { kind: handle.kind, name: handle.name, handleId: handleId }
+        }
+
+        function bridgeError(error, type, requestId) {
+          post({
+            bridge: true,
+            session: session,
+            type: type || 'error',
+            requestId: requestId,
+            name: error && error.name ? error.name : 'Error',
+            message: error && error.message ? error.message : String(error),
+          })
+        }
+
+        function showPermissionRetry(handle) {
+          actEl.textContent = 'Click to Reconnect Folder'
+          actEl.hidden = false
+          actEl.onclick = function () {
+            handle.requestPermission({ mode: 'readwrite' }).then(function (state) {
+              if (state === 'granted') startBridge(handle)
+              else bridgeError(new DOMException('Access to the project folder was not granted.', 'NotAllowedError'))
+            }).catch(function (error) { bridgeError(error) })
+          }
+          actEl.focus()
+        }
+
+        function startBridge(handle) {
+          bridgeReady = true
+          actEl.hidden = true
+          post({ bridge: true, session: session, type: 'ready', handle: registerHandle(handle) })
+        }
+
+        function prepareBridge(handle) {
+          saveRootHandle(handle).catch(function () {})
+          if (typeof handle.queryPermission !== 'function') {
+            startBridge(handle)
+            return
+          }
+          handle.queryPermission({ mode: 'readwrite' }).then(function (state) {
+            if (state === 'granted') startBridge(handle)
+            else showPermissionRetry(handle)
+          }).catch(function (error) { bridgeError(error) })
+        }
+
+        function connectBridge() {
+          post({ bridge: true, session: session, type: 'connect' })
+        }
+
+        async function runBridgeOperation(data) {
+          var args = Array.isArray(data.args) ? data.args : []
+          var handle = handles.get(data.handleId)
+          if (!String(data.op).startsWith('writable.') && !handle) {
+            throw new DOMException('Unknown filesystem handle.', 'NotFoundError')
+          }
+          switch (data.op) {
+            case 'directory.entries': {
+              var entries = []
+              for await (var entry of handle.entries()) {
+                entries.push([entry[0], registerHandle(entry[1])])
+              }
+              return entries
+            }
+            case 'directory.getDirectoryHandle':
+              return registerHandle(await handle.getDirectoryHandle(args[0], args[1]))
+            case 'directory.getFileHandle':
+              return registerHandle(await handle.getFileHandle(args[0], args[1]))
+            case 'directory.removeEntry':
+              await handle.removeEntry(args[0], args[1])
+              return null
+            case 'handle.queryPermission':
+              return handle.queryPermission ? handle.queryPermission(args[0]) : 'granted'
+            case 'handle.requestPermission':
+              return handle.requestPermission ? handle.requestPermission(args[0]) : 'granted'
+            case 'file.getFile':
+              return handle.getFile()
+            case 'file.createWritable': {
+              var writable = await handle.createWritable(args[0])
+              var writableId = 'w' + (++nextHandle)
+              writables.set(writableId, writable)
+              return { handleId: writableId }
+            }
+            case 'writable.write': {
+              var writer = writables.get(data.handleId)
+              if (!writer) throw new DOMException('Unknown writable stream.', 'NotFoundError')
+              await writer.write(args[0])
+              return null
+            }
+            case 'writable.close': {
+              var closingWriter = writables.get(data.handleId)
+              if (!closingWriter) throw new DOMException('Unknown writable stream.', 'NotFoundError')
+              await closingWriter.close()
+              writables.delete(data.handleId)
+              return null
+            }
+            default:
+              throw new DOMException('Unsupported filesystem operation.', 'NotSupportedError')
+          }
+        }
+
+        window.addEventListener('message', function (event) {
+          if (!bridgeMode) return
+          if (event.origin !== window.location.origin || event.source !== window.opener) return
+          var data = event.data
+          if (!data || data.source !== CHANNEL || data.bridge !== true || data.session !== session) return
+          if (data.type === 'root' && !bridgeReady && data.handle) {
+            prepareBridge(data.handle)
+            return
+          }
+          if (!bridgeReady) return
+          if (data.type === 'close') {
+            window.setTimeout(function () { window.close() }, 60)
+            return
+          }
+          if (data.type !== 'request' || !data.requestId) return
+          Promise.resolve(runBridgeOperation(data)).then(function (result) {
+            post({ bridge: true, session: session, type: 'response', requestId: data.requestId, result: result })
+          }).catch(function (error) {
+            bridgeError(error, 'response', data.requestId)
+          })
+        })
+
+        function pick() {
+          if (typeof window.showDirectoryPicker !== 'function') {
+            reply({ ok: false, name: 'NotSupportedError', message: 'This browser cannot open a folder.' })
+            return
+          }
+          window
+            .showDirectoryPicker({ id: 'fmeca-project-folder', mode: 'readwrite', startIn: 'documents' })
+            .then(function (handle) {
+              return saveRootHandle(handle).catch(function () {}).then(function () {
+                reply({ ok: true, handle: handle })
+              })
+            })
+            .catch(function (error) {
+              // A window opened by a click does not always inherit the click's
+              // activation. That is the one failure worth asking about rather
+              // than reporting, so the button is offered instead.
+              if (needsGesture(error) && !retryShown) {
+                showRetry()
+                return
+              }
+              reply({
+                ok: false,
+                name: error && error.name ? error.name : 'Error',
+                message: error && error.message ? error.message : String(error),
+              })
+            })
+        }
+
+        function showRetry() {
+          retryShown = true
+          actEl.hidden = false
+          actEl.focus()
+        }
+
+        actEl.onclick = pick
+
+        // Closing the window without choosing must read as a cancel, not as a
+        // window the app waits on forever.
+        window.addEventListener('beforeunload', function () {
+          if (bridgeMode) post({ bridge: true, session: session, type: 'closed' })
+          else reply({ ok: false, name: 'AbortError', message: 'The folder picker was closed.' })
+        })
+
+        // Reached only by navigating here directly: there is no app to hand a
+        // folder back to, so the window stays blank rather than offering a
+        // button that could not do anything.
+        if (!window.opener) return
+
+        if (bridgeMode) connectBridge()
+        else pick()
+      })()
+    </script>
+  </body>
+</html>

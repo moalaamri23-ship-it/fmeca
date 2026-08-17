@@ -115,11 +115,7 @@ export interface RichLibrary {
 
 export interface FileEntry {
   name: string;
-  /** Set when the file lives in a real folder on disk (standalone tab). */
-  handle?: FileSystemFileHandle;
-  /** Set when the file is kept in IndexedDB (embedded mode). */
-  data?: ArrayBuffer;
-  mimeType?: string;
+  handle?: { kind: 'file'; name: string; getFile(): Promise<File> };
 }
 
 // Minimal types for File System Access API if not present in environment

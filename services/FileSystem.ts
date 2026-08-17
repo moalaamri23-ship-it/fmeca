@@ -1,32 +1,36 @@
 import { FileEntry } from '../types';
+import {
+    DirHandleLike,
+    FileHandleLike,
+    IN_IFRAME,
+    WritableRootBridge,
+    hasPermission,
+    openWritableRootBridge,
+    pickRootDirectory,
+    requestPermission,
+} from './FsBridge';
 
-declare global {
-    interface FileSystemHandlePermissionDescriptor {
-        mode?: 'read' | 'readwrite';
-    }
-
-    interface FileSystemHandle {
-        queryPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<PermissionState>;
-        requestPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<PermissionState>;
-    }
-}
+export {
+    IN_IFRAME,
+    FSA_SUPPORTED,
+    describePickerFailure,
+    hasPermission,
+    requestPermission,
+} from './FsBridge';
+export type { DirHandleLike, FileHandleLike } from './FsBridge';
 
 const IDB_NAME = 'FmecaPro_FS';
 const STORE_NAME = 'project_handles';
-const BLOB_STORE = 'blob_files';
 
-// The File System Access API is unusable from a cross-origin iframe: the picker is
-// blocked outright, and a handle picked in some other window belongs to a different
-// browsing context. Handing such a handle to the frame and writing through it is
-// undefined behaviour — it used to appear to work, and now tears down the whole
-// browser on Windows. Embedded builds therefore never touch the API; attachments are
-// kept in IndexedDB instead, and the standalone tab still writes real folders on disk.
-export const isEmbedded = (): boolean => {
-    try { return window.self !== window.top; } catch { return true; }
-};
+export const isInIframe = (): boolean => IN_IFRAME;
 
-export const supportsDiskFolders = (): boolean =>
-    !isEmbedded() && typeof (window as any).showDirectoryPicker === 'function';
+/** Thrown when the user closes the picker without choosing — callers ignore it. */
+export class FolderSelectionCancelled extends Error {
+    constructor() { super('Folder selection cancelled.'); this.name = 'FolderSelectionCancelled'; }
+}
+
+export const isCancellation = (err: any): boolean =>
+    !!err && (err.name === 'AbortError' || err.name === 'FolderSelectionCancelled');
 
 // Keep version 2 — downgrading would break existing databases
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -38,17 +42,16 @@ const initDB = (): Promise<IDBDatabase> => {
         req.onupgradeneeded = (e: any) => {
             const db: IDBDatabase = e.target.result;
             if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME);
-            if (!db.objectStoreNames.contains(BLOB_STORE)) db.createObjectStore(BLOB_STORE);
+            if (!db.objectStoreNames.contains('blob_files')) db.createObjectStore('blob_files');
         };
         req.onsuccess = (e: any) => resolve(e.target.result);
-        req.onerror = () => reject(new Error('Failed to open local storage.'));
+        req.onerror = () => reject(new Error('Failed to open database.'));
     });
-    // A failed open must not poison every later call
     dbPromise.catch(() => { dbPromise = null; });
     return dbPromise;
 };
 
-const saveProjectHandle = async (projectId: string, handle: FileSystemDirectoryHandle): Promise<void> => {
+const saveProjectHandle = async (projectId: string, handle: DirHandleLike): Promise<void> => {
     const db = await initDB();
     return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readwrite');
@@ -58,7 +61,7 @@ const saveProjectHandle = async (projectId: string, handle: FileSystemDirectoryH
     });
 };
 
-const getProjectHandle = async (projectId: string): Promise<FileSystemDirectoryHandle | undefined> => {
+const getProjectHandle = async (projectId: string): Promise<DirHandleLike | undefined> => {
     const db = await initDB();
     return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readonly');
@@ -68,280 +71,182 @@ const getProjectHandle = async (projectId: string): Promise<FileSystemDirectoryH
     });
 };
 
-const deleteProjectHandle = async (projectId: string): Promise<void> => {
-    const db = await initDB();
-    return new Promise((resolve) => {
-        const tx = db.transaction(STORE_NAME, 'readwrite');
-        tx.objectStore(STORE_NAME).delete(projectId);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve(); // best-effort cleanup
-    });
-};
-
-// ── IndexedDB attachment store (embedded mode) ────────────────────────────────
-
-interface BlobRecord { name: string; mimeType: string; data: ArrayBuffer; savedAt: number; }
-
-const pathKeyOf = (pathParts: string[]): string => pathParts.map(sanitizeName).join('/');
-const blobKey = (projectId: string, pathKey: string, filename: string) =>
-    `${projectId}||${pathKey}||${filename}`;
-
-const putBlob = async (key: string, record: BlobRecord): Promise<void> => {
-    const db = await initDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(BLOB_STORE, 'readwrite');
-        tx.objectStore(BLOB_STORE).put(record, key);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(
-            tx.error?.name === 'QuotaExceededError'
-                ? new Error('Not enough browser storage left for that file. Delete some attachments and try again.')
-                : new Error('Could not save the file.')
-        );
-    });
-};
-
-const getAllBlobKeys = async (): Promise<string[]> => {
-    const db = await initDB();
-    return new Promise((resolve, reject) => {
-        const req = db.transaction(BLOB_STORE, 'readonly').objectStore(BLOB_STORE).getAllKeys();
-        req.onsuccess = () => resolve(req.result as string[]);
-        req.onerror = () => reject(new Error('Could not read stored files.'));
-    });
-};
-
-const getBlob = async (key: string): Promise<BlobRecord | undefined> => {
-    const db = await initDB();
-    return new Promise((resolve, reject) => {
-        const req = db.transaction(BLOB_STORE, 'readonly').objectStore(BLOB_STORE).get(key);
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(new Error('Could not read the file.'));
-    });
-};
-
-const removeBlob = async (key: string): Promise<void> => {
-    const db = await initDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(BLOB_STORE, 'readwrite');
-        tx.objectStore(BLOB_STORE).delete(key);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(new Error('Could not delete the file.'));
-    });
-};
-
-// ── Folder picking (standalone tab only) ──────────────────────────────────────
-
-// Thrown when the user closes the picker without choosing — callers treat this as a no-op.
-export class FolderSelectionCancelled extends Error {
-    constructor() { super('Folder selection cancelled.'); this.name = 'FolderSelectionCancelled'; }
-}
-
-export const isCancellation = (err: any): boolean =>
-    !!err && (err.name === 'AbortError' || err.name === 'FolderSelectionCancelled');
-
-const WRITE_DENIED_MSG =
-    'Write access to that folder was refused. Browsers block writing to folders like Documents, Desktop, or Downloads directly — create a subfolder (e.g. Documents/FMECA) and pick that instead.';
-
-const EMBEDDED_MSG =
-    'Disk folders are not available while FMECA Studio runs inside the portal. Open it in its own tab to use a folder on your computer.';
-
-// Folder names the File System Access API rejects outright.
+/** Folder names the File System Access API rejects outright. */
 export const sanitizeName = (n: string | undefined): string => {
     const cleaned = (n || '').replace(/[^a-z0-9 \-_]/gi, '_').trim();
     if (!cleaned || cleaned === '.' || cleaned === '..') return 'Untitled';
     return cleaned;
 };
 
-// Confirms the handle is actually writable, prompting once if needed.
-const ensureWritable = async (handle: FileSystemDirectoryHandle): Promise<boolean> => {
-    const opts: FileSystemHandlePermissionDescriptor = { mode: 'readwrite' };
-    try {
-        if ((await handle.queryPermission(opts)) === 'granted') return true;
-        return (await handle.requestPermission(opts)) === 'granted';
-    } catch {
-        return false;
+/** Walk (optionally creating) a path below a directory. */
+const walk = async (
+    dir: DirHandleLike,
+    pathParts: string[],
+    create: boolean
+): Promise<DirHandleLike | null> => {
+    let curr = dir;
+    for (const part of pathParts) {
+        try { curr = await curr.getDirectoryHandle(sanitizeName(part), { create }); }
+        catch { return null; }
     }
+    return curr;
 };
 
 export class LocalFileSystemProvider {
-    /** True when this context can write real folders on disk. False inside the portal iframe. */
-    readonly diskMode: boolean = supportsDiskFolders();
+    /** True when the browser bars this context from writing to disk directly. */
+    readonly embedded: boolean = IN_IFRAME;
 
-    // Handles already confirmed as writable this session — lets callers skip the
-    // IndexedDB round-trip that would otherwise burn the click's user activation.
-    private liveRoots = new Map<string, FileSystemDirectoryHandle>();
+    // Kept in memory so a click handler can reach the root without awaiting IndexedDB
+    // first — opening the write bridge after an await would lose user activation.
+    private liveRoots = new Map<string, DirHandleLike>();
 
-    // Returns cached handle if permission is still granted. Never prompts.
-    private async getCachedRoot(projectId: string): Promise<FileSystemDirectoryHandle | null> {
-        if (!this.diskMode) return null;
+    /** The root as known right now, with no awaiting. Null until loadRoot has run. */
+    rootSync(projectId: string): DirHandleLike | null {
+        return this.liveRoots.get(projectId) ?? null;
+    }
+
+    /** Loads the saved root and confirms it is still usable. Never prompts. */
+    private async getCachedRoot(projectId: string): Promise<DirHandleLike | null> {
         const live = this.liveRoots.get(projectId);
         if (live) return live;
         const handle = await getProjectHandle(projectId);
         if (!handle) return null;
-        try {
-            const opts: FileSystemHandlePermissionDescriptor = { mode: 'readwrite' };
-            const state = await handle.queryPermission(opts);
-            if (state === 'granted') { this.liveRoots.set(projectId, handle); return handle; }
-            // Write access denied outright — the handle is dead. Purge it so the user
-            // gets a fresh picker instead of a cache that can never succeed.
-            if (state === 'denied') { await deleteProjectHandle(projectId); return null; }
-            if ((await handle.requestPermission(opts)) === 'granted') {
-                this.liveRoots.set(projectId, handle);
-                return handle;
-            }
-        } catch {}
+        if (await hasPermission(handle)) { this.liveRoots.set(projectId, handle); return handle; }
+        // Outside a frame the browser will still prompt; inside one it refuses, and
+        // the way back in is to pick the folder again.
+        if (!this.embedded && (await requestPermission(handle))) {
+            this.liveRoots.set(projectId, handle);
+            return handle;
+        }
         return null;
     }
 
-    /** In embedded mode there is no root to pick, so attachments are always ready. */
     async hasRoot(projectId: string): Promise<boolean> {
-        if (!this.diskMode) return true;
         return !!(await this.getCachedRoot(projectId));
     }
 
-    // Prompts for a folder. Call this straight from a click handler — it does no
-    // awaiting before opening the picker, so the user activation is still valid.
-    async chooseRoot(projectId: string): Promise<FileSystemDirectoryHandle> {
-        if (!this.diskMode) throw new Error(EMBEDDED_MSG);
-        let handle: FileSystemDirectoryHandle;
-        try {
-            const picker = (window as any).showDirectoryPicker as
-                (opts?: { mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>;
-            handle = await picker({ mode: 'readwrite' });
-        } catch (err: any) {
-            if (err?.name === 'AbortError') throw new FolderSelectionCancelled();
-            throw err;
+    /** The linked folder's name, for showing the user where files are going. */
+    async rootName(projectId: string): Promise<string | null> {
+        const root = await this.getCachedRoot(projectId);
+        return root ? root.name : null;
+    }
+
+    /**
+     * Prompts for a folder. Must be called straight from a click — both the picker
+     * and the popup that stands in for it need that click's user activation.
+     */
+    async chooseRoot(projectId: string): Promise<DirHandleLike | null> {
+        const picked = await pickRootDirectory(projectId);
+        if (!picked) throw new FolderSelectionCancelled();
+        // The folder was chosen in a separate window when embedded, so confirm the
+        // grant actually reached this context before relying on it.
+        if (!(await hasPermission(picked)) && !this.embedded && !(await requestPermission(picked))) {
+            throw new Error('Access to the chosen folder was not granted.');
         }
-        // Never save a handle that can't be written to — a read-only root would make
-        // every later upload fail with an opaque NotAllowedError.
-        if (!(await ensureWritable(handle))) throw new Error(WRITE_DENIED_MSG);
+        this.liveRoots.set(projectId, picked);
+        await saveProjectHandle(projectId, picked);
+        return picked;
+    }
+
+    async setRoot(projectId: string, handle: DirHandleLike): Promise<void> {
         this.liveRoots.set(projectId, handle);
         await saveProjectHandle(projectId, handle);
-        return handle;
     }
 
-    async setRoot(projectId: string, handle: FileSystemDirectoryHandle): Promise<void> {
-        this.liveRoots.set(projectId, handle);
-        await saveProjectHandle(projectId, handle);
-    }
-
-    // Returns the root, prompting the user to pick one if needed.
-    async getRoot(projectId: string): Promise<FileSystemDirectoryHandle> {
-        if (!this.diskMode) throw new Error(EMBEDDED_MSG);
-        const cached = await this.getCachedRoot(projectId);
-        if (cached) return cached;
-        return this.chooseRoot(projectId);
-    }
-
-    // A NotAllowedError mid-write means the root lost (or never had) write access.
-    // Drop the dead handle so the next attempt re-prompts, and explain the cause.
-    private async writeFailed(projectId: string, err: any): Promise<never> {
-        if (err?.name === 'NotAllowedError') {
-            this.liveRoots.delete(projectId);
-            await deleteProjectHandle(projectId);
-            throw new Error(WRITE_DENIED_MSG);
+    /**
+     * Opens the write channel for one operation. Embedded, that is a short-lived
+     * top-level window; standalone, the root handle is already writable.
+     *
+     * MUST be called synchronously from the click, before any await.
+     */
+    beginWrite(projectId: string): { rootPromise: Promise<DirHandleLike>; done: () => void } {
+        const root = this.rootSync(projectId);
+        if (!root) {
+            return {
+                rootPromise: Promise.reject(new Error('No project folder is linked yet. Pick one first.')),
+                done: () => {},
+            };
         }
-        throw err;
+        if (!this.embedded) return { rootPromise: Promise.resolve(root), done: () => {} };
+
+        let bridge: WritableRootBridge | null = null;
+        let finished = false;
+        const rootPromise = openWritableRootBridge(root, projectId).then(b => {
+            bridge = b;
+            // A caller that already gave up must not leave the window hanging around.
+            if (finished) { b.close(); throw new FolderSelectionCancelled(); }
+            return b.root;
+        });
+        return {
+            rootPromise,
+            done: () => { finished = true; if (bridge) bridge.close(); },
+        };
     }
 
-    async ensureFolderForEntity(projectId: string, pathParts: string[]): Promise<FileSystemDirectoryHandle> {
-        if (!this.diskMode) throw new Error(EMBEDDED_MSG);
-        const root = await this.getRoot(projectId);
+    /** Creates the folder chain for an entity. Call beginWrite from the click. */
+    async ensureFolderForEntity(projectId: string, pathParts: string[]): Promise<void> {
+        const { rootPromise, done } = this.beginWrite(projectId);
         try {
-            let curr = root;
-            for (const part of pathParts) {
-                curr = await curr.getDirectoryHandle(sanitizeName(part), { create: true });
-            }
-            return curr;
-        } catch (err: any) {
-            return this.writeFailed(projectId, err);
-        }
+            const root = await rootPromise;
+            const dir = await walk(root, pathParts, true);
+            if (!dir) throw new Error('Could not create that folder.');
+        } finally { done(); }
     }
 
     async uploadFiles(projectId: string, pathParts: string[], files: FileList): Promise<void> {
-        if (!this.diskMode) {
-            const key = pathKeyOf(pathParts);
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                const data = await file.arrayBuffer();
-                await putBlob(blobKey(projectId, key, file.name), {
-                    name: file.name,
-                    mimeType: file.type || 'application/octet-stream',
-                    data,
-                    savedAt: Date.now(),
-                });
-            }
-            return;
-        }
-        const dir = await this.ensureFolderForEntity(projectId, pathParts);
+        // Read the bytes before opening the window so the transfer is quick, but
+        // open the window first so the click's activation is still live.
+        const { rootPromise, done } = this.beginWrite(projectId);
         try {
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                const fileHandle = await dir.getFileHandle(file.name, { create: true });
+            const payload: Array<{ name: string; blob: Blob }> = [];
+            for (let i = 0; i < files.length; i++) payload.push({ name: files[i].name, blob: files[i] });
+            const root = await rootPromise;
+            const dir = await walk(root, pathParts, true);
+            if (!dir) throw new Error('Could not open that folder for writing.');
+            for (const item of payload) {
+                const fileHandle = await dir.getFileHandle(item.name, { create: true });
                 const writable = await fileHandle.createWritable();
-                await writable.write(file);
-                await writable.close();
+                try { await writable.write(item.blob); } finally { await writable.close(); }
             }
-        } catch (err: any) {
-            await this.writeFailed(projectId, err);
-        }
+        } finally { done(); }
     }
 
-    // Never prompts. Returns [] when nothing is stored for this entity yet.
+    async deleteFile(projectId: string, pathParts: string[], name: string): Promise<void> {
+        const { rootPromise, done } = this.beginWrite(projectId);
+        try {
+            const root = await rootPromise;
+            const dir = await walk(root, pathParts, false);
+            if (!dir) return;
+            await dir.removeEntry(name, { recursive: true });
+        } finally { done(); }
+    }
+
+    /**
+     * Lists files. Reads run here even when embedded — Chromium allows them
+     * through the transferred handle, and only refuses writes.
+     */
     async listFiles(projectId: string, pathParts: string[]): Promise<FileEntry[]> {
         try {
-            if (!this.diskMode) {
-                const prefix = `${projectId}||${pathKeyOf(pathParts)}||`;
-                const keys = (await getAllBlobKeys()).filter(k => k.startsWith(prefix));
-                const entries: FileEntry[] = [];
-                for (const key of keys) {
-                    const rec = await getBlob(key);
-                    if (rec) entries.push({ name: rec.name, data: rec.data, mimeType: rec.mimeType });
-                }
-                return entries.sort((a, b) => a.name.localeCompare(b.name));
-            }
             const root = await this.getCachedRoot(projectId);
             if (!root) return [];
-            let curr = root;
-            for (const part of pathParts) {
-                try { curr = await curr.getDirectoryHandle(sanitizeName(part), { create: false }); }
-                catch { return []; }
-            }
+            const dir = await walk(root, pathParts, false);
+            if (!dir) return [];
             const files: FileEntry[] = [];
-            // @ts-ignore - Async iterator for FileSystemDirectoryHandle
-            for await (const entry of curr.values()) {
-                if (entry.kind === 'file') {
-                    files.push({ name: entry.name, handle: entry as FileSystemFileHandle });
+            for await (const [, entry] of dir.entries()) {
+                if (entry.kind === 'file' && !entry.name.startsWith('.')) {
+                    files.push({ name: entry.name, handle: entry as FileHandleLike });
                 }
             }
-            return files;
+            return files.sort((a, b) => a.name.localeCompare(b.name));
         } catch (e) {
             console.warn(e);
             return [];
         }
     }
 
-    async deleteFile(projectId: string, pathParts: string[], name: string): Promise<void> {
-        if (!this.diskMode) {
-            await removeBlob(blobKey(projectId, pathKeyOf(pathParts), name));
-            return;
-        }
-        const root = await this.getCachedRoot(projectId);
-        if (!root) return;
-        let curr = root;
-        for (const part of pathParts) {
-            curr = await curr.getDirectoryHandle(sanitizeName(part), { create: false });
-        }
-        try {
-            await curr.removeEntry(name);
-        } catch (err: any) {
-            await this.writeFailed(projectId, err);
-        }
-    }
-
-    /** Materialises an entry as a Blob, whichever backing store it came from. */
+    /** Materialises a listed file. Reading is allowed in the frame. */
     async readFile(entry: FileEntry): Promise<Blob> {
-        if (entry.handle) return entry.handle.getFile();
-        if (entry.data) return new Blob([entry.data], { type: entry.mimeType || 'application/octet-stream' });
-        throw new Error('That file is no longer available.');
+        if (!entry.handle) throw new Error('That file is no longer available.');
+        return entry.handle.getFile();
     }
 }
