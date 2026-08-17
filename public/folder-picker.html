@@ -8,6 +8,7 @@
 <div id="err" style="font-size:12px;color:#b91c1c;text-align:center;max-width:340px"></div>
 <script>
 var replied = false;
+var projectId = new URLSearchParams(window.location.search).get('project');
 
 function reply(msg) {
   if (replied) return;
@@ -16,10 +17,32 @@ function reply(msg) {
     window.opener.postMessage(msg, window.location.origin);
     window.close();
   } else {
-    // No opener to answer — keep the window up so the user sees why.
     document.getElementById('err').textContent =
       'Lost the connection to FMECA Studio. Close this window and try again.';
   }
+}
+
+// Same DB/store/version as services/FileSystem.ts — the app re-reads the handle
+// from IndexedDB instead of receiving it through postMessage. Passing a live
+// directory handle between windows and then writing through it after this popup
+// closes can crash the browser outright; a rehydrated handle cannot.
+function saveHandle(handle) {
+  return new Promise(function (resolve, reject) {
+    var req = indexedDB.open('FmecaPro_FS', 2);
+    req.onupgradeneeded = function (e) {
+      var db = e.target.result;
+      if (!db.objectStoreNames.contains('project_handles')) db.createObjectStore('project_handles');
+      if (!db.objectStoreNames.contains('blob_files')) db.createObjectStore('blob_files');
+    };
+    req.onerror = function () { reject(new Error('Could not open storage.')); };
+    req.onsuccess = function (e) {
+      var db = e.target.result;
+      var tx = db.transaction('project_handles', 'readwrite');
+      tx.objectStore('project_handles').put(handle, projectId);
+      tx.oncomplete = function () { resolve(); };
+      tx.onerror = function () { reject(new Error('Could not save the folder handle.')); };
+    };
+  });
 }
 
 document.getElementById('btn').addEventListener('click', async function () {
@@ -42,6 +65,18 @@ document.getElementById('btn').addEventListener('click', async function () {
       return;
     }
   } catch (e) { /* older browsers without queryPermission — let the app find out */ }
+
+  if (projectId) {
+    try {
+      await saveHandle(handle);
+      reply({ type: 'fmeca-folder-saved' });
+      return;
+    } catch (e) {
+      document.getElementById('err').textContent = (e && e.message) || 'Could not save the folder.';
+      return;
+    }
+  }
+  // No project id in the URL (legacy opener) — fall back to posting the handle.
   reply({ type: 'fmeca-folder-picked', handle: handle });
 });
 

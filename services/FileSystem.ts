@@ -91,16 +91,20 @@ const ensureWritable = async (handle: FileSystemDirectoryHandle): Promise<boolea
 };
 
 // Opens a popup (top-level context) to call showDirectoryPicker on behalf of the iframe.
-const pickFolderViaPopup = (): Promise<FileSystemDirectoryHandle> => {
+// The popup verifies write access and saves the handle to IndexedDB itself (same
+// origin, same DB), then signals completion. The app re-reads the handle from IDB —
+// a live handle is never posted between windows, because writing through a handle
+// transferred from a closed popup can crash the whole browser.
+const pickFolderViaPopup = (projectId: string): Promise<void> => {
     return new Promise((resolve, reject) => {
-        const popup = window.open('/folder-picker.html', '_blank', 'width=420,height=180');
+        const popup = window.open(`/folder-picker.html?project=${encodeURIComponent(projectId)}`, '_blank', 'width=420,height=220');
         if (!popup) { reject(new Error('Popup blocked. Allow popups for this site, then pick the folder again.')); return; }
         let done = false;
         const cleanup = () => { done = true; window.removeEventListener('message', onMsg); clearInterval(poll); };
         const onMsg = (e: MessageEvent) => {
             if (done) return;
             if (typeof e.data !== 'object' || !e.data || !String(e.data.type).startsWith('fmeca-')) return;
-            if (e.data.type === 'fmeca-folder-picked' && e.data.handle) { cleanup(); resolve(e.data.handle); }
+            if (e.data.type === 'fmeca-folder-saved') { cleanup(); resolve(); }
             else if (e.data.type === 'fmeca-folder-cancelled') { cleanup(); reject(new FolderSelectionCancelled()); }
         };
         window.addEventListener('message', onMsg);
@@ -108,21 +112,29 @@ const pickFolderViaPopup = (): Promise<FileSystemDirectoryHandle> => {
     });
 };
 
+// Picks a folder via popup and rehydrates the saved handle from IndexedDB.
+const pickFolderThroughPopup = async (projectId: string): Promise<FileSystemDirectoryHandle> => {
+    await pickFolderViaPopup(projectId);
+    const handle = await getProjectHandle(projectId);
+    if (!handle) throw new Error('The folder was picked but could not be restored. Try again.');
+    return handle;
+};
+
 // Pick a folder — popup if in iframe, direct API if standalone.
 // Must be called first thing inside a click handler: the picker (and the popup
 // that stands in for it) needs the transient user activation from that click.
-export const pickFolder = async (): Promise<FileSystemDirectoryHandle> => {
+export const pickFolder = async (projectId: string): Promise<FileSystemDirectoryHandle> => {
     if (typeof window.showDirectoryPicker !== 'function') {
         throw new Error('Local folder access is not supported in this browser. Use Chrome, Edge, or another Chromium browser.');
     }
-    if (isInIframe()) return pickFolderViaPopup();
+    if (isInIframe()) return pickFolderThroughPopup(projectId);
     try {
         const picker = window.showDirectoryPicker as (opts?: { mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>;
         return await picker({ mode: 'readwrite' });
     } catch (err: any) {
         if (err?.name === 'AbortError') throw new FolderSelectionCancelled();
         // Some embeds report as top-level but still block the picker — fall back to the popup.
-        if (err?.name === 'SecurityError' || err?.name === 'NotAllowedError') return pickFolderViaPopup();
+        if (err?.name === 'SecurityError' || err?.name === 'NotAllowedError') return pickFolderThroughPopup(projectId);
         throw err;
     }
 };
@@ -170,10 +182,18 @@ export class LocalFileSystemProvider {
     // Prompts for a folder. Call this synchronously from a click handler — it does
     // no awaiting before opening the picker, so the user activation is still valid.
     async chooseRoot(projectId: string): Promise<FileSystemDirectoryHandle> {
-        const handle = await pickFolder();
+        const handle = await pickFolder(projectId);
         // Never save a handle that can't be written to — a read-only root would make
         // every later upload/create fail with an opaque NotAllowedError.
-        if (!(await ensureWritable(handle))) throw new Error(WRITE_DENIED_MSG);
+        // In iframe mode the popup already verified write access in its own top-level
+        // context, and requestPermission is blocked here — only reject on a hard denial.
+        if (isInIframe()) {
+            let state: PermissionState = 'granted';
+            try { state = await handle.queryPermission({ mode: 'readwrite' }); } catch {}
+            if (state === 'denied') throw new Error(WRITE_DENIED_MSG);
+        } else {
+            if (!(await ensureWritable(handle))) throw new Error(WRITE_DENIED_MSG);
+        }
         this.liveRoots.set(projectId, handle);
         await saveProjectHandle(projectId, handle);
         return handle;
