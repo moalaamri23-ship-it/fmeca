@@ -22,6 +22,19 @@ export type { DirHandleLike, FileHandleLike } from './FsBridge';
 const IDB_NAME = 'FmecaPro_FS';
 const STORE_NAME = 'project_handles';
 
+// Whether a project has a folder is otherwise only knowable through IndexedDB,
+// which is too slow for a click: a window has to be opened before the first
+// await, or the browser will not treat it as user-initiated. This marker answers
+// the same question synchronously, and is corrected whenever the real one is.
+const LINK_KEY = (projectId: string) => `fmeca_fs_linked_${projectId}`;
+
+const markLinked = (projectId: string, linked: boolean): void => {
+    try {
+        if (linked) localStorage.setItem(LINK_KEY(projectId), '1');
+        else localStorage.removeItem(LINK_KEY(projectId));
+    } catch { /* a hint, never the truth */ }
+};
+
 export const isInIframe = (): boolean => IN_IFRAME;
 
 /** Thrown when the user closes the picker without choosing — callers ignore it. */
@@ -37,6 +50,8 @@ export class FolderSelectionCancelled extends Error {
 export interface WriteSession {
     rootPromise: Promise<DirHandleLike>;
     done: () => void;
+    /** False once the window is gone — closed by the user, or never opened. */
+    isLive: () => boolean;
 }
 
 export const isCancellation = (err: any): boolean =>
@@ -110,9 +125,15 @@ export class LocalFileSystemProvider {
     // without going back to IndexedDB for every listing.
     private liveRoots = new Map<string, DirHandleLike>();
 
-    /** Whether the root is already in hand, with no awaiting. */
-    hasLiveRoot(projectId: string): boolean {
-        return this.liveRoots.has(projectId);
+    /**
+     * Whether this project is known to have a folder, without awaiting anything.
+     *
+     * A hint from the last time the answer was known for certain, so that a click
+     * can decide to open the saving window before IndexedDB could have replied.
+     */
+    isLinkedSync(projectId: string): boolean {
+        if (this.liveRoots.has(projectId)) return true;
+        try { return localStorage.getItem(LINK_KEY(projectId)) === '1'; } catch { return false; }
     }
 
     /** Loads the saved root and confirms it is still usable. Never prompts. */
@@ -120,14 +141,16 @@ export class LocalFileSystemProvider {
         const live = this.liveRoots.get(projectId);
         if (live) return live;
         const handle = await getProjectHandle(projectId);
-        if (!handle) return null;
-        if (await hasPermission(handle)) { this.liveRoots.set(projectId, handle); return handle; }
+        if (!handle) { markLinked(projectId, false); return null; }
+        if (await hasPermission(handle)) { this.liveRoots.set(projectId, handle); markLinked(projectId, true); return handle; }
         // Outside a frame the browser will still prompt; inside one it refuses, and
         // the way back in is to pick the folder again.
         if (!this.embedded && (await requestPermission(handle))) {
             this.liveRoots.set(projectId, handle);
+            markLinked(projectId, true);
             return handle;
         }
+        markLinked(projectId, false);
         return null;
     }
 
@@ -154,12 +177,14 @@ export class LocalFileSystemProvider {
             throw new Error('Access to the chosen folder was not granted.');
         }
         this.liveRoots.set(projectId, picked);
+        markLinked(projectId, true);
         await saveProjectHandle(projectId, picked);
         return picked;
     }
 
     async setRoot(projectId: string, handle: DirHandleLike): Promise<void> {
         this.liveRoots.set(projectId, handle);
+        markLinked(projectId, true);
         await saveProjectHandle(projectId, handle);
     }
 
@@ -175,23 +200,26 @@ export class LocalFileSystemProvider {
             if (!root) throw new Error('No project folder is linked yet. Pick one first.');
             return root;
         });
-        if (!this.embedded) return { rootPromise: linkedRoot, done: () => {} };
+        if (!this.embedded) return { rootPromise: linkedRoot, done: () => {}, isLive: () => true };
         // The bridge only listens for the folder once the window is up; keep a
         // handler on the promise meanwhile so a failure is never left unhandled.
         linkedRoot.catch(() => {});
 
         let bridge: WritableRootBridge | null = null;
         let finished = false;
+        let lost = false;
         // The window opens on this click; the folder catches up with it.
-        const rootPromise = openWritableRootBridge(linkedRoot, projectId).then(b => {
+        const rootPromise = openWritableRootBridge(linkedRoot, projectId, () => { lost = true; }).then(b => {
             bridge = b;
             // A caller that already gave up must not leave the window hanging around.
             if (finished) { b.close(); throw new FolderSelectionCancelled(); }
             return b.root;
         });
+        rootPromise.catch(() => { lost = true; });
         return {
             rootPromise,
-            done: () => { finished = true; if (bridge) bridge.close(); },
+            done: () => { finished = true; lost = true; if (bridge) bridge.close(); },
+            isLive: () => !lost && !finished,
         };
     }
 

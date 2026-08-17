@@ -146,7 +146,8 @@ function pickViaPopup(projectId: string): Promise<DirHandleLike | null> {
  */
 export function openWritableRootBridge(
     rootHandle: DirHandleLike | Promise<DirHandleLike>,
-    projectId: string
+    projectId: string,
+    onLost?: () => void
 ): Promise<WritableRootBridge> {
     const session =
         typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -175,6 +176,9 @@ export function openWritableRootBridge(
             window.clearInterval(closedTimer);
             if (reason) for (const request of pending.values()) request.reject(reason);
             pending.clear();
+            // A window the user closed leaves the app holding a channel to nowhere:
+            // say so, so the next write opens a new one instead of using this.
+            if (reason && onLost) onLost();
             try { if (!popup.closed) popup.close(); } catch {
                 // A helper that navigated away may no longer be script-closeable. Its
                 // filesystem session is already detached from this frame either way.

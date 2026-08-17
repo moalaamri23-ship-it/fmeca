@@ -3,7 +3,8 @@
     "allow": [
       "Bash(git init:*)",
       "Bash(git remote:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(ls ~/.claude/plugins/cache/local/reliability-tools/unknown/skills/ 2>/dev/null; echo \"---\"; ls /Users/mohammedalaamri/Downloads/Projects/fmeca-studio/.claude/skills/)"
     ]
   }
 }
