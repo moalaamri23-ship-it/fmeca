@@ -27,13 +27,18 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
     const [hasRoot, setHasRoot] = useState<boolean | null>(null);
     const [rootName, setRootName] = useState<string | null>(null);
     const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-    const [pickInFrame, setPickInFrame] = useState<boolean>(() => {
-        try { return localStorage.getItem(FLOW_KEY) !== 'helper'; } catch { return true; }
+    const [windowWithPanel, setWindowWithPanel] = useState<boolean>(() => {
+        try { return localStorage.getItem(FLOW_KEY) === 'panel'; } catch { return false; }
     });
+    // Chosen, but with no window open to write them through.
+    const [pending, setPending] = useState<File[]>([]);
     const inputRef = useRef<HTMLInputElement>(null);
-    // One helper window for the whole panel. Held open so that later clicks can
-    // spend their user activation on the file picker rather than on a window.
+    // One saving window for the whole panel, so that a second upload needs no
+    // window of its own and the click can go straight to the file dialog.
     const sessionRef = useRef<WriteSession | null>(null);
+    // Whether that window was opened by the panel or by an upload — a window this
+    // upload opened is this upload's to close when the dialog is dismissed.
+    const panelOwnsSession = useRef(false);
 
     const loadFiles = async () => {
         if(!provider || !projectId) return;
@@ -69,7 +74,18 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
     const closeSession = () => {
         sessionRef.current?.done();
         sessionRef.current = null;
+        panelOwnsSession.current = false;
     };
+
+    // Dismissing the file dialog leaves a window with nothing to save, unless the
+    // panel opened it and the next upload will want it.
+    useEffect(() => {
+        const input = inputRef.current;
+        if(!input) return;
+        const onCancel = () => { if(!panelOwnsSession.current) closeSession(); };
+        input.addEventListener('cancel', onCancel);
+        return () => input.removeEventListener('cancel', onCancel);
+    }, []);
 
     // The helper window belongs to this panel and to this project only.
     useEffect(() => {
@@ -78,24 +94,27 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
     }, [isOpen, projectId]);
 
     /**
-     * Open the helper window with the panel, for browsers that cannot spare a
-     * click for both it and the file picker.
+     * Open the saving window with the panel, for browsers that will not open one
+     * on the click that has already opened the file dialog.
      *
      * The click that opened References is still the current gesture here, so the
      * window costs nothing that Upload will need. Only for a project whose folder
      * is already in hand — nothing should pop up for a project that has none.
      */
     useEffect(() => {
-        if(!isOpen || pickInFrame || !provider?.embedded || !projectId) return;
+        if(!isOpen || !windowWithPanel || !provider?.embedded || !projectId) return;
         if(sessionRef.current || !provider.hasLiveRoot(projectId)) return;
-        try { ensureSession(); } catch { /* Upload will report it, and can retry */ }
+        try {
+            ensureSession();
+            panelOwnsSession.current = true;
+        } catch { /* Upload will report it, and can retry */ }
         // eslint-disable-next-line
-    }, [isOpen, pickInFrame, provider, projectId]);
+    }, [isOpen, windowWithPanel, provider, projectId]);
 
     /**
      * The open write channel, opening one if this is the first write.
      *
-     * MUST be called straight from a click: opening the helper window is itself
+     * MUST be called straight from a click: opening the saving window is itself
      * gesture-gated. Throws when the window is blocked.
      */
     const ensureSession = (): WriteSession | null => {
@@ -104,29 +123,14 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
         const session = provider.beginWrite(projectId);
         sessionRef.current = session;
         const where = [rootName || 'the project folder', ...pathParts].join(' / ');
-        void provider.describeWrite(session, 'Saving to ' + where + '. This window stays open while References is.');
+        void provider.describeWrite(session, 'Saving to ' + where);
         return session;
     };
 
-    /**
-     * Open the file dialog here in the app. Returns false when the browser has no
-     * user activation left to open it with — which is what happens on the click
-     * that also had to open the helper window.
-     */
-    const openPicker = (): boolean => {
-        const input = inputRef.current as (HTMLInputElement & { showPicker?: () => void }) | null;
-        if(!input) return false;
-        // showPicker reports the refusal; the legacy click only fails silently.
-        if(typeof input.showPicker === 'function') {
-            try { input.showPicker(); return true; } catch { return false; }
-        }
-        input.click();
-        return true;
-    };
-
-    const rememberHelperPick = () => {
-        setPickInFrame(false);
-        try { localStorage.setItem(FLOW_KEY, 'helper'); } catch { /* preference only */ }
+    // Once a browser has refused the window on an upload click, stop asking it to.
+    const rememberWindowWithPanel = () => {
+        setWindowWithPanel(true);
+        try { localStorage.setItem(FLOW_KEY, 'panel'); } catch { /* preference only */ }
     };
 
     const handlePickRoot = async () => {
@@ -161,35 +165,36 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
     };
 
     /**
-     * One click from Upload to the file dialog.
+     * Upload is one click: it opens the file dialog, here in the app.
      *
-     * The helper window opens first, because writing is only allowed there. The
-     * picker then runs here, so the files are chosen in the app and the window is
-     * left doing what it is good for: showing where they are going. Should the
-     * browser spend the click's activation on the window and leave none for the
-     * picker, the helper picks instead — one extra click, remembered so the next
-     * upload starts that way.
+     * The dialog goes first, so the click's activation is spent on the thing the
+     * user asked for. The saving window follows on the same click and is usually
+     * open by the time the files are chosen — it exists to perform the writes a
+     * third-party frame is refused, and to show them happening. A browser that
+     * will not open a window at that point leaves the files in hand instead, to
+     * be saved by the next click, and is not asked again: from then on the window
+     * opens with the panel.
      */
     const handleUploadClick = () => {
         if(!provider || !projectId) return;
-        setMsg("");
-        if(!provider.embedded) { openPicker(); return; }
-        const reused = !!sessionRef.current;
-        let session: WriteSession | null;
-        try { session = ensureSession(); }
-        catch(e: any) { setMsg(describePickerFailure(e)); return; }
-        if(!session) return;
-        // An already-open window costs this click nothing, so the picker can run
-        // here whatever the remembered preference is.
-        if((pickInFrame || reused) && openPicker()) return;
-        if(!reused) rememberHelperPick();
-        void runHelperPick(session);
+        setMsg(""); setPending([]);
+        inputRef.current?.click();
+        if(!provider.embedded || sessionRef.current) return;
+        try {
+            ensureSession();
+            panelOwnsSession.current = false;
+        } catch {
+            // The dialog is open regardless; handleUpload takes it from there.
+            rememberWindowWithPanel();
+        }
     };
 
-    const runHelperPick = async (session: WriteSession) => {
+    const writeFiles = async (picked: File[], session: WriteSession | null) => {
         if(!provider || !projectId) return;
+        setMsg(`Saving ${picked.length} file${picked.length > 1 ? 's' : ''}...`);
         try {
-            const written = await provider.uploadViaHelper(projectId, pathParts, session);
+            const written = await provider.writeChosenFiles(projectId, pathParts, picked, session ?? undefined);
+            setPending([]);
             setMsg(`Saved ${written} file${written > 1 ? 's' : ''}.`);
             await loadFiles();
         } catch(err: any) {
@@ -199,17 +204,25 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
 
     const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const input = e.target;
-        const picked = Array.from(input.files || []);
+        const picked: File[] = Array.from(input.files || []);
         input.value = '';
         if(!provider || !projectId || !picked.length) return;
-        setMsg(`Saving ${picked.length} file${picked.length > 1 ? 's' : ''}...`);
-        try {
-            const written = await provider.writeChosenFiles(projectId, pathParts, picked, sessionRef.current ?? undefined);
-            setMsg(`Saved ${written} file${written > 1 ? 's' : ''}.`);
-            await loadFiles();
-        } catch(err: any) {
-            if(!isCancellation(err)) setMsg("Upload failed: " + (err?.message || err));
+        // No window to write through, and no gesture left to open one with.
+        if(provider.embedded && !sessionRef.current) {
+            setPending(picked);
+            setMsg(`Ready to save ${picked.length} file${picked.length > 1 ? 's' : ''}.`);
+            return;
         }
+        await writeFiles(picked, sessionRef.current);
+    };
+
+    const handleSavePending = async () => {
+        if(!pending.length) return;
+        let session: WriteSession | null = null;
+        try { session = ensureSession(); }
+        catch(e: any) { setMsg(describePickerFailure(e)); return; }
+        panelOwnsSession.current = false;
+        await writeFiles(pending, session);
     };
 
     const handleDelete = async (name: string) => {
@@ -269,6 +282,18 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                 </div>
 
                 {msg && <div className="mb-4 text-xs p-2 bg-yellow-50 text-yellow-700 rounded border border-yellow-200">{msg}</div>}
+
+                {/* The browser refused the saving window on the click that opened the
+                    file dialog, so the files wait here for a click of their own. */}
+                {pending.length > 0 && (
+                    <div className="mb-4 p-3 bg-brand-50 border border-brand-100 rounded flex items-center justify-between gap-3">
+                        <div className="text-xs text-slate-600 truncate">
+                            {pending.length === 1 ? pending[0].name : `${pending.length} files`} — ready to save
+                        </div>
+                        <button onClick={handleSavePending}
+                            className="bg-brand-600 text-white px-3 py-1 rounded text-sm font-bold shrink-0">Save to Folder</button>
+                    </div>
+                )}
 
                 {hasRoot === false && (
                     <div className="p-4 bg-slate-50 rounded border mb-4">

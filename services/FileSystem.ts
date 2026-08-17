@@ -243,21 +243,6 @@ export class LocalFileSystemProvider {
         });
     }
 
-    /**
-     * Embedded fallback: choose the files in the helper window and write them there.
-     *
-     * Used only where a browser will not serve one click to both the helper window
-     * and the frame's own file picker. Selecting inside the helper keeps every
-     * gesture-gated call on a genuine click, at the cost of that second click.
-     */
-    async uploadViaHelper(projectId: string, pathParts: string[], session?: WriteSession): Promise<number> {
-        return this.withWrite(projectId, session, async root => {
-            if (!root.pickAndWrite) throw new Error('The folder helper window is unavailable.');
-            const result = await root.pickAndWrite(pathParts);
-            return result.written;
-        });
-    }
-
     /** Tells the helper window what it is waiting for. Silent when there is none. */
     async describeWrite(session: WriteSession, text: string): Promise<void> {
         try {

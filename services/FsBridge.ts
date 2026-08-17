@@ -30,8 +30,6 @@ export interface DirHandleLike {
     removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>;
     queryPermission?(descriptor: { mode: 'read' | 'readwrite' }): Promise<PermissionState>;
     requestPermission?(descriptor: { mode: 'read' | 'readwrite' }): Promise<PermissionState>;
-    /** Only on bridge proxies: choose files in the helper window and write them. */
-    pickAndWrite?(pathParts: string[]): Promise<{ written: number }>;
     /**
      * Only on bridge proxies: write files the frame already chose.
      *
@@ -232,9 +230,6 @@ export function openWritableRootBridge(
                 return fileProxy(child);
             },
             async removeEntry(name, options) { await call('directory.removeEntry', handle.handleId, [name, options]); },
-            async pickAndWrite(pathParts) {
-                return (await call('directory.pickAndWrite', handle.handleId, [pathParts])) as { written: number };
-            },
             async writeFiles(pathParts, files) {
                 return (await call('directory.writeFiles', handle.handleId, [pathParts, files])) as { written: number };
             },

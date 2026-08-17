@@ -54,10 +54,11 @@
       job: in bridge mode it performs those writes on the frame's behalf and hands
       back opaque proxies, keeping each nested call in the allowed top-level window.
 
-      The window carries nothing but a button, and usually not even that: it opens
-      behind the operating system's folder dialog and closes itself the moment a
-      folder is chosen. The button appears only when the browser declines to treat
-      the new window as user-initiated, which needs one more click to satisfy.
+      Nothing is chosen here. The app opens its own file dialog on the click the
+      user gave it, and this window opens behind that dialog to receive the files
+      and report the saving. It carries a button only where a click is the one
+      thing that can help: to pick the project folder, or to grant access to it
+      again after the browser has forgotten.
     -->
     <main>
       <p id="msg" hidden></p>
@@ -179,13 +180,12 @@
         }
 
         /**
-         * Write the files, wherever they were chosen, and report the progress.
+         * Write the files the app chose, and report the progress.
          *
-         * The frame picks them itself whenever it can: this window is already open
-         * by then, so its `change` event — which carries no user activation — never
-         * has to open anything. Only when a browser refuses to serve one click to
-         * both the window and the picker does the choosing fall back to this side,
-         * through pickAndWrite below.
+         * The choosing belongs to the app: the user clicks Upload, the file dialog
+         * opens there, and this window opens behind it to receive what was chosen.
+         * A File survives postMessage as a reference to the same bytes, so nothing
+         * is copied on the way here.
          */
         function writeFiles(root, pathParts, files) {
           showMsg('Uploading ' + files.length + ' file' + (files.length > 1 ? 's' : '') + ' to' + pathLabel(pathParts))
@@ -207,37 +207,6 @@
           }).then(function () {
             showMsg('Saved ' + files.length + ' file' + (files.length > 1 ? 's' : '') + ' to' + pathLabel(pathParts))
             return { written: files.length }
-          })
-        }
-
-        function pickAndWrite(root, pathParts) {
-          return new Promise(function (resolve, reject) {
-            showMsg('Add files to' + pathLabel(pathParts))
-            actEl.textContent = 'Click to Add Files'
-            actEl.hidden = false
-            actEl.focus()
-            actEl.onclick = function () {
-              actEl.onclick = null // one dialog per request, however eagerly it is clicked
-              var input = document.createElement('input')
-              input.type = 'file'
-              input.multiple = true
-              input.style.display = 'none'
-              document.body.appendChild(input)
-              input.oncancel = function () {
-                input.remove()
-                reject(new DOMException('No files were chosen.', 'AbortError'))
-              }
-              input.onchange = function () {
-                var files = Array.prototype.slice.call(input.files || [])
-                input.remove()
-                if (!files.length) {
-                  reject(new DOMException('No files were chosen.', 'AbortError'))
-                  return
-                }
-                writeFiles(root, pathParts, files).then(resolve, reject)
-              }
-              input.click()
-            }
           })
         }
 
@@ -314,12 +283,8 @@
             case 'directory.removeEntry':
               await handle.removeEntry(args[0], args[1])
               return null
-            // Composite: choose the files here too, because the frame cannot open
-            // this window from a file input's change event.
-            case 'directory.pickAndWrite':
-              return pickAndWrite(handle, args[0] || [])
-            // The frame picked the files itself, in one click. Files survive
-            // postMessage, so only the writing has to happen here.
+            // The app picked the files itself, in one click. Only the writing,
+            // which a third-party frame is refused, has to happen here.
             case 'directory.writeFiles':
               return writeFiles(handle, args[0] || [], Array.prototype.slice.call(args[1] || []))
             case 'handle.queryPermission':
