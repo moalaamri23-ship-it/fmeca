@@ -102,17 +102,22 @@ const API_KEY_PLACEHOLDERS: Record<AIProvider, string> = { gemini: 'AIzaSy...', 
 /**
  * How many subsystems MasterGen builds at once.
  *
- * Every subsystem runs on a Copilot conversation of its own, so the per-
- * conversation queue no longer puts them behind each other and this number is
- * the only thing left holding concurrency down. Six is the ceiling because a
- * browser opens about six connections per origin on HTTP/1.1 — past that the
- * extra workers queue in the network stack instead of at the agent, which buys
- * nothing and only makes a cancel slower.
+ * Every subsystem runs on a conversation of its own, so the per-conversation
+ * queue no longer puts them behind each other and this number is the only thing
+ * left holding concurrency down.
  *
- * OpenRouter's free tier bills per minute rather than per connection and starts
- * refusing well before six, so it stays low and leans on `_withRetry`.
+ * An earlier version of this comment justified six by the six-connections-per-
+ * origin rule. That rule is HTTP/1.1 only, and the Power Platform host
+ * negotiates HTTP/2 — the browser multiplexes those requests over one
+ * connection, so the transport was never the constraint. Copilot gets a limit
+ * set by what the agent is willing to answer at once instead, measured against
+ * a real flow rather than assumed.
+ *
+ * The hosted APIs keep a lower number: their limits are requests-per-minute per
+ * key, so more workers only buys 429s that `_withRetry` then has to spend real
+ * time backing off. OpenRouter's free tier is the strictest of them.
  */
-const MASTERGEN_CONCURRENCY: Partial<Record<AIProvider, number>> = { openrouter: 2 };
+const MASTERGEN_CONCURRENCY: Partial<Record<AIProvider, number>> = { openrouter: 2, copilot: 12 };
 const DEFAULT_MASTERGEN_CONCURRENCY = 6;
 
 const App = () => {
