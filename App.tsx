@@ -84,7 +84,6 @@ const sanitizeProject = (p: any): Project => {
 };
 
 type ChatbotResponseStyle = "normal" | "concise" | "tldr";
-type AgentWorkflow = "fast" | "structured";
 type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter' | 'copilot';
 
 const PROVIDER_LABELS: Record<AIProvider, string> = { gemini: 'Gemini', openai: 'OpenAI', anthropic: 'Anthropic', azure: 'Azure', openrouter: 'OpenRouter', copilot: 'Copilot' };
@@ -99,6 +98,22 @@ const PROVIDER_MODELS: Record<string, string[]> = {
 };
 const DEFAULT_MODELS: Record<AIProvider, string> = { gemini: 'gemini-2.0-flash', openai: 'gpt-4o-mini', anthropic: 'claude-sonnet-4-20250514', azure: '', openrouter: '', copilot: '' };
 const API_KEY_PLACEHOLDERS: Record<AIProvider, string> = { gemini: 'AIzaSy...', openai: 'sk-...', anthropic: 'sk-ant-...', azure: 'Azure API key', openrouter: 'sk-or-...', copilot: 'Not required' };
+
+/**
+ * How many subsystems MasterGen builds at once.
+ *
+ * Every subsystem runs on a Copilot conversation of its own, so the per-
+ * conversation queue no longer puts them behind each other and this number is
+ * the only thing left holding concurrency down. Six is the ceiling because a
+ * browser opens about six connections per origin on HTTP/1.1 — past that the
+ * extra workers queue in the network stack instead of at the agent, which buys
+ * nothing and only makes a cancel slower.
+ *
+ * OpenRouter's free tier bills per minute rather than per connection and starts
+ * refusing well before six, so it stays low and leans on `_withRetry`.
+ */
+const MASTERGEN_CONCURRENCY: Partial<Record<AIProvider, number>> = { openrouter: 2 };
+const DEFAULT_MASTERGEN_CONCURRENCY = 6;
 
 const App = () => {
     const [view, setView] = useState<'dashboard' | 'editor'>('dashboard');
@@ -123,7 +138,6 @@ const App = () => {
     // about it. Text Only by default: All Files ships whole documents.
     const [sendFilesMode, setSendFilesMode] = useState<SendFilesMode>('text');
     const [chatbotStyle, setChatbotStyle] = useState<ChatbotResponseStyle>("normal");
-    const [agentWorkflow, setAgentWorkflow] = useState<AgentWorkflow>('fast');
     const [showHybridSourceLabels, setShowHybridSourceLabels] = useState(true);
     const [globalFileText, setGlobalFileText] = useState('');
     const [globalFileName, setGlobalFileName] = useState('');
@@ -136,7 +150,10 @@ const App = () => {
     // eslint-disable-next-line
     const [loadingExport, setLoadingExport] = useState(false);
     const [loadingMaster, setLoadingMaster] = useState(false);
-    const [masterProgress, setMasterProgress] = useState<{ percent: number; subsystem: string; step: string }>({ percent: 0, subsystem: '', step: '' });
+    // Subsystems are built several at a time, so a single subsystem name here
+    // would be whichever worker happened to report last. A count is the honest
+    // reading of a parallel run; the step is the busiest thing in flight.
+    const [masterProgress, setMasterProgress] = useState<{ percent: number; done: number; total: number; step: string }>({ percent: 0, done: 0, total: 0, step: '' });
     const masterCancelRef = useRef(false);
     // Every AI action tracks the ids it is running on, not one id. A single
     // slot let a second press steal the first's spinner, and whichever call
@@ -346,9 +363,9 @@ setProjects(
     setSendFilesMode(localStorage.getItem('fmeca_send_files_v1') === 'all' ? 'all' : 'text');
     const storedStyle = localStorage.getItem('rcm_chatbot_style');
     setChatbotStyle((storedStyle === 'one_sentence' ? 'tldr' : storedStyle as ChatbotResponseStyle) || 'normal');
-    const storedWorkflow = localStorage.getItem('rcm_agent_workflow') as AgentWorkflow | null;
-    const oldDetailLevel = localStorage.getItem('rcm_detail_level');
-    setAgentWorkflow(storedWorkflow || (oldDetailLevel === 'detailed' ? 'structured' : 'fast'));
+    // `rcm_agent_workflow` and `rcm_detail_level` are deliberately not read.
+    // Generation is always structured now, and a stored "fast" would otherwise
+    // bring back a mode that no longer exists.
     setShowHybridSourceLabels(localStorage.getItem('rcm_show_hybrid_source_labels') !== 'false');
     setGlobalFileText(localStorage.getItem('rcm_global_file_text') || '');
     setGlobalFileName(localStorage.getItem('rcm_global_file_name') || '');
@@ -432,7 +449,6 @@ setProjects(
         localStorage.setItem('rcm_engineer_email', engineerEmail);
         localStorage.setItem('rcm_enable_chatbot', String(enableChatbot));
         localStorage.setItem('rcm_chatbot_style', chatbotStyle);
-        localStorage.setItem('rcm_agent_workflow', agentWorkflow);
         localStorage.setItem('rcm_show_hybrid_source_labels', String(showHybridSourceLabels));
         localStorage.setItem('rcm_global_file_text', globalFileText);
         localStorage.setItem('rcm_global_file_name', globalFileName);
@@ -441,7 +457,7 @@ setProjects(
         localStorage.setItem('rcm_system_type', systemType);
         localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
-    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, sendFilesMode, azureEndpoint, powerAutomateUrl, rcmRegisterUrl, rcmReaderUrl, engineerEmail, enableChatbot, chatbotStyle, agentWorkflow, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
+    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, sendFilesMode, azureEndpoint, powerAutomateUrl, rcmRegisterUrl, rcmReaderUrl, engineerEmail, enableChatbot, chatbotStyle, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
 
     const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic', 'openrouter'] as const;
     type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
@@ -1299,7 +1315,7 @@ render();
         try {
         const decomposed = await AIService.decomposeFunction(
             sub.func, sub.name, activeProject!.name,
-            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', agentWorkflow === 'structured' ? 'detailed' : 'normal', sub.specs || '', newConversationId()
+            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', sub.specs || '', newConversationId()
         );
         const rows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
         if (rows.length > 0) {
@@ -1389,11 +1405,76 @@ render();
         sourceTags: tags
     });
 
+    /**
+     * Score a subsystem's freshly generated modes in one call.
+     *
+     * RPN used to be left to the robot button, one press per mode, because a
+     * call per mode was unaffordable at the end of a generation. Batched, it is
+     * one more step in a chain that now runs beside every other subsystem's, so
+     * a generated FMECA arrives scored instead of blank.
+     *
+     * Modes come back keyed by id, and a mode the scorer did not return keeps
+     * its unscored blank — an empty row a reviewer can see is better than a
+     * number nothing stands behind.
+     */
+    const scoreGeneratedModes = async (args: {
+        subName: string;
+        subSpecs: string;
+        subFunc: string;
+        failures: Array<{ desc: string; modes: Mode[] }>;
+        systemContext: string;
+        sessionId?: string;
+    }): Promise<Mode[][]> => {
+        const { subName, subSpecs, subFunc, failures, systemContext, sessionId } = args;
+        const flat = failures.flatMap(f => f.modes.map(m => ({
+            modeId: m.id,
+            failDesc: f.desc,
+            mode: m.mode || '',
+            effect: m.effect || '',
+            cause: m.cause || '',
+            currentControls: m.currentControls || '',
+            mitigation: m.mitigation || ''
+        })));
+        if (!flat.length) return failures.map(f => f.modes);
+
+        const scores = await AIService.evaluateRpnBatch({
+            project: activeProject?.name || '',
+            subName,
+            subSpecs,
+            subFunc,
+            modes: flat,
+            key: apiKey,
+            modelName,
+            modeSource: aiSourceMode as any,
+            refText: globalFileText,
+            aiProvider,
+            azureEndpoint,
+            systemContext,
+            systemType,
+            systemModes: scopedSystemModes(subName, subSpecs, subFunc),
+            powerAutomateUrl,
+            sessionId
+        });
+        const byId = new Map(scores.map(r => [r.modeId, r]));
+        return failures.map(f => f.modes.map(m => {
+            const r = byId.get(m.id);
+            if (!r) return m;
+            return {
+                ...m,
+                rpn: { s: r.s, o: r.o, d: r.d },
+                rpnStatus: "ai_scored" as const,
+                rpnBaseline: r.baseline,
+                rpnImprovement: r.improvement,
+                rpnReason: r.reason || ''
+            };
+        }));
+    };
+
     const autoGen = async (sId: string, name: string, specs: string, func: string) => {
         if (genBusy.has(sId)) return;
-        // Auto-Fill is up to five calls in sequence. They share one conversation
-        // so the agent keeps a coherent thread across the steps of this press,
-        // while every other press runs beside it on a conversation of its own.
+        // Auto-Fill is five calls in sequence. They share one conversation so the
+        // agent keeps a coherent thread across the steps of this press, while
+        // every other press runs beside it on a conversation of its own.
         const runSession = newConversationId();
         setGenBusyFor(sId, true);
         try {
@@ -1404,108 +1485,100 @@ render();
             const existingFFs = sub.failures.map(f => f.desc).filter(Boolean);
             const modeSystemContext = scopedSystemContext(name, specs, func);
             const modeTags = hybridSourceTags(Boolean(modeSystemContext));
-            if (agentWorkflow === 'fast') {
-                const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, modeSystemContext, checklistText, powerAutomateUrl, existingFFs, 'normal', runSession);
-                if (res && res.failures) {
-                    setActiveProject(p => p ? touchProject({
-                        ...p,
-                        subsystems: p.subsystems.map(s => s.id !== sId ? s : {
-                            ...s,
-                            failures: [
-                                ...s.failures,
-                                ...res.failures.map((f: any) => ({
-                                    ...f,
-                                    id: generateId(),
-                                    sourceTags: tags,
-                                    modes: (f.modes || []).map((m: any) => normalizeGeneratedMode(m, modeTags))
-                                }))
-                            ]
-                        })
-                    }) : null);
-                }
-            } else {
-                let workingFunc = (func || '').trim();
-                if (!workingFunc) {
-                    workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId) }, aiProvider, azureEndpoint, '', powerAutomateUrl, runSession) || '').trim();
-                }
-                const rows = workingFunc
-                    ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '', runSession)).map(r => ({ ...r, id: generateId() }))
-                    : [];
-                if (!rows.length) {
-                    alert("Structured Auto-Fill could not decompose the function.");
-                    return;
-                }
-                const ffBatch = await AIService.generateFFsForBreakdownRows({
-                    systemName: activeProject.name,
-                    subsystemName: name,
-                    subsystemSpecs: specs,
-                    funcDesc: workingFunc,
-                    rows,
-                    existingFailures: existingFFs,
-                    key: apiKey,
-                    modelName,
-                    aiProvider,
-                    azureEndpoint,
-                    powerAutomateUrl,
-                    systemContext: '',
-                    sessionId: runSession
-                });
-                const generatedFailures = ffBatch.failures.map(f => ({
-                    id: generateId(),
-                    desc: f.desc,
-                    modes: [] as Mode[],
-                    collapsed: false,
-                    sourceTags: tags,
-                    sourceBreakdownRowId: f.rowId,
-                    sourceSnippet: f.sourceSnippet || rows.find(r => r.id === f.rowId)?.snippet || '',
-                    failedState: f.failedState,
-                    needsReview: f.needsReview
-                }));
-                if (!generatedFailures.length) {
-                    alert("Structured Auto-Fill generated no functional failures.");
-                    return;
-                }
-                const existingModes = sub.failures.flatMap(f => f.modes.map(m => m.mode)).filter(Boolean);
-                const modeBatch = await AIService.generateModesForFailuresBatch({
-                    project: activeProject.name,
-                    subName: name,
-                    subSpecs: specs,
-                    subFunc: workingFunc,
-                    failures: generatedFailures.map(f => ({ id: f.id, desc: f.desc })),
-                    key: apiKey,
-                    modelName,
-                    mode: aiSourceMode,
-                    refText: globalFileText,
-                    aiProvider,
-                    azureEndpoint,
-                    systemContext: scopedSystemContext(name, specs, workingFunc),
-                    checklistText,
-                    powerAutomateUrl,
-                    existingModes,
-                    sessionId: runSession
-                });
-                const modesByFailure = new Map(modeBatch.failures.map(f => [f.failureId, f.modes || []]));
-                const breakdownMatches: BreakdownMatch[] = generatedFailures
-                    .filter(f => f.sourceBreakdownRowId)
-                    .map(f => ({ rowId: f.sourceBreakdownRowId as string, failureIds: [f.id] }));
-                setActiveProject(p => p ? touchProject({
-                    ...p,
-                    subsystems: p.subsystems.map(s => s.id !== sId ? s : {
-                        ...s,
-                        func: workingFunc || s.func,
-                        functionBreakdown: rows,
-                        breakdownMatches: [...(s.breakdownMatches || []), ...breakdownMatches],
-                        funcHashAtBreakdown: workingFunc ? String(workingFunc).split('').reduce((h, c) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0).toString(36) : s.funcHashAtBreakdown,
-                        failures: [
-                            ...s.failures,
-                            ...generatedFailures.map((f: any) => ({
-                                ...f,
-                                modes: (modesByFailure.get(f.id) || []).map((m: any) => normalizeGeneratedMode(m, modeTags))
-                            }))
-                        ]
-                    })
-                }) : null);
+            let workingFunc = (func || '').trim();
+            if (!workingFunc) {
+                workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId) }, aiProvider, azureEndpoint, '', powerAutomateUrl, runSession) || '').trim();
             }
+            const rows = workingFunc
+                ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '', runSession)).map(r => ({ ...r, id: generateId() }))
+                : [];
+            if (!rows.length) {
+                alert("Auto-Fill could not decompose the function.");
+                return;
+            }
+            const ffBatch = await AIService.generateFFsForBreakdownRows({
+                systemName: activeProject.name,
+                subsystemName: name,
+                subsystemSpecs: specs,
+                funcDesc: workingFunc,
+                rows,
+                existingFailures: existingFFs,
+                key: apiKey,
+                modelName,
+                aiProvider,
+                azureEndpoint,
+                powerAutomateUrl,
+                systemContext: '',
+                sessionId: runSession
+            });
+            const generatedFailures = ffBatch.failures.map(f => ({
+                id: generateId(),
+                desc: f.desc,
+                modes: [] as Mode[],
+                collapsed: false,
+                sourceTags: tags,
+                sourceBreakdownRowId: f.rowId,
+                sourceSnippet: f.sourceSnippet || rows.find(r => r.id === f.rowId)?.snippet || '',
+                failedState: f.failedState,
+                needsReview: f.needsReview
+            }));
+            if (!generatedFailures.length) {
+                alert("Auto-Fill generated no functional failures.");
+                return;
+            }
+            const existingModes = sub.failures.flatMap(f => f.modes.map(m => m.mode)).filter(Boolean);
+            const modeBatch = await AIService.generateModesForFailuresBatch({
+                project: activeProject.name,
+                subName: name,
+                subSpecs: specs,
+                subFunc: workingFunc,
+                failures: generatedFailures.map(f => ({ id: f.id, desc: f.desc })),
+                key: apiKey,
+                modelName,
+                mode: aiSourceMode,
+                refText: globalFileText,
+                aiProvider,
+                azureEndpoint,
+                systemContext: scopedSystemContext(name, specs, workingFunc),
+                checklistText,
+                powerAutomateUrl,
+                existingModes,
+                sessionId: runSession
+            });
+            // Normalize before scoring: the batch scorer keys its answer on mode
+            // ids, and ids are minted here.
+            const modesByFailure = new Map(generatedFailures.map(f => [
+                f.id,
+                (modeBatch.failures.find(r => r.failureId === f.id)?.modes || []).map((m: any) => normalizeGeneratedMode(m, modeTags))
+            ]));
+            const scoredByFailure = await scoreGeneratedModes({
+                subName: name,
+                subSpecs: specs,
+                subFunc: workingFunc,
+                failures: generatedFailures.map(f => ({ desc: f.desc, modes: modesByFailure.get(f.id) || [] })),
+                systemContext: modeSystemContext,
+                sessionId: runSession
+            });
+            const breakdownMatches: BreakdownMatch[] = generatedFailures
+                .filter(f => f.sourceBreakdownRowId)
+                .map(f => ({ rowId: f.sourceBreakdownRowId as string, failureIds: [f.id] }));
+            setActiveProject(p => p ? touchProject({
+                ...p,
+                subsystems: p.subsystems.map(s => s.id !== sId ? s : {
+                    ...s,
+                    func: workingFunc || s.func,
+                    functionBreakdown: rows,
+                    breakdownMatches: [...(s.breakdownMatches || []), ...breakdownMatches],
+                    funcHashAtBreakdown: workingFunc ? String(workingFunc).split('').reduce((h, c) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0).toString(36) : s.funcHashAtBreakdown,
+                    failures: [
+                        ...s.failures,
+                        ...generatedFailures.map((f: any, i: number) => ({
+                            ...f,
+                            modes: scoredByFailure[i] || modesByFailure.get(f.id) || []
+                        }))
+                    ]
+                })
+            }) : null);
         }
         } finally {
             setGenBusyFor(sId, false);
@@ -1537,7 +1610,10 @@ render();
     };
     const cancelMasterGen = () => {
         masterCancelRef.current = true;
-        setMasterProgress(prev => ({ ...prev, step: 'Cancelling after current request...' }));
+        // Several subsystems are in flight, and each has to come back before its
+        // worker sees the flag. Naming that is better than a message implying it
+        // stops at the next one.
+        setMasterProgress(prev => ({ ...prev, step: 'Cancelling — waiting for in-flight requests to return...' }));
     };
 
     const masterGen = async () => {
@@ -1547,11 +1623,11 @@ render();
 
         masterCancelRef.current = false;
         // The opening "identify the subsystems" call gets its own conversation;
-        // each subsystem worker below mints another, since the pool runs two at
-        // a time and a shared id would put them back in a queue.
+        // each subsystem worker below mints another, since the pool runs several
+        // at a time and a shared id would put them back in a queue.
         const runSession = newConversationId();
         setLoadingMaster(true);
-        setMasterProgress({ percent: 1, subsystem: '', step: 'Identifying subsystems' });
+        setMasterProgress({ percent: 1, done: 0, total: 0, step: 'Identifying subsystems' });
 
         const issues: string[] = [];
         let wasCancelled = false;
@@ -1568,14 +1644,18 @@ render();
                 ? `${activeProject.name}: ${activeProject.desc}`
                 : activeProject.name;
             const tags = hybridSourceTags();
-            const progressTotal = 1 + rawSubs.length * (agentWorkflow === 'fast' ? 2 : 5);
+            // Six steps per subsystem: function, breakdown, functional failures,
+            // failure modes, RPN, and the subsystem itself.
+            const progressTotal = 1 + rawSubs.length * 6;
             let progressDone = 1;
-            const mark = (step: string, subsystem = '', units = 0) => {
+            let subsDone = 0;
+            const mark = (step: string, units = 0, subsystemFinished = false) => {
                 progressDone += units;
+                if (subsystemFinished) subsDone += 1;
                 const percent = Math.min(99, Math.max(1, Math.round((progressDone / progressTotal) * 100)));
-                setMasterProgress(prev => ({ percent: Math.max(prev.percent, percent), subsystem, step }));
+                setMasterProgress(prev => ({ percent: Math.max(prev.percent, percent), done: subsDone, total: rawSubs.length, step }));
             };
-            mark('Subsystem skeleton ready', '', 0);
+            mark('Subsystem skeleton ready');
 
             const runPool = async <T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> => {
                 const results: R[] = new Array(items.length);
@@ -1589,37 +1669,33 @@ render();
                 return results;
             };
 
-            const completedSubs: any[] = await runPool(rawSubs, 2, (async (s: any) => {
+            const poolLimit = MASTERGEN_CONCURRENCY[aiProvider as AIProvider] ?? DEFAULT_MASTERGEN_CONCURRENCY;
+            const completedSubs: any[] = await runPool(rawSubs, poolLimit, (async (s: any) => {
                 if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                 // This subsystem's own thread — its steps build on each other,
-                // and it must not queue behind the other pool worker.
+                // and it must not queue behind the other pool workers.
                 const subSession = newConversationId();
                 try {
-                    mark('Generating function', s.name);
+                    mark('Generating functions');
                     const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: s.name, specs: s.specs, siblingSubsystems: rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean) }, aiProvider, azureEndpoint, '', powerAutomateUrl, subSession);
                     if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                     const func = (funcDesc || s.func || '').trim();
-                    mark('Function ready', s.name, 1);
-
-                    if (agentWorkflow === 'fast') {
-                        mark('Subsystem skeleton complete', s.name, 1);
-                        return { ...s, func, breakdown: [], failures: [], sourceTags: tags };
-                    }
+                    mark('Functions ready', 1);
 
                     let breakdown: BreakdownRow[] = [];
                     if (func) {
-                        mark('Decomposing function', s.name);
+                        mark('Decomposing functions');
                         const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '', subSession);
                         if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                         breakdown = rows.map(r => ({ ...r, id: generateId() }));
                     }
                     if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
-                    mark('Function breakdown ready', s.name, 1);
+                    mark('Function breakdowns ready', 1);
 
                     let failures: any[] = [];
                     let breakdownMatches: BreakdownMatch[] = [];
                     if (breakdown.length) {
-                        mark('Generating functional failures', s.name);
+                        mark('Generating functional failures');
                         const ffBatch = await AIService.generateFFsForBreakdownRows({
                             systemName: projectContext,
                             subsystemName: s.name,
@@ -1657,11 +1733,12 @@ render();
                     }
                     if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                     if (failures.length === 0) issues.push(`${s.name}: no functional failures generated`);
-                    mark('Functional failures ready', s.name, 1);
+                    mark('Functional failures ready', 1);
 
+                    let subModeSystemContext = '';
                     if (failures.length) {
-                        mark('Generating failure modes', s.name);
-                        const subModeSystemContext = scopedSystemContext(s.name, s.specs || '', func);
+                        mark('Generating failure modes');
+                        subModeSystemContext = scopedSystemContext(s.name, s.specs || '', func);
                         const subModeTags = hybridSourceTags(Boolean(subModeSystemContext));
                         const modeBatch = await AIService.generateModesForFailuresBatch({
                             project: projectContext,
@@ -1688,8 +1765,26 @@ render();
                         }));
                         failures.forEach(f => { if (!f.modes.length) issues.push(`${s.name} / "${String(f.desc || '').slice(0, 60)}": no failure modes generated`); });
                     }
-                    mark('Failure modes ready', s.name, 1);
-                    mark('Subsystem complete', s.name, 1);
+                    if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
+                    mark('Failure modes ready', 1);
+
+                    const modeCount = failures.reduce((n, f) => n + (f.modes?.length || 0), 0);
+                    if (modeCount) {
+                        mark('Scoring RPN');
+                        const scored = await scoreGeneratedModes({
+                            subName: s.name,
+                            subSpecs: s.specs || '',
+                            subFunc: func,
+                            failures: failures.map(f => ({ desc: f.desc, modes: f.modes as Mode[] })),
+                            systemContext: subModeSystemContext,
+                            sessionId: subSession
+                        });
+                        failures = failures.map((f, i) => ({ ...f, modes: scored[i] || f.modes }));
+                        const unscored = failures.reduce((n, f) => n + (f.modes as Mode[]).filter(m => m.rpnStatus !== 'ai_scored').length, 0);
+                        if (unscored) issues.push(`${s.name}: ${unscored} of ${modeCount} failure mode(s) left unscored — use the RPN robot on those rows`);
+                    }
+                    mark('RPN ready', 1);
+                    mark('Subsystem complete', 1, true);
 
                     return { ...s, func, breakdown, breakdownMatches, failures, sourceTags: tags };
                 } catch (e: any) {
@@ -1709,6 +1804,9 @@ render();
                 funcHashAtBreakdown: s.breakdown?.length ? String(s.func || '').split('').reduce((h: number, c: string) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0).toString(36) : undefined,
                 failures: (s.failures || []).map((f: any) => ({
                     id: f.id || generateId(), desc: f.desc, sourceTags: f.sourceTags, sourceBreakdownRowId: f.sourceBreakdownRowId, sourceSnippet: f.sourceSnippet,
+                    // Scores arrive with the modes now. A mode the batch scorer
+                    // skipped still falls back to a blank, so an unscored row
+                    // stays visibly unscored rather than inheriting a neighbour.
                     modes: (f.modes || []).map((m: any) => ({
                         id: m.id || generateId(),
                         mode: m.mode,
@@ -1716,21 +1814,23 @@ render();
                         cause: m.cause,
                         currentControls: m.currentControls || "",
                         mitigation: m.mitigation,
-                        rpn: blankRpn(),
-                        rpnStatus: "unscored",
+                        rpn: m.rpn && hasCompleteRpn(m.rpn) ? m.rpn : blankRpn(),
+                        rpnStatus: m.rpnStatus === 'ai_scored' && hasCompleteRpn(m.rpn) ? "ai_scored" : "unscored",
+                        rpnBaseline: m.rpnBaseline,
+                        rpnImprovement: m.rpnImprovement,
                         rpnReason: m.rpnReason || "",
                         sourceTags: m.sourceTags
                     }))
                 }))
             }));
             setActiveProject(p => p ? (p.subsystems.length === 0 ? touchProject({ ...p, subsystems: newSubs }) : p) : null);
-            setMasterProgress({ percent: 100, subsystem: '', step: 'Complete' });
+            setMasterProgress(prev => ({ percent: 100, done: prev.total, total: prev.total, step: 'Complete' }));
             if (issues.length > 0) alert(`Master generation finished with issues:\n${issues.join('\n')}`);
         } catch (e: any) {
             alert("Master generation failed: " + (e?.message || e));
         } finally {
             if (wasCancelled) {
-                setMasterProgress({ percent: 0, subsystem: '', step: 'Cancelled' });
+                setMasterProgress({ percent: 0, done: 0, total: 0, step: 'Cancelled' });
             }
             setLoadingMaster(false);
             masterCancelRef.current = false;
@@ -1927,17 +2027,11 @@ render();
                                 </div>
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
                                     <h2 className="text-lg font-semibold mb-4">FMECA Generation</h2>
-                                    <label className="block text-xs font-semibold text-slate-500 mb-1">Agent Workflow</label>
-                                    <select
-                                        value={agentWorkflow}
-                                        onChange={(e) => setAgentWorkflow(e.target.value as AgentWorkflow)}
-                                        className="w-full border border-slate-200 rounded px-3 py-2 text-sm outline-none focus:border-brand-500"
-                                    >
-                                        <option value="fast">Fast</option>
-                                        <option value="structured">Structured</option>
-                                    </select>
-                                    <p className="text-xs text-slate-500 mt-1">
-                                        Fast uses fewer calls for quick drafts. Structured decomposes functions and batch-generates FFs/modes for better traceability. RPN is scored separately with the robot button.
+                                    <p className="text-xs text-slate-500">
+                                        MasterGen and Auto-Fill run the same five steps for every subsystem: function, function breakdown, functional failures, failure modes, then RPN. Each step feeds the next, so they stay in order — but every subsystem runs on a conversation of its own, several at a time, so a bigger system does not take proportionally longer.
+                                    </p>
+                                    <p className="text-xs text-slate-500 mt-2">
+                                        RPN arrives scored by the AI. Scored rows are marked as AI-scored, so a reviewer can tell them from anything entered by hand — re-score any single row with the robot button.
                                     </p>
                                 </div>
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
@@ -2094,7 +2188,9 @@ render();
 	                                        <div className="mb-3 rounded border border-brand-100 bg-brand-50/60 px-3 py-2">
 	                                            <div className="mb-1 flex items-center justify-between gap-3 text-[11px] font-semibold text-slate-600">
 	                                                <span className="truncate">
-	                                                    {masterProgress.subsystem ? `${masterProgress.subsystem} · ${masterProgress.step}` : masterProgress.step}
+	                                                    {masterProgress.total > 0
+	                                                        ? `${masterProgress.done} of ${masterProgress.total} subsystems · ${masterProgress.step}`
+	                                                        : masterProgress.step}
 	                                                </span>
 	                                                <span className="font-mono text-brand-700">{masterProgress.percent}%</span>
 	                                            </div>
