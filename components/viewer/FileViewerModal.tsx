@@ -13,7 +13,7 @@ import { buildDocumentPayload } from '../../services/DocumentPayload';
 import type { DocumentPayload } from '../../services/DocumentPayload';
 import type { SmartSearchConfig } from '../../services/SmartSearchService';
 import type { LocalFileSystemProvider } from '../../services/FileSystem';
-import type { FileEntry, SendFilesMode, ViewerCitation } from '../../types';
+import type { FieldClaim, FileEntry, SendFilesMode, ViewerCitation } from '../../types';
 
 function locationLabel(citation: ViewerCitation): string {
     const parts: string[] = [];
@@ -34,13 +34,23 @@ const ReferenceCard: React.FC<{
         onClick={onSelect}
         className={cn(
             'w-full rounded-lg border p-2.5 text-left transition',
-            active ? 'border-brand-500 bg-brand-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'
+            // A warning card is not evidence — it is a recommended action the
+            // plant already does. Red, so it is never mistaken for support.
+            citation.warning
+                ? active
+                    ? 'border-red-500 bg-red-100 shadow-sm'
+                    : 'border-red-200 bg-red-50 hover:bg-red-100'
+                : active
+                ? 'border-brand-500 bg-brand-50 shadow-sm'
+                : 'border-slate-200 bg-white hover:bg-slate-50'
         )}
     >
         <div className="flex items-center gap-2">
             <span className={cn(
                 'flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-bold',
-                active ? 'bg-brand-600 text-white' : 'bg-brand-50 text-brand-700'
+                citation.warning
+                    ? active ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'
+                    : active ? 'bg-brand-600 text-white' : 'bg-brand-50 text-brand-700'
             )}>
                 {citation.index}
             </span>
@@ -68,15 +78,41 @@ const ReferenceCard: React.FC<{
     </button>
 );
 
+/** The status chip on a claim's section header. */
+const ClaimChip: React.FC<{ claim: FieldClaim }> = ({ claim }) => {
+    if (claim.duplicateOfControl) {
+        return (
+            <span className="shrink-0 rounded-full border border-red-200 bg-red-50 px-1.5 py-0.5 text-[9px] font-bold uppercase text-red-700">
+                already a PM task
+            </span>
+        );
+    }
+    if (claim.unsupported) {
+        return (
+            <span className="shrink-0 rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold uppercase text-amber-700">
+                no source
+            </span>
+        );
+    }
+    return null;
+};
+
 /**
- * The citations list.
+ * The citations list, one section per claim.
  *
- * Opened from a field's cite button it holds that field's evidence, across
- * every source that was searched; opened from the References panel it is empty,
- * because nothing has cited that folder yet.
+ * A field makes several assertions and the panel is read assertion by
+ * assertion, because "this line has nothing behind it" is the answer worth
+ * having. So a claim keeps its section even when nothing supports it — an empty
+ * section IS the finding, and hiding it would hide exactly what the reader came
+ * to check.
+ *
+ * Opened from the References panel instead of a field, there are no claims and
+ * no sections; that folder simply has nothing citing it yet.
  */
 const ReferencePanel: React.FC<{
-    groups: [string, ViewerCitation[]][];
+    claims: FieldClaim[];
+    byClaim: Map<string, ViewerCitation[]>;
+    loose: ViewerCitation[];
     known: Set<string>;
     activeId: string | null;
     onSelect: (id: string) => void;
@@ -84,10 +120,21 @@ const ReferencePanel: React.FC<{
     emptySources?: string[];
     onRecite?: () => void;
     reciting?: boolean;
-}> = ({ groups, known, activeId, onSelect, emptySources = [], onRecite, reciting = false }) => {
+}> = ({ claims, byClaim, loose, known, activeId, onSelect, emptySources = [], onRecite, reciting = false }) => {
     // Smart results take the same slot while they are on screen, so the two
     // panels never compete for the viewer's width.
     if (useSmartPanelActive()) return null;
+
+    const cardsFor = (list: ViewerCitation[]) =>
+        list.map(citation => (
+            <ReferenceCard
+                key={citation.id}
+                citation={citation}
+                active={citation.id === activeId}
+                missing={!known.has(citation.fileName)}
+                onSelect={() => onSelect(citation.id)}
+            />
+        ));
 
     return (
         <aside className="flex w-80 shrink-0 flex-col border-l border-slate-200 bg-slate-50">
@@ -106,29 +153,44 @@ const ReferencePanel: React.FC<{
                 )}
             </div>
             <div className="flex-1 space-y-3 overflow-y-auto scroll-thin px-3 py-3">
-                {groups.length === 0 ? (
+                {claims.length === 0 && loose.length === 0 ? (
                     <p className="px-1 py-4 text-[11px] leading-relaxed text-slate-400 italic">
                         Nothing in the sources supported this text. Re-search after editing the field, or attach
                         the document this came from to the subsystem.
                     </p>
                 ) : (
-                    groups.map(([fileName, list]) => (
-                        <div key={fileName} className="space-y-1.5">
-                            <p className="truncate px-0.5 text-[10px] font-mono text-slate-400" title={fileName}>
-                                {fileName}
-                            </p>
-                            {list.map(citation => (
-                                <ReferenceCard
-                                    key={citation.id}
-                                    citation={citation}
-                                    active={citation.id === activeId}
-                                    missing={!known.has(citation.fileName)}
-                                    onSelect={() => onSelect(citation.id)}
-                                />
-                            ))}
-                        </div>
-                    ))
+                    claims.map(claim => {
+                        const list = byClaim.get(claim.id) ?? [];
+                        return (
+                            <section key={claim.id} className="space-y-1.5">
+                                <header className="flex items-start gap-1.5 px-0.5">
+                                    <span className={cn(
+                                        'mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-bold',
+                                        claim.duplicateOfControl
+                                            ? 'bg-red-100 text-red-700'
+                                            : claim.unsupported
+                                            ? 'bg-amber-100 text-amber-700'
+                                            : 'bg-slate-200 text-slate-600'
+                                    )}>
+                                        {claim.index}
+                                    </span>
+                                    <p className="flex-1 text-[10px] font-bold leading-snug text-slate-600" title={claim.text}>
+                                        {claim.text}
+                                    </p>
+                                    <ClaimChip claim={claim} />
+                                </header>
+                                {list.length === 0 ? (
+                                    <p className="pl-5 text-[10px] leading-relaxed text-slate-400 italic">
+                                        No passage in any source supports this.
+                                    </p>
+                                ) : (
+                                    cardsFor(list)
+                                )}
+                            </section>
+                        );
+                    })
                 )}
+                {loose.length > 0 && <div className="space-y-1.5">{cardsFor(loose)}</div>}
                 {emptySources.length > 0 && (
                     <div className="border-t border-slate-200 pt-2">
                         <p className="text-[10px] leading-relaxed text-slate-400">
@@ -166,6 +228,8 @@ export const FileViewerModal: React.FC<{
     openName: string | null;
     onOpenName: (name: string) => void;
     citations?: ViewerCitation[];
+    /** The field's assertions, each its own section in the panel. */
+    claims?: FieldClaim[];
     activeCitationId?: string | null;
     onSelectCitation?: (id: string) => void;
     /** Sources that were searched and supported nothing. */
@@ -181,7 +245,7 @@ export const FileViewerModal: React.FC<{
     entityName?: string | null;
 }> = ({
     isOpen, onClose, provider, files, pathParts, sources, openName, onOpenName,
-    citations = [], activeCitationId = null, onSelectCitation, emptySources = [],
+    citations = [], claims = [], activeCitationId = null, onSelectCitation, emptySources = [],
     onRecite, reciting = false, ai = null, sendFiles = 'text', entityName,
 }) => {
     const [panelOpen, setPanelOpen] = useState(true);
@@ -259,14 +323,18 @@ export const FileViewerModal: React.FC<{
 
     const known = useMemo(() => new Set(docs.map(d => d.fileName)), [docs]);
 
-    // Grouped by file, so citations spanning several references read clearly.
-    const groups = useMemo(() => {
+    // Grouped by the claim each passage answers. A citation with no claim — one
+    // stored before the panel became claim-shaped — still gets shown, below the
+    // sections, rather than silently dropped.
+    const byClaim = useMemo(() => {
         const map = new Map<string, ViewerCitation[]>();
         for (const c of citations) {
-            map.set(c.fileName, [...(map.get(c.fileName) ?? []), c]);
+            if (!c.claimId) continue;
+            map.set(c.claimId, [...(map.get(c.claimId) ?? []), c]);
         }
-        return [...map.entries()];
+        return map;
     }, [citations]);
+    const loose = useMemo(() => citations.filter(c => !c.claimId), [citations]);
 
     // Extract the document's text once its bytes are in: it is what smart search
     // reads, and the fallback for formats with no renderer of their own.
@@ -429,7 +497,9 @@ export const FileViewerModal: React.FC<{
 
                         {showPanel && (
                             <ReferencePanel
-                                groups={groups}
+                                claims={claims}
+                                byClaim={byClaim}
+                                loose={loose}
                                 known={known}
                                 activeId={activeCitationId}
                                 emptySources={emptySources}

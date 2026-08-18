@@ -203,6 +203,25 @@ export function pickExcerpts(text: string, terms: string[]): { start: number; te
     return chosen.sort((a, b) => a.index - b.index).map(entry => entry.window);
 }
 
+/**
+ * One reading call against a document, on whichever channel it has.
+ *
+ * A document with extracted text is read as text; one without — a scan, a photo,
+ * a drawing — travels as page images (and, on Copilot, as the file itself).
+ * Citation runs share this with smart search: the choice of channel is a
+ * property of the document, not of what is being asked of it.
+ */
+export async function askDocument(
+    config: SmartSearchConfig,
+    system: string,
+    user: string,
+    payload: DocumentPayload
+): Promise<string> {
+    const hasText = payload.text.trim().length > 0 && !payload.textThin;
+    if (hasText) return ask(config, system, user);
+    return askWithPayload(config, system, user, payload);
+}
+
 function excerptPayload(text: string, terms: string[]): string {
     if (text.length <= WHOLE_DOC_CHARS) return `[1]\n${text}`;
     const parts: string[] = [];
@@ -377,3 +396,9 @@ export async function smartSearchDocument(
 
     return { hits: verifyQuotes(text, [...candidates, ...termCandidates]), terms };
 }
+
+/**
+ * The excerpts of a document worth reading for a given set of terms — the same
+ * windowing smart search uses, exposed for citation runs.
+ */
+export const excerptPayloadFor = (text: string, terms: string[]): string => excerptPayload(text, terms);

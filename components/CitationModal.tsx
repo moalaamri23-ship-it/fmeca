@@ -2,7 +2,7 @@ import React, { Suspense, lazy, useEffect, useState } from 'react';
 import type { LocalFileSystemProvider } from '../services/FileSystem';
 import type { CiteSource } from '../services/CitationCorpus';
 import type { SmartSearchConfig } from '../services/SmartSearchService';
-import type { SendFilesMode, ViewerCitation } from '../types';
+import type { FieldClaim, SendFilesMode, ViewerCitation } from '../types';
 
 // Same renderers as the References panel, and the same reason to load them late.
 const FileViewerModal = lazy(() =>
@@ -27,6 +27,8 @@ export const CitationModal: React.FC<{
     provider: LocalFileSystemProvider | null;
     sources: CiteSource[];
     citations: ViewerCitation[];
+    /** The field's assertions — the panel is one section per claim. */
+    claims: FieldClaim[];
     emptySources?: string[];
     onRecite: () => void;
     reciting: boolean;
@@ -35,7 +37,7 @@ export const CitationModal: React.FC<{
     /** What was cited, e.g. "Mitigation · Lube Oil Pump". */
     entityName: string;
 }> = ({
-    isOpen, onClose, provider, sources, citations, emptySources = [],
+    isOpen, onClose, provider, sources, citations, claims, emptySources = [],
     onRecite, reciting, ai, sendFiles, entityName,
 }) => {
     const [openName, setOpenName] = useState<string | null>(null);
@@ -73,6 +75,7 @@ export const CitationModal: React.FC<{
                 openName={openName}
                 onOpenName={setOpenName}
                 citations={citations}
+                claims={claims}
                 activeCitationId={activeId}
                 onSelectCitation={setActiveId}
                 emptySources={emptySources}

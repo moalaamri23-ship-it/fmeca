@@ -13,13 +13,16 @@ import { Icon } from './Icon';
  *   searching        — a spinner in the same spot
  *   evidence found   — brand-coloured with its count, always visible, because a
  *                      field with evidence behind it should say so at a glance
+ *   flagged          — red: a line nothing supports, or a recommendation the PM
+ *                      program already covers. A flag nobody sees is not a flag,
+ *                      and nobody opens a modal for a field they think is fine
  *   stale            — amber: the field was edited after the evidence was found
  *
  * Clicking always ends in the same place: the citations modal. The first click
  * has to search first, which is what the spinner is for; afterwards the modal
  * opens straight away and re-searching is a button inside it.
  */
-export type CiteState = 'none' | 'running' | 'cited' | 'stale';
+export type CiteState = 'none' | 'running' | 'cited' | 'flagged' | 'stale';
 
 export const CiteButton: React.FC<{
     state: CiteState;
@@ -28,12 +31,14 @@ export const CiteButton: React.FC<{
     className?: string;
 }> = ({ state, count, onClick, className = '' }) => {
     const running = state === 'running';
-    const has = state === 'cited' || state === 'stale';
+    const has = state === 'cited' || state === 'stale' || state === 'flagged';
 
     const title = running
         ? 'Searching the references for this text…'
         : state === 'stale'
         ? `${count} citation${count === 1 ? '' : 's'} — found before this field was edited`
+        : state === 'flagged'
+        ? `${count} citation${count === 1 ? '' : 's'} — one or more lines need attention`
         : state === 'cited'
         ? `${count} citation${count === 1 ? '' : 's'}`
         : 'Find citations for this text';
@@ -54,6 +59,8 @@ export const CiteButton: React.FC<{
                 has || running ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
                 state === 'stale'
                     ? 'text-amber-600 hover:text-amber-700'
+                    : state === 'flagged'
+                    ? 'text-red-600 hover:text-red-700'
                     : state === 'cited'
                     ? 'text-brand-600 hover:text-brand-700'
                     : 'text-slate-300 hover:text-brand-600',

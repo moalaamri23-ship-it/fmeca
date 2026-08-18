@@ -5,37 +5,43 @@
  * written by the AI, or typed by the engineer — and this asks each source in
  * scope which of its passages support that text. So what comes back is evidence,
  * not provenance: the passage supports the claim, it did not necessarily produce
- * it. The panel says "Evidence" for that reason, and a source that supports
- * nothing is reported as such rather than being made to produce something.
+ * it.
  *
- * The reading itself is `smartSearchDocument` with the field's text as the
- * intent: it already expands wording, windows a long document, and — the part
- * that matters most — VERIFIES every quote against the document's own text and
- * drops what it cannot find. A quote that survives that is a quote the viewer
- * can highlight, which is the whole promise of the citation panel.
+ * Evidence is judged per CLAIM, not per field. A Current Controls list of five
+ * lines is five separate questions, and the answer worth having is which of the
+ * five nothing supports — a control no source carries is one the generator
+ * invented, and the detection score was rated against it. Splitting lives in
+ * `FieldClaims`; what evidence MEANS for each field lives in `CitationPrompts`.
  *
- * A scan or a drawing has no text to verify against. Its quotes are kept as the
- * model transcribed them, marked approximate, and given the page they were read
- * from when the model names one — a page is still somewhere to land.
+ * One model call per source carries every claim at once. Per claim per source
+ * would be twenty calls for a five-line list against four documents, for no
+ * better answer.
+ *
+ * Every quote is verified against the document's own text before it reaches the
+ * UI, so a quote that survives is a quote the viewer can highlight. A scan has
+ * no text to verify against: its quotes are kept as transcribed, marked
+ * approximate, and given the page the model read them from.
  */
 
 import { extractDocumentText } from './DocumentText';
 import { buildDocumentPayload, payloadIsUsable } from './DocumentPayload';
-import { smartSearchDocument } from './SmartSearchService';
+import { askDocument, excerptPayloadFor, expandIntent } from './SmartSearchService';
 import type { SmartSearchConfig } from './SmartSearchService';
 import { toSourceRef } from './CitationCorpus';
 import type { CiteSource } from './CitationCorpus';
+import { buildClaims } from './FieldClaims';
+import type { CitableField } from './FieldClaims';
+import { citationLabel, isDuplicateCheck, maxPerClaimPerSource, readPromptFor } from './CitationPrompts';
 import { categoryFor } from '../components/viewer/util';
 import { lineAtOffset, locateText, pageAtOffset, snippetAround } from '../components/viewer/locate';
+import { findMatches, normalizeQuery } from '../components/viewer/textSearch';
 import type { LocalFileSystemProvider } from './FileSystem';
-import type { FieldCitations, ViewerCitation } from '../types';
+import type { FieldCitations, FieldClaim, ViewerCitation } from '../types';
 
-/** How much of a field's text is used as the search intent. */
-const MAX_INTENT_CHARS = 1200;
-/** Sources read at once. Enough to be quick, few enough not to trip rate limits. */
+/** Sources read at once. Quick enough to watch, gentle enough on rate limits. */
 const CONCURRENCY = 3;
-/** Passages kept per source, so one verbose document cannot fill the panel. */
-const MAX_PER_SOURCE = 4;
+/** Claims sent in one call. A field longer than this is being used as a notepad. */
+const MAX_CLAIMS = 12;
 
 /** A field's text is worth citing only once it says something. */
 export const isCitable = (text: string): boolean => text.trim().length >= 12;
@@ -57,12 +63,6 @@ export function hashFieldText(text: string): string {
 /** Whether stored citations still describe what the field says now. */
 export const citationsAreStale = (stored: FieldCitations | undefined, text: string): boolean =>
     !!stored && stored.textHash !== hashFieldText(text);
-
-/** The field's text as a search intent, labelled so the model knows what it is reading for. */
-function buildIntent(fieldLabel: string, fieldText: string): string {
-    const body = fieldText.replace(/\s+/g, ' ').trim().slice(0, MAX_INTENT_CHARS);
-    return `${fieldLabel}: ${body}`;
-}
 
 /** "…on page 7…" in the model's reason — the only page an image-read quote has. */
 function pageFromReason(why: string): number | undefined {
@@ -93,6 +93,7 @@ export interface CiteProgress {
 }
 
 export interface CiteFieldRequest {
+    field: CitableField;
     fieldLabel: string;
     fieldText: string;
     sources: CiteSource[];
@@ -102,27 +103,64 @@ export interface CiteFieldRequest {
     onProgress?: (progress: CiteProgress) => void;
 }
 
+/** One passage the model returned, before it is verified. */
+interface RawHit {
+    claim: number;
+    quote: string;
+    why: string;
+}
+
 interface SourceResult {
     source: CiteSource;
     items: Omit<ViewerCitation, 'index'>[];
-    /** The source was read and had nothing to say. */
+    /** Claims this source reported as already covered by the PM program. */
+    duplicateClaims: string[];
     empty: boolean;
-    /** The source could not be read at all. */
     error?: string;
 }
 
-/** Search one source and turn its verified quotes into citations. */
+/** The model's reply, as claim-tagged passages. */
+function parseHits(reply: string, claimCount: number): RawHit[] {
+    const text = (reply || '').replace(/^\s*```[a-zA-Z]*\s*/m, '').replace(/```\s*$/m, '');
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) return [];
+    let parsed: any;
+    try {
+        parsed = JSON.parse(text.slice(start, end + 1));
+    } catch {
+        return [];
+    }
+    if (!Array.isArray(parsed?.results)) return [];
+    return parsed.results
+        .map((row: any) => ({
+            claim: Number(row?.claim),
+            quote: String(row?.quote ?? ''),
+            why: String(row?.why ?? ''),
+        }))
+        .filter((hit: RawHit) => hit.quote.trim() && hit.claim >= 1 && hit.claim <= claimCount);
+}
+
+/** The claim list as the model sees it. */
+const claimBlock = (claims: FieldClaim[]): string =>
+    claims.map(claim => `[${claim.index}] ${claim.text}`).join('\n');
+
+/** Search one source for every claim at once. */
 async function citeOneSource(
     source: CiteSource,
+    claims: FieldClaim[],
     req: CiteFieldRequest,
-    intent: string
+    terms: string[]
 ): Promise<SourceResult> {
     let text = '';
     let bytes: ArrayBuffer | null = null;
     try {
         ({ text, bytes } = await readSourceText(source, req.provider));
     } catch (e) {
-        return { source, items: [], empty: true, error: e instanceof Error ? e.message : String(e) };
+        return {
+            source, items: [], duplicateClaims: [], empty: true,
+            error: e instanceof Error ? e.message : String(e),
+        };
     }
 
     const category = categoryFor(source.fileName);
@@ -135,37 +173,80 @@ async function citeOneSource(
 
     if (!payloadIsUsable(payload)) {
         return {
-            source,
-            items: [],
-            empty: true,
+            source, items: [], duplicateClaims: [], empty: true,
             error: text.trim() ? undefined : 'No readable text, and this file may not be sent whole.',
         };
     }
 
-    const result = await smartSearchDocument(source.fileName, payload, intent, req.ai);
+    const reply = await askDocument(
+        req.ai,
+        readPromptFor(req.field, source.kind),
+        [
+            `Document: ${source.fileName}`,
+            `Field being cited: ${req.fieldLabel}`,
+            '',
+            'Claims:',
+            claimBlock(claims),
+            '',
+            `Related wording to watch for: ${terms.join(', ')}`,
+            '',
+            'Excerpts:',
+            excerptPayloadFor(payload.text, terms),
+        ].join('\n'),
+        payload
+    );
 
-    // Expansion terms are search suggestions, not evidence — a document that
-    // merely contains the word "bearing" has not supported anything.
-    const hits = result.hits.filter(hit => !hit.fromTerm).slice(0, MAX_PER_SOURCE);
+    const duplicateCheck = isDuplicateCheck(req.field, source.kind);
+    const perClaimCap = maxPerClaimPerSource(req.field);
+    const label = citationLabel(req.field, source.kind, source.origin);
 
-    const items = hits.map(hit => {
-        const span = text ? locateText(text, hit.quote, source.id) : null;
-        return {
-            id: `cite-${source.id}-${hit.id}`,
+    const kept = new Map<number, number>();
+    const seen = new Set<string>();
+    const items: Omit<ViewerCitation, 'index'>[] = [];
+    const duplicateClaims = new Set<string>();
+
+    for (const hit of parseHits(reply, claims.length)) {
+        const claim = claims[hit.claim - 1];
+        if (!claim) continue;
+        if ((kept.get(hit.claim) ?? 0) >= perClaimCap) continue;
+
+        const quote = hit.quote.trim();
+        const key = `${hit.claim}:${normalizeQuery(quote)}`;
+        if (seen.has(key)) continue;
+
+        // A quote the document does not contain is one the viewer could never
+        // highlight, so it is dropped rather than shown as a dead link. Only a
+        // document with no text at all is taken on trust.
+        const verifiable = text.trim().length > 0;
+        if (verifiable && findMatches(text, quote).length === 0) continue;
+        seen.add(key);
+        kept.set(hit.claim, (kept.get(hit.claim) ?? 0) + 1);
+        if (duplicateCheck) duplicateClaims.add(claim.id);
+
+        const span = verifiable ? locateText(text, quote, source.id) : null;
+        items.push({
+            id: `cite-${source.id}-${claim.id}-${items.length}`,
             fileName: source.fileName,
             sourceId: source.id,
-            anchor: hit.quote,
-            quote: span ? text.slice(span.start, span.end) : hit.quote,
+            claimId: claim.id,
+            anchor: quote,
+            quote: span ? text.slice(span.start, span.end) : quote,
             snippet: span ? snippetAround(text, span.start, span.end) : undefined,
             page: span ? pageAtOffset(text, span.start) : pageFromReason(hit.why),
-            line: span && categoryFor(source.fileName) !== 'pdf' ? lineAtOffset(text, span.start) : undefined,
-            label: source.origin,
-            why: hit.why,
-            approximate: hit.fromImage || (span ? !span.exact : true),
-        } satisfies Omit<ViewerCitation, 'index'>;
-    });
+            line: span && category !== 'pdf' ? lineAtOffset(text, span.start) : undefined,
+            label,
+            why: hit.why.trim(),
+            warning: duplicateCheck || undefined,
+            approximate: !verifiable || (span ? !span.exact : true),
+        });
+    }
 
-    return { source, items, empty: items.length === 0 };
+    return {
+        source,
+        items,
+        duplicateClaims: [...duplicateClaims],
+        empty: items.length === 0,
+    };
 }
 
 /** Run `worker` over `items`, `limit` at a time, keeping input order in the result. */
@@ -207,18 +288,22 @@ export async function citeField(req: CiteFieldRequest): Promise<CiteFieldResult>
         );
     }
 
-    const intent = buildIntent(req.fieldLabel, fieldText);
+    const claims = buildClaims(req.field, fieldText).slice(0, MAX_CLAIMS);
+    if (claims.length === 0) throw new Error('There is nothing in this field to cite.');
+
+    // One expansion for the whole field, shared by every source: the claims are
+    // about one subject, and expanding each of them separately buys nothing.
+    const terms = await expandIntent(`${req.fieldLabel}: ${claims.map(c => c.text).join('; ')}`, req.ai);
+
     let done = 0;
     req.onProgress?.({ done: 0, total: req.sources.length, current: req.sources[0].fileName });
 
     const results = await mapWithLimit(req.sources, CONCURRENCY, async source => {
         try {
-            return await citeOneSource(source, req, intent);
+            return await citeOneSource(source, claims, req, terms);
         } catch (e) {
             return {
-                source,
-                items: [],
-                empty: true,
+                source, items: [], duplicateClaims: [], empty: true,
                 error: e instanceof Error ? e.message : String(e),
             } satisfies SourceResult;
         } finally {
@@ -227,16 +312,34 @@ export async function citeField(req: CiteFieldRequest): Promise<CiteFieldResult>
         }
     });
 
-    // Numbered across the whole field, in source order, so the badge on a card
-    // and the badge in the document are the same number.
-    const items: ViewerCitation[] = [];
+    // Numbered across the whole field, claim by claim, so the badge on a card and
+    // the badge in the document are the same number and the panel reads in order.
+    const byClaim = new Map<string, Omit<ViewerCitation, 'index'>[]>();
+    const duplicates = new Set<string>();
     for (const result of results) {
-        for (const item of result.items) items.push({ ...item, index: items.length + 1 });
+        for (const item of result.items) {
+            const list = byClaim.get(item.claimId as string) ?? [];
+            list.push(item);
+            byClaim.set(item.claimId as string, list);
+        }
+        for (const claimId of result.duplicateClaims) duplicates.add(claimId);
     }
+
+    const items: ViewerCitation[] = [];
+    const resolved: FieldClaim[] = claims.map(claim => {
+        const found = byClaim.get(claim.id) ?? [];
+        for (const item of found) items.push({ ...item, index: items.length + 1 });
+        return {
+            ...claim,
+            unsupported: found.length === 0,
+            duplicateOfControl: duplicates.has(claim.id) || undefined,
+        };
+    });
 
     return {
         textHash: hashFieldText(fieldText),
         generatedAt: new Date().toISOString(),
+        claims: resolved,
         items,
         sources: req.sources.map(toSourceRef),
         emptySources: results.filter(r => r.empty && !r.error).map(r => r.source.fileName),

@@ -162,10 +162,17 @@ export interface ViewerCitation {
   snippet?: string;
   page?: number;
   line?: number;
+  /** Which claim inside the field this passage answers. */
+  claimId?: string;
   /** Where this citation came from, e.g. "Subsystem function". */
   label?: string;
   /** The model's one clause on how this passage supports the field. */
   why?: string;
+  /**
+   * This passage is a warning, not support. A recommended action found in the
+   * PM checklist already exists, so the card is shown in red.
+   */
+  warning?: boolean;
   /** True when the anchor had to be shortened to be located. */
   approximate?: boolean;
 }
@@ -187,6 +194,28 @@ export interface CitedSourceRef {
 }
 
 /**
+ * One assertion inside a field.
+ *
+ * A field is not one statement — Specs is a list of values, Current Controls
+ * and Mitigation are numbered lines. Evidence is judged per assertion, because
+ * "the field is supported" is not a useful answer when four of its five lines
+ * are and the fifth was invented.
+ */
+export interface FieldClaim {
+  id: string;
+  /** 1-based, in the order the claim appears in the field. */
+  index: number;
+  text: string;
+  /** Nothing in any source supported it. On Current Controls this is a finding. */
+  unsupported?: boolean;
+  /**
+   * Mitigation only: an equivalent task already exists in the PM checklist, so
+   * this is not a recommendation at all — it is a control already in place.
+   */
+  duplicateOfControl?: boolean;
+}
+
+/**
  * The evidence found for ONE field, stored on the entity that owns the field.
  *
  * Citations are not produced by generation — they are searched for afterwards,
@@ -197,6 +226,8 @@ export interface CitedSourceRef {
 export interface FieldCitations {
   textHash: string;
   generatedAt: string;
+  /** The field's assertions, in field order. Citations hang off these. */
+  claims: FieldClaim[];
   items: ViewerCitation[];
   /** Every source searched, including the ones that answered nothing. */
   sources: CitedSourceRef[];

@@ -18,6 +18,7 @@ import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch, SendFilesMode, FieldCitations } from './types';
 import { collectCiteSources, rehydrateSources, type CiteSource, type CorpusRequest } from './services/CitationCorpus';
 import { citationsAreStale, citeField, isCitable } from './services/CitationService';
+import type { CitableField } from './services/FieldClaims';
 import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
 import { RcmRegisterModal, type RcmRegisterSubmit } from './components/RcmRegisterModal';
 import { ImportProjectModal } from './components/ImportProjectModal';
@@ -558,8 +559,8 @@ setProjects(
         subId: string;
         failId?: string;
         modeId?: string;
-        /** The property on the entity, e.g. 'mitigation'. */
-        field: string;
+        /** The property on the entity — one of the four citable fields. */
+        field: CitableField;
         /** What the reader sees, e.g. "Mitigation". */
         label: string;
     }
@@ -584,8 +585,18 @@ setProjects(
         return { citations: mode.citations, text: String((mode as any)[target.field] ?? '') };
     };
 
-    const storedCitations = (target: CiteTarget): FieldCitations | undefined =>
-        citeEntity(target)?.citations?.[target.field];
+    /**
+     * A field's stored citations, always claim-shaped.
+     *
+     * Sets written before the panel became claim-shaped have no `claims` at all;
+     * they are still valid pointers into documents, so they are read as a set
+     * with no sections rather than thrown away or allowed to crash the row.
+     */
+    const storedCitations = (target: CiteTarget): FieldCitations | undefined => {
+        const stored = citeEntity(target)?.citations?.[target.field];
+        if (!stored) return undefined;
+        return stored.claims ? stored : { ...stored, claims: [] };
+    };
 
     /** Write a field's citations back onto its entity, immutably. */
     const setStoredCitations = (target: CiteTarget, found: FieldCitations) => {
@@ -629,9 +640,14 @@ setProjects(
     ): { state: CiteState; count: number } => {
         if (citeRunning === citeKey(target)) return { state: 'running', count: 0 };
         const stored = owner.citations?.[target.field];
-        if (!stored || stored.items.length === 0) return { state: 'none', count: 0 };
+        const claims = stored?.claims ?? [];
+        if (!stored || (claims.length === 0 && stored.items.length === 0)) return { state: 'none', count: 0 };
         const text = String((owner as any)[target.field] ?? '');
-        return { state: citationsAreStale(stored, text) ? 'stale' : 'cited', count: stored.items.length };
+        if (citationsAreStale(stored, text)) return { state: 'stale', count: stored.items.length };
+        // A control nothing supports, or a recommendation the PM program already
+        // covers, is the reason to open this field — so the button says so.
+        const flagged = claims.some(claim => claim.unsupported || claim.duplicateOfControl);
+        return { state: flagged ? 'flagged' : 'cited', count: stored.items.length };
     };
 
     /** The knowledge, checklist and attachment scope a field is cited against. */
@@ -667,6 +683,7 @@ setProjects(
         try {
             const sources = await collectCiteSources(corpus);
             const found = await citeField({
+                field: target.field as CitableField,
                 fieldLabel: target.label,
                 fieldText: entity.text,
                 sources,
@@ -677,6 +694,7 @@ setProjects(
             setStoredCitations(target, {
                 textHash: found.textHash,
                 generatedAt: found.generatedAt,
+                claims: found.claims,
                 items: found.items,
                 sources: found.sources,
                 emptySources: found.emptySources,
@@ -700,7 +718,9 @@ setProjects(
      */
     const openCitations = async (target: CiteTarget) => {
         const stored = storedCitations(target);
-        if (!stored || stored.items.length === 0) {
+        // A run where nothing was supported still has claims, and those empty
+        // sections are the finding — reopen them rather than searching again.
+        if (!stored || (stored.claims.length === 0 && stored.items.length === 0)) {
             await runCitation(target);
             return;
         }
@@ -2316,6 +2336,7 @@ render();
                                 provider={storageProvider}
                                 sources={citeModal.sources}
                                 citations={stored?.items || []}
+                                claims={stored?.claims || []}
                                 emptySources={stored?.emptySources}
                                 onRecite={() => { void runCitation(citeModal.target); }}
                                 reciting={citeRunning === citeKey(citeModal.target)}
