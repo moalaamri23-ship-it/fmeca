@@ -18,6 +18,7 @@ import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch, SendFilesMode, FieldCitations } from './types';
 import { collectCiteSources, rehydrateSources, type CiteSource, type CorpusRequest } from './services/CitationCorpus';
 import { citationsAreStale, citeField, isCitable } from './services/CitationService';
+import { newConversationId } from './services/CopilotQueue';
 import type { CitableField } from './services/FieldClaims';
 import { FunctionBreakdownModal } from './components/FunctionBreakdownModal';
 import { RcmRegisterModal, type RcmRegisterSubmit } from './components/RcmRegisterModal';
@@ -137,8 +138,11 @@ const App = () => {
     const [loadingMaster, setLoadingMaster] = useState(false);
     const [masterProgress, setMasterProgress] = useState<{ percent: number; subsystem: string; step: string }>({ percent: 0, subsystem: '', step: '' });
     const masterCancelRef = useRef(false);
-    const [genId, setGenId] = useState<string | null>(null);
-    const [modeGenId, setModeGenId] = useState<string | null>(null);
+    // Every AI action tracks the ids it is running on, not one id. A single
+    // slot let a second press steal the first's spinner, and whichever call
+    // finished first cleared it for both — so concurrent runs looked serial.
+    const [genBusy, setGenBusy] = useState<Set<string>>(new Set());
+    const [modeGenBusy, setModeGenBusy] = useState<Set<string>>(new Set());
     const [activeSubId, setActiveSubId] = useState<string | null>(null);
     const [library, setLibrary] = useState<RichLibrary>(RICH_LIBRARY);
     const [showDownloadOptions, setShowDownloadOptions] = useState(false);
@@ -157,8 +161,6 @@ const App = () => {
 
     const [rpnBusy, setRpnBusy] = useState<Set<string>>(new Set());
 
-    const [rpnLoadingId, setRpnLoadingId] = useState<string | null>(null);
-
     // System Modes / System Context
     const [systemType, setSystemType] = useState('');
     const [systemModes, setSystemModes] = useState<SystemMode[]>([]);
@@ -167,9 +169,31 @@ const App = () => {
 
     // Function Breakdown modal state
     const [breakdownSubId, setBreakdownSubId] = useState<string | null>(null);
-    const [redecomposingId, setRedecomposingId] = useState<string | null>(null);
-    const [matchingId, setMatchingId] = useState<string | null>(null);
-    const [generatingRowId, setGeneratingRowId] = useState<string | null>(null);
+    const [redecomposeBusy, setRedecomposeBusy] = useState<Set<string>>(new Set());
+    const [matchBusy, setMatchBusy] = useState<Set<string>>(new Set());
+    const [rowGenBusy, setRowGenBusy] = useState<Set<string>>(new Set());
+
+    /** Add or remove one id from a busy set. */
+    const toggleBusy = (set: React.Dispatch<React.SetStateAction<Set<string>>>) =>
+        (id: string, on: boolean) => set(prev => {
+            const next = new Set(prev);
+            if (on) next.add(id); else next.delete(id);
+            return next;
+        });
+    const setGenBusyFor = toggleBusy(setGenBusy);
+    const setModeGenBusyFor = toggleBusy(setModeGenBusy);
+    const setRedecomposeBusyFor = toggleBusy(setRedecomposeBusy);
+    const setMatchBusyFor = toggleBusy(setMatchBusy);
+    const setRowGenBusyFor = toggleBusy(setRowGenBusy);
+
+    /**
+     * Auto-Fill owns the whole subsystem while it runs: it reads that
+     * subsystem's failures and modes once, at press time, then writes for
+     * several calls. Anything below it that adds a failure or a mode in the
+     * meantime would be invisible to that snapshot and could be duplicated, so
+     * the subsystem's lower-level AI actions are held until it finishes.
+     */
+    const subsystemLocked = (subId: string) => genBusy.has(subId);
 
     const hybridSourceTags = (includeSystemModes: boolean = false) => {
         if (aiSourceMode !== 'hybrid') return undefined;
@@ -1212,7 +1236,8 @@ render();
             const fail = sub?.failures.find(f => String(f.id) === fid);
             const mode = fail?.modes.find(m => String(m.id) === mid);
             if (!sub || !fail || !mode) return alert("RPN AI error: Mode not found");
-            setRpnLoadingId(mid);
+            if (rpnBusy.has(mid) || subsystemLocked(sid)) return;
+            setBusy(mid, true);
             const modeSystemContext = scopedSystemContext(sub.name || '', sub.specs || '', sub.func || '');
             const modeSystemModes = scopedSystemModes(sub.name || '', sub.specs || '', sub.func || '');
             const r = await AIService.evaluateRpnFromText({
@@ -1235,7 +1260,8 @@ render();
                 systemContext: modeSystemContext,
                 systemType,
                 systemModes: modeSystemModes,
-                powerAutomateUrl
+                powerAutomateUrl,
+                sessionId: newConversationId()
             });
             setActiveProject(p => !p ? p : ({
                 ...p,
@@ -1258,8 +1284,7 @@ render();
             console.error(e);
             alert("RPN AI error: " + (e?.message || e));
         } finally {
-            setRpnLoadingId(String(mId));
-            setTimeout(() => setRpnLoadingId(null), 150);
+            setBusy(String(mId), false);
         }
     };
 
@@ -1269,10 +1294,12 @@ render();
     const redecomposeFunction = async (sId: string) => {
         const sub = activeProject?.subsystems.find(s => s.id === sId);
         if (!sub?.func?.trim() || (!apiKey && aiProvider !== 'copilot')) return;
-        setRedecomposingId(sId);
+        if (redecomposeBusy.has(sId) || subsystemLocked(sId)) return;
+        setRedecomposeBusyFor(sId, true);
+        try {
         const decomposed = await AIService.decomposeFunction(
             sub.func, sub.name, activeProject!.name,
-            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', agentWorkflow === 'structured' ? 'detailed' : 'normal', sub.specs || ''
+            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', agentWorkflow === 'structured' ? 'detailed' : 'normal', sub.specs || '', newConversationId()
         );
         const rows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
         if (rows.length > 0) {
@@ -1286,35 +1313,43 @@ render();
                 }),
             }) : null);
         }
-        setRedecomposingId(null);
+        } finally {
+            setRedecomposeBusyFor(sId, false);
+        }
     };
 
     const runBreakdownMatch = async (sId: string) => {
         const sub = activeProject?.subsystems.find(s => s.id === sId);
         if (!sub?.functionBreakdown?.length || (!apiKey && aiProvider !== 'copilot')) return;
-        setMatchingId(sId);
-        const matches = await AIService.matchFFsToBreakdown(
-            sub.func, sub.name, activeProject!.name,
-            sub.functionBreakdown,
-            sub.failures.filter(f => f.desc).map(f => ({ id: f.id, desc: f.desc })),
-            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, ''
-        );
-        setActiveProject(p => p ? touchProject({
-            ...p,
-            subsystems: p.subsystems.map(s => s.id === sId ? { ...s, breakdownMatches: matches } : s)
-        }) : null);
-        setMatchingId(null);
+        if (matchBusy.has(sId) || subsystemLocked(sId)) return;
+        setMatchBusyFor(sId, true);
+        try {
+            const matches = await AIService.matchFFsToBreakdown(
+                sub.func, sub.name, activeProject!.name,
+                sub.functionBreakdown,
+                sub.failures.filter(f => f.desc).map(f => ({ id: f.id, desc: f.desc })),
+                apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', newConversationId()
+            );
+            setActiveProject(p => p ? touchProject({
+                ...p,
+                subsystems: p.subsystems.map(s => s.id === sId ? { ...s, breakdownMatches: matches } : s)
+            }) : null);
+        } finally {
+            setMatchBusyFor(sId, false);
+        }
     };
 
     const generateFFForRow = async (sId: string, row: BreakdownRow) => {
         const sub = activeProject?.subsystems.find(s => s.id === sId);
         if (!sub || (!apiKey && aiProvider !== 'copilot')) return;
-        setGeneratingRowId(row.id);
+        if (rowGenBusy.has(row.id) || subsystemLocked(sId)) return;
+        setRowGenBusyFor(row.id, true);
+        try {
         const desc = await AIService.generateFFForRow(
             activeProject!.name, sub.name, sub.specs || '', sub.func,
             row.snippet || row.function, row.standard,
             sub.failures.filter(f => f.desc).map(f => f.desc),
-            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, ''
+            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', newConversationId()
         );
         if (desc?.trim()) {
             const newId = generateId();
@@ -1336,7 +1371,9 @@ render();
                 }),
             }) : null);
         }
-        setGeneratingRowId(null);
+        } finally {
+            setRowGenBusyFor(row.id, false);
+        }
     };
 
     const normalizeGeneratedMode = (m: any, tags?: string[]): Mode => ({
@@ -1353,16 +1390,22 @@ render();
     });
 
     const autoGen = async (sId: string, name: string, specs: string, func: string) => {
-        setGenId(sId);
+        if (genBusy.has(sId)) return;
+        // Auto-Fill is up to five calls in sequence. They share one conversation
+        // so the agent keeps a coherent thread across the steps of this press,
+        // while every other press runs beside it on a conversation of its own.
+        const runSession = newConversationId();
+        setGenBusyFor(sId, true);
+        try {
         if (activeProject) {
             const sub = activeProject.subsystems.find(s => s.id === sId);
-            if (!sub) { setGenId(null); return; }
+            if (!sub) return;
             const tags = hybridSourceTags();
             const existingFFs = sub.failures.map(f => f.desc).filter(Boolean);
             const modeSystemContext = scopedSystemContext(name, specs, func);
             const modeTags = hybridSourceTags(Boolean(modeSystemContext));
             if (agentWorkflow === 'fast') {
-                const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, modeSystemContext, checklistText, powerAutomateUrl, existingFFs, 'normal');
+                const res = await AIService.generateCompleteSubsystem(name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, modeSystemContext, checklistText, powerAutomateUrl, existingFFs, 'normal', runSession);
                 if (res && res.failures) {
                     setActiveProject(p => p ? touchProject({
                         ...p,
@@ -1383,14 +1426,13 @@ render();
             } else {
                 let workingFunc = (func || '').trim();
                 if (!workingFunc) {
-                    workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId) }, aiProvider, azureEndpoint, '', powerAutomateUrl) || '').trim();
+                    workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId) }, aiProvider, azureEndpoint, '', powerAutomateUrl, runSession) || '').trim();
                 }
                 const rows = workingFunc
-                    ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '')).map(r => ({ ...r, id: generateId() }))
+                    ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '', runSession)).map(r => ({ ...r, id: generateId() }))
                     : [];
                 if (!rows.length) {
                     alert("Structured Auto-Fill could not decompose the function.");
-                    setGenId(null);
                     return;
                 }
                 const ffBatch = await AIService.generateFFsForBreakdownRows({
@@ -1405,7 +1447,8 @@ render();
                     aiProvider,
                     azureEndpoint,
                     powerAutomateUrl,
-                    systemContext: ''
+                    systemContext: '',
+                    sessionId: runSession
                 });
                 const generatedFailures = ffBatch.failures.map(f => ({
                     id: generateId(),
@@ -1420,7 +1463,6 @@ render();
                 }));
                 if (!generatedFailures.length) {
                     alert("Structured Auto-Fill generated no functional failures.");
-                    setGenId(null);
                     return;
                 }
                 const existingModes = sub.failures.flatMap(f => f.modes.map(m => m.mode)).filter(Boolean);
@@ -1439,13 +1481,14 @@ render();
                     systemContext: scopedSystemContext(name, specs, workingFunc),
                     checklistText,
                     powerAutomateUrl,
-                    existingModes
+                    existingModes,
+                    sessionId: runSession
                 });
                 const modesByFailure = new Map(modeBatch.failures.map(f => [f.failureId, f.modes || []]));
                 const breakdownMatches: BreakdownMatch[] = generatedFailures
                     .filter(f => f.sourceBreakdownRowId)
                     .map(f => ({ rowId: f.sourceBreakdownRowId as string, failureIds: [f.id] }));
-                setActiveProject(p => p ? ({
+                setActiveProject(p => p ? touchProject({
                     ...p,
                     subsystems: p.subsystems.map(s => s.id !== sId ? s : {
                         ...s,
@@ -1464,15 +1507,19 @@ render();
                 }) : null);
             }
         }
-        setGenId(null);
+        } finally {
+            setGenBusyFor(sId, false);
+        }
     };
     const genModes = async (sId: string, fId: string, name: string, specs: string, func: string, failDesc: string) => {
-        setModeGenId(fId);
+        if (modeGenBusy.has(fId) || subsystemLocked(sId)) return;
+        setModeGenBusyFor(fId, true);
+        try {
         if (activeProject) {
             const existingModes = activeProject.subsystems.find(s => s.id === sId)?.failures.flatMap(f => f.modes.map(m => m.mode)).filter(Boolean) || [];
-            const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, scopedSystemContext(name, specs, func), checklistText, powerAutomateUrl, existingModes);
+            const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, scopedSystemContext(name, specs, func), checklistText, powerAutomateUrl, existingModes, newConversationId());
             const tags = hybridSourceTags(Boolean(scopedSystemContext(name, specs, func)));
-            if (modes) setActiveProject(p => p ? ({
+            if (modes) setActiveProject(p => p ? touchProject({
                 ...p,
                 subsystems: p.subsystems.map(s => s.id === sId ? {
                     ...s,
@@ -1484,7 +1531,9 @@ render();
                 } : s)
             }) : null);
         }
-        setModeGenId(null);
+        } finally {
+            setModeGenBusyFor(fId, false);
+        }
     };
     const cancelMasterGen = () => {
         masterCancelRef.current = true;
@@ -1497,6 +1546,10 @@ render();
         if ((activeProject.subsystems || []).length > 0) return alert("MasterGen is available only when the FMECA is empty. Delete all subsystems first.");
 
         masterCancelRef.current = false;
+        // The opening "identify the subsystems" call gets its own conversation;
+        // each subsystem worker below mints another, since the pool runs two at
+        // a time and a shared id would put them back in a queue.
+        const runSession = newConversationId();
         setLoadingMaster(true);
         setMasterProgress({ percent: 1, subsystem: '', step: 'Identifying subsystems' });
 
@@ -1504,7 +1557,7 @@ render();
         let wasCancelled = false;
 
         try {
-            const rawSubs = await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, masterSystemContext, powerAutomateUrl);
+            const rawSubs = await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, masterSystemContext, powerAutomateUrl, runSession);
             if (masterCancelRef.current) { wasCancelled = true; return; }
             if (!rawSubs || !Array.isArray(rawSubs) || rawSubs.length === 0) { alert("Generation failed."); return; }
 
@@ -1538,9 +1591,12 @@ render();
 
             const completedSubs: any[] = await runPool(rawSubs, 2, (async (s: any) => {
                 if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
+                // This subsystem's own thread — its steps build on each other,
+                // and it must not queue behind the other pool worker.
+                const subSession = newConversationId();
                 try {
                     mark('Generating function', s.name);
-                    const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: s.name, specs: s.specs, siblingSubsystems: rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean) }, aiProvider, azureEndpoint, '', powerAutomateUrl);
+                    const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: s.name, specs: s.specs, siblingSubsystems: rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean) }, aiProvider, azureEndpoint, '', powerAutomateUrl, subSession);
                     if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                     const func = (funcDesc || s.func || '').trim();
                     mark('Function ready', s.name, 1);
@@ -1553,7 +1609,7 @@ render();
                     let breakdown: BreakdownRow[] = [];
                     if (func) {
                         mark('Decomposing function', s.name);
-                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '');
+                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '', subSession);
                         if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                         breakdown = rows.map(r => ({ ...r, id: generateId() }));
                     }
@@ -1576,7 +1632,8 @@ render();
                             aiProvider,
                             azureEndpoint,
                             powerAutomateUrl,
-                            systemContext: ''
+                            systemContext: '',
+                            sessionId: subSession
                         });
                         failures = ffBatch.failures.map(f => ({
                             id: generateId(),
@@ -1621,7 +1678,8 @@ render();
                             systemContext: subModeSystemContext,
                             checklistText,
                             powerAutomateUrl,
-                            existingModes: []
+                            existingModes: [],
+                            sessionId: subSession
                         });
                         const modesByFailure = new Map(modeBatch.failures.map(f => [f.failureId, f.modes || []]));
                         failures = failures.map(f => ({
@@ -2055,11 +2113,11 @@ render();
 	                                                    <div className="text-slate-400 cursor-grab hover:text-brand-600 drag-handle p-1" title="Reorder" onMouseEnter={()=>setDragAllowed(i)} onMouseLeave={()=>{ if(dragId===null) setDragAllowed(null); }}><Icon name="move"/></div>
 	                                                    <button onClick={(e) => {e.stopPropagation(); toggleSub(sub.id)}} className="text-slate-400"><Icon name={sub.collapsed ? "chevronDown" : "chevronUp"} /></button>
 	                                                    <div className="flex-1">
-	                                                        <SmartInput label="Subsystem" value={sub.name} onChange={v => updateSub(sub.id, 'name', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} />
+	                                                        <SmartInput label="Subsystem" locked={subsystemLocked(sub.id)} value={sub.name} onChange={v => updateSub(sub.id, 'name', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} />
 	                                                        <SourceBadges tags={sub.sourceTags} />
 	                                                    </div>
 	                                                </div>
-                                                <SmartInput label="Specs" value={sub.specs} onChange={v => updateSub(sub.id, 'specs', v)} {...citeProps({subId: sub.id, field: 'specs', label: 'Specs'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, subsystemFunction: sub.func, siblingSubsystems: siblingSubsystemNames(sub.id)}} />
+                                                <SmartInput label="Specs" locked={subsystemLocked(sub.id)} value={sub.specs} onChange={v => updateSub(sub.id, 'specs', v)} {...citeProps({subId: sub.id, field: 'specs', label: 'Specs'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, subsystemFunction: sub.func, siblingSubsystems: siblingSubsystemNames(sub.id)}} />
                                                 <div className="mt-2 space-y-1">
                                                     <div className="text-[10px] font-semibold uppercase text-slate-500">Subsystem image (AI)</div>
                                                     <div className="flex items-center gap-2 flex-nowrap">
@@ -2101,7 +2159,7 @@ render();
                                         </div>
                                         {!sub.collapsed && (
                                             <div className="animate-enter">
-                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" labelAddon={<button onClick={(e) => { e.stopPropagation(); setBreakdownSubId(sub.id); }} title="View Function Breakdown" className="text-slate-400 hover:text-brand-600 transition text-[11px] leading-none">⊞</button>} value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} {...citeProps({subId: sub.id, field: 'func', label: 'Function'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, projectDescription: activeProject.desc, subsystem: sub.name, specs: sub.specs, siblingSubsystems: siblingSubsystemNames(sub.id)}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2">{genId===sub.id ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
+                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" locked={subsystemLocked(sub.id)} labelAddon={<button onClick={(e) => { e.stopPropagation(); setBreakdownSubId(sub.id); }} title="View Function Breakdown" className="text-slate-400 hover:text-brand-600 transition text-[11px] leading-none">⊞</button>} value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} {...citeProps({subId: sub.id, field: 'func', label: 'Function'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, projectDescription: activeProject.desc, subsystem: sub.name, specs: sub.specs, siblingSubsystems: siblingSubsystemNames(sub.id)}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} disabled={genBusy.has(sub.id)} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">{genBusy.has(sub.id) ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full text-left text-sm border-collapse">
                                                         <thead className="bg-slate-50 text-slate-500 text-xs font-bold uppercase"><tr><th className="p-2 border-r w-1/5">Functional Failure</th><th className="p-2 border-r w-1/6">Mode</th><th className="p-2 border-r w-1/6">Effect</th><th className="p-2 border-r w-1/6">Cause</th><th className="p-2 border-r w-1/5">Controls &amp; Mitigation</th>{showRPN && <th className="p-2 text-center">RPN</th>}<th className="p-2 text-center">Edit</th></tr></thead>
@@ -2113,7 +2171,7 @@ render();
                                                                             <div className="flex items-start p-2 gap-2 group">
                                                                                 <button onClick={(e)=>{e.stopPropagation(); toggleFail(sub.id, fail.id)}} className="mt-1 text-slate-400"><Icon name={fail.collapsed?"chevronDown":"chevronUp"}/></button>
                                                                                 <div className="flex-1">
-	                                                                                    <SmartInput label="Functional Failure" value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func}} />
+	                                                                                    <SmartInput label="Functional Failure" locked={subsystemLocked(sub.id)} value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func}} />
 	                                                                                    <SourceBadges tags={fail.sourceTags} />
                                                                                     {(fail.failedState || fail.needsReview) && (
                                                                                         <div className="flex flex-wrap items-center gap-1 mt-1">
@@ -2130,7 +2188,7 @@ render();
                                                                                         </div>
                                                                                     )}
                                                                                     <div className="flex gap-4 mt-1">
-                                                                                        <button onClick={(e)=>{e.stopPropagation(); genModes(sub.id, fail.id, sub.name, sub.specs, sub.func, fail.desc)}} disabled={modeGenId === fail.id} className="text-xs text-brand-600 font-bold flex gap-1 items-center hover:underline">{modeGenId === fail.id ? "..." : <span><Icon name="bolt"/> Generate Modes</span>}</button>
+                                                                                        <button onClick={(e)=>{e.stopPropagation(); genModes(sub.id, fail.id, sub.name, sub.specs, sub.func, fail.desc)}} disabled={modeGenBusy.has(fail.id) || subsystemLocked(sub.id)} title={subsystemLocked(sub.id) ? "Auto-Fill is running on this subsystem" : undefined} className="text-xs text-brand-600 font-bold flex gap-1 items-center hover:underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">{modeGenBusy.has(fail.id) ? "..." : <span><Icon name="bolt"/> Generate Modes</span>}</button>
                                                                                         <button onClick={(e)=>{e.stopPropagation(); openAttachments('fail', sub, fail)}} className="text-xs text-slate-500 font-bold flex gap-1 items-center hover:text-brand-600"><Icon name="clip" className="w-3 h-3"/> References</button>
                                                                                     </div>
                                                                                 </div>
@@ -2141,12 +2199,12 @@ render();
                                                                     {!fail.collapsed && fail.modes.map((mode, mIdx) => (
                                                                         <tr key={mode.id} className="group hover:bg-slate-50">
                                                                             <td className="p-2 border-r bg-slate-50/10 text-right text-xs text-slate-300">M{mIdx+1}</td>
-	                                                                            <td className="p-2 border-r"><SmartInput label="Failure Mode" value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={scopedSystemContext(sub.name, sub.specs, sub.func)} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /><SourceBadges tags={mode.sourceTags} /></td>
-                                                                            <td className="p-2 border-r"><SmartInput label="Failure Effect" value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
-                                                                            <td className="p-2 border-r"><SmartInput label="Failure Cause" value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
-	                                                                            <td className="p-2 border-r"><div className="mb-2"><MitigationBuilder label="Current Controls" placeholder="Existing controls (D scored against these)..." value={mode.currentControls || ""} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'currentControls', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'currentControls', label: 'Current Controls'}, mode)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></div><MitigationBuilder value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'mitigation', label: 'Mitigation'}, mode)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, detectionScore: Number(mode.rpn?.d) || 5, currentControls: mode.currentControls || "", siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
+	                                                                            <td className="p-2 border-r"><SmartInput label="Failure Mode" locked={subsystemLocked(sub.id)} value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={scopedSystemContext(sub.name, sub.specs, sub.func)} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /><SourceBadges tags={mode.sourceTags} /></td>
+                                                                            <td className="p-2 border-r"><SmartInput label="Failure Effect" locked={subsystemLocked(sub.id)} value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
+                                                                            <td className="p-2 border-r"><SmartInput label="Failure Cause" locked={subsystemLocked(sub.id)} value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
+	                                                                            <td className="p-2 border-r"><div className="mb-2"><MitigationBuilder label="Current Controls" locked={subsystemLocked(sub.id)} placeholder="Existing controls (D scored against these)..." value={mode.currentControls || ""} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'currentControls', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'currentControls', label: 'Current Controls'}, mode)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></div><MitigationBuilder locked={subsystemLocked(sub.id)} value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'mitigation', label: 'Mitigation'}, mode)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, detectionScore: Number(mode.rpn?.d) || 5, currentControls: mode.currentControls || "", siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
                                                                             {showRPN && <td className="p-2 text-center"><div className="flex justify-center gap-0.5 mb-1"><RpnScoreInput mode={mode} scoreKey="s" value={mode.rpn.s} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, s:v})}/><RpnScoreInput mode={mode} scoreKey="o" value={mode.rpn.o} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, o:v})}/><RpnScoreInput mode={mode} scoreKey="d" value={mode.rpn.d} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, d:v})}/></div><RpnTotalBadge mode={mode} colorClass={getRpnColor(rpnTotal(mode.rpn))} /></td>}
-                                                                            <td className="p-2 text-center opacity-0 group-hover:opacity-100"><div className="flex flex-col items-center gap-1"><button onClick={(e)=>{e.stopPropagation();deleteMode(sub.id,fail.id,mode.id)}} className="text-red-500 mb-2"><Icon name="trash"/></button><button onClick={(e)=>{e.stopPropagation();aiScoreModeRpn(sub.id,fail.id,mode.id)}} className={`text-blue-500 text-sm ${rpnLoadingId===String(mode.id) ? "animate-pulse scale-110 drop-shadow-[0_0_6px_rgba(59,130,246,0.6)]" : ""}`} title="AI score S/O/D">🤖</button></div></td>
+                                                                            <td className="p-2 text-center opacity-0 group-hover:opacity-100"><div className="flex flex-col items-center gap-1"><button onClick={(e)=>{e.stopPropagation();deleteMode(sub.id,fail.id,mode.id)}} className="text-red-500 mb-2"><Icon name="trash"/></button><button onClick={(e)=>{e.stopPropagation();aiScoreModeRpn(sub.id,fail.id,mode.id)}} disabled={rpnBusy.has(String(mode.id)) || subsystemLocked(sub.id)} className={`text-blue-500 text-sm disabled:cursor-not-allowed ${rpnBusy.has(String(mode.id)) ? "animate-pulse scale-110 drop-shadow-[0_0_6px_rgba(59,130,246,0.6)]" : subsystemLocked(sub.id) ? "opacity-40" : ""}`} title={subsystemLocked(sub.id) ? "Auto-Fill is running on this subsystem" : "AI score S/O/D"}>🤖</button></div></td>
                                                                         </tr>
                                                                     ))}
                                                                     {!fail.collapsed && (<tr><td colSpan={showRPN?7:6} className="p-1 text-center border-b-4 border-slate-100"><button onClick={(e)=>{e.stopPropagation(); addMode(sub.id, fail.id)}} className="text-xs font-bold text-brand-600">+ Add Mode</button></td></tr>)}
@@ -2412,12 +2470,13 @@ render();
                         sub={activeSub}
                         onClose={() => setBreakdownSubId(null)}
                         onRedecompose={() => redecomposeFunction(breakdownSubId)}
-                        isRedecomposing={redecomposingId === breakdownSubId}
+                        isRedecomposing={redecomposeBusy.has(breakdownSubId)}
                         onMatch={() => runBreakdownMatch(breakdownSubId)}
-                        isMatching={matchingId === breakdownSubId}
+                        isMatching={matchBusy.has(breakdownSubId)}
 	                        matchResults={activeSub.breakdownMatches ?? null}
                         onGenerateFF={(row) => generateFFForRow(breakdownSubId, row)}
-                        generatingRowId={generatingRowId}
+                        generatingRowIds={rowGenBusy}
+                        locked={subsystemLocked(breakdownSubId)}
                     />
                 ) : null;
             })()}

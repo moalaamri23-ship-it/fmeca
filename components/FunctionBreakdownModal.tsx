@@ -10,7 +10,10 @@ interface FunctionBreakdownModalProps {
     isMatching: boolean;
     matchResults: BreakdownMatch[] | null;
     onGenerateFF: (row: BreakdownRow) => void;
-    generatingRowId: string | null;
+    /** Rows with a "+ FF" call in flight. A set, so several rows can run at once. */
+    generatingRowIds: Set<string>;
+    /** True while Auto-Fill owns this subsystem — its AI actions are held. */
+    locked?: boolean;
 }
 
 export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
@@ -22,7 +25,8 @@ export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
     isMatching,
     matchResults,
     onGenerateFF,
-    generatingRowId,
+    generatingRowIds,
+    locked = false,
 }) => {
     const rows: BreakdownRow[] = sub.functionBreakdown ?? [];
 
@@ -84,14 +88,14 @@ export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
                     <div className="flex items-center justify-between gap-2">
                         <button
                             onClick={onRedecompose}
-                            disabled={isRedecomposing || !sub.func?.trim()}
+                            disabled={locked || isRedecomposing || !sub.func?.trim()}
                             className="text-xs px-3 py-1.5 rounded border font-semibold text-brand-600 border-brand-200 bg-white hover:bg-brand-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
                         >
                             {isRedecomposing ? 'Decomposing…' : 'Re-decompose'}
                         </button>
                         <button
                             onClick={onMatch}
-                            disabled={isMatching || rows.length === 0 || sub.failures.filter(f => f.desc).length === 0}
+                            disabled={locked || isMatching || rows.length === 0 || sub.failures.filter(f => f.desc).length === 0}
                             className="text-xs px-3 py-1.5 rounded border font-semibold text-slate-600 border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
                         >
                             {isMatching ? 'Matching…' : 'Match Failures to Breakdown'}
@@ -155,11 +159,11 @@ export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
                                                         </div>
                                                         <button
                                                             onClick={() => onGenerateFF(r)}
-                                                            disabled={generatingRowId === r.id}
+                                                            disabled={locked || generatingRowIds.has(r.id)}
                                                             title="Generate a Functional Failure for this functional aspect"
                                                             className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-brand-200 text-brand-600 bg-white hover:bg-brand-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
                                                         >
-                                                            {generatingRowId === r.id ? '…' : '+ FF'}
+                                                            {generatingRowIds.has(r.id) ? '…' : '+ FF'}
                                                         </button>
                                                     </div>
                                                 </td>

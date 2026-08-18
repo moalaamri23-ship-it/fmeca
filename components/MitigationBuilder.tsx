@@ -20,6 +20,7 @@ interface MitigationBuilderProps {
     citeState?: CiteState;
     citeCount?: number;
     onCite?: () => void;
+    locked?: boolean;
 }
 
 // Normalize a numbered action list: strip any existing numbering from each
@@ -40,7 +41,7 @@ export const combineControlsAndMitigation = (currentControls?: string, mitigatio
 
 // Numbered action-list builder shared by the Mitigation and Current Controls
 // fields: "N- Action (Owner)" lines, auto-renumbered on insert and on blur.
-export const MitigationBuilder: React.FC<MitigationBuilderProps> = ({ value, onChange, label = 'Mitigation', placeholder = 'Mitigation...', apiKey, modelName, aiSourceMode, referenceFileText, contextData, aiProvider, azureEndpoint, systemContext, powerAutomateUrl, citeState, citeCount, onCite }) => {
+export const MitigationBuilder: React.FC<MitigationBuilderProps> = ({ value, onChange, label = 'Mitigation', placeholder = 'Mitigation...', apiKey, modelName, aiSourceMode, referenceFileText, contextData, aiProvider, azureEndpoint, systemContext, powerAutomateUrl, citeState, citeCount, onCite, locked = false }) => {
     const [act, setAct] = useState("");
     const [own, setOwn] = useState("");
     const insert = (e: React.MouseEvent) => {
@@ -58,7 +59,7 @@ export const MitigationBuilder: React.FC<MitigationBuilderProps> = ({ value, onC
                 <input className="border rounded p-1 text-[10px] w-24 outline-none focus:border-brand-500" placeholder="Owner" value={own} onChange={e=>setOwn(e.target.value)} onClick={e=>e.stopPropagation()} />
                 <button onClick={insert} className="bg-blue-50 text-blue-600 px-2 py-1 rounded font-bold text-[10px] hover:bg-blue-100 border border-blue-200">+</button>
             </div>
-            <SmartInput label={label} value={value} onChange={onChange} onBlur={() => { const fixed = renumberActions(value); if (fixed !== value) onChange(fixed); }} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={referenceFileText} contextData={contextData} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} placeholder={placeholder} citeState={citeState} citeCount={citeCount} onCite={onCite} />
+            <SmartInput label={label} value={value} onChange={onChange} onBlur={() => { const fixed = renumberActions(value); if (fixed !== value) onChange(fixed); }} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={referenceFileText} contextData={contextData} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={systemContext} powerAutomateUrl={powerAutomateUrl} placeholder={placeholder} citeState={citeState} citeCount={citeCount} onCite={onCite} locked={locked} />
         </div>
     );
 };
