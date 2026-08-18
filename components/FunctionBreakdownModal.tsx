@@ -1,5 +1,6 @@
 import React from 'react';
-import { Subsystem, BreakdownRow, BreakdownMatch } from '../types';
+import { Subsystem, BreakdownRow, BreakdownMatch, Failure } from '../types';
+import { checkBreakdown, findingsByRow, CoverageFinding } from '../services/CoverageCheck';
 
 interface FunctionBreakdownModalProps {
     sub: Subsystem;
@@ -30,16 +31,26 @@ export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
 }) => {
     const rows: BreakdownRow[] = sub.functionBreakdown ?? [];
 
-    // Build a lookup: rowId → matched Failure desc[]
+    // Build a lookup: rowId → matched Failure[].
+    //
+    // This used to map to f.desc and hand the table bare strings, so failedState,
+    // parameter, and needsReview never reached the render. A placeholder was
+    // indistinguishable from analysis on precisely the screen where the breakdown
+    // gets judged. Carry the whole object.
     const matchMap = React.useMemo(() => {
         if (!matchResults) return null;
-        const failById = new Map(sub.failures.map(f => [f.id, f.desc]));
-        const map = new Map<string, string[]>();
+        const failById = new Map(sub.failures.map(f => [f.id, f]));
+        const map = new Map<string, Failure[]>();
         for (const m of matchResults) {
-            map.set(m.rowId, m.failureIds.map(id => failById.get(id) ?? '').filter(Boolean));
+            map.set(m.rowId, m.failureIds.map(id => failById.get(id)).filter(Boolean) as Failure[]);
         }
         return map;
     }, [matchResults, sub.failures]);
+
+    const coverage = React.useMemo(
+        () => findingsByRow(checkBreakdown(rows, sub.failures)),
+        [rows, sub.failures]
+    );
 
     return (
         <div
@@ -141,6 +152,35 @@ export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
                                                             </span>
                                                         )}
                                                     </div>
+                                                    {/* The parsed requirements are what the failures are derived from,
+                                                        so showing them makes an uncovered one visible as a gap rather
+                                                        than as an absence nobody can see. */}
+                                                    {(r.standardParameters?.length ?? 0) > 0 && (
+                                                        <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                                                            {r.standardParameters!.map((p, i) => (
+                                                                <span
+                                                                    key={i}
+                                                                    title={`Requirement: ${p.name} — ${p.value}${p.unit ? ' ' + p.unit : ''} (${p.bound})`}
+                                                                    className="text-[9px] px-1.5 py-0.5 rounded border border-slate-200 bg-white text-slate-500 font-mono"
+                                                                >
+                                                                    {p.name} {p.value}{p.unit ? ` ${p.unit}` : ''}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                    {(coverage.get(r.id)?.length ?? 0) > 0 && (
+                                                        <ul className="mt-1.5 space-y-0.5">
+                                                            {coverage.get(r.id)!.map((c: CoverageFinding, i: number) => (
+                                                                <li
+                                                                    key={i}
+                                                                    title={c.detail}
+                                                                    className={`text-[10px] leading-snug ${c.severity === 'conflict' ? 'text-rose-600' : c.severity === 'gap' ? 'text-amber-600' : 'text-slate-400'}`}
+                                                                >
+                                                                    {c.severity === 'info' ? '·' : '!'} {c.label} — {c.detail}
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    )}
                                                 </td>
                                                 <td className="p-2 align-top">
                                                     <div className="flex items-start justify-between gap-2">
@@ -148,13 +188,34 @@ export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
                                                             {matchMap === null ? (
                                                                 <span className="text-slate-300 text-xs italic">—</span>
                                                             ) : matched && matched.length > 0 ? (
-                                                                <ul className="space-y-0.5">
-                                                                    {matched.map((desc, i) => (
-                                                                        <li key={i} className="text-slate-700 text-xs">{desc}</li>
+                                                                <ul className="space-y-1">
+                                                                    {matched.map(f => (
+                                                                        <li key={f.id} className="text-xs">
+                                                                            <span className={f.needsReview ? 'text-slate-400 line-through' : 'text-slate-700'}>{f.desc}</span>
+                                                                            {(f.failedState || f.parameter || f.needsReview) && (
+                                                                                <span className="inline-flex flex-wrap items-center gap-1 ml-1.5 align-middle">
+                                                                                    {f.parameter && (
+                                                                                        <span title="Requirement this failure violates" className="text-[9px] px-1 py-0.5 rounded bg-slate-100 text-slate-500 font-mono">
+                                                                                            {f.parameter}
+                                                                                        </span>
+                                                                                    )}
+                                                                                    {f.failedState && (
+                                                                                        <span title="Direction the requirement is violated in (JA1011 5.2)" className="text-[9px] uppercase tracking-wide px-1 py-0.5 rounded bg-slate-100 text-slate-500 font-semibold">
+                                                                                            {f.failedState.replace('_', ' ')}
+                                                                                        </span>
+                                                                                    )}
+                                                                                    {f.needsReview && (
+                                                                                        <span title="Template text saved before generation was fixed — a placeholder, not analysis. Regenerate this subsystem." className="text-[9px] uppercase tracking-wide px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-semibold">
+                                                                                            Placeholder
+                                                                                        </span>
+                                                                                    )}
+                                                                                </span>
+                                                                            )}
+                                                                        </li>
                                                                     ))}
                                                                 </ul>
                                                             ) : (
-                                                                <span className="text-amber-600 text-xs font-medium">No match found</span>
+                                                                <span className="text-amber-600 text-xs font-medium">No failures generated</span>
                                                             )}
                                                         </div>
                                                         <button

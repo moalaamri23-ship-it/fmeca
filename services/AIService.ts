@@ -1,4 +1,4 @@
-import { ContextData, FunctionClass, FailedStateType } from '../types';
+import { ContextData, FunctionClass, FailedStateType, StandardParameter } from '../types';
 import { RICH_LIBRARY } from '../constants';
 import { buildCopilotPrompt, parseCopilotReply, getCopilotSessionId } from './copilotHelper';
 import {
@@ -135,7 +135,7 @@ const FUNCTION_DESCRIPTION_TECHNICAL_RULES = `Function description rules:
   2. Controlled performance: variables, setpoints, sequences, or demand response it must maintain.
   3. Operating envelope: measurable ranges, design ratings, or limits within which operation must stay acceptable.
   4. Containment: what the subsystem must hold in or keep separated — process fluid, lubricant, pressure, heat.
-  5. Protection and duty: protective functions it must perform, and its operating duty (continuous, standby, lead/lag, load/unload, intermittent) when the system context states one.
+  5. Protection and duty: protective functions it must perform, and its operating duty (continuous, standby, lead/lag, load/unload, intermittent) when the system context states one. State the duty as a condition on what the subsystem must deliver — "maintains supply when the duty unit fails", "holds discharge pressure by loading and unloading" — never as a bare arrangement. The duty exists here so a later step can tell which functions are hidden and what their performance standard is; an arrangement written as a deliverable becomes a function that only restates itself.
 - Write the performance standard as an exact value whenever Specs provides one. If Specs is empty or generic, do not invent numbers; use "required", "specified", or "operating range".
 - Absorbed power, design pressure, design temperature, and set points are ratings, limits, or protection thresholds — never deliverables. Do not write them as something the subsystem "delivers" or "provides".
 - Do not include model numbers, serial numbers, or equipment identifiers; they are identity, not function.
@@ -160,31 +160,59 @@ const FUNCTION_BREAKDOWN_TECHNICAL_RULES = `Function breakdown rules (SAE JA1011
 - Each row is one functional verb plus one object. Do not start with "to" or a gerund.
 - The operating envelope is NOT a function. Put measurable ranges, ratings, and limits in the row's "standard" field, which is where JA1011 puts a performance standard.
 - Equipment condition and integrity expectations are NOT functions. Do not create rows for vibration, wear, corrosion, or overheating — those are failure modes and belong to a later step.
+- A design arrangement is NOT a function. "2 x 100%", duty/standby, lead/lag, N+1, parallel trains, and installed spares describe HOW a duty is met, not what the subsystem does. Write the outcome the arrangement exists to deliver as the function — for a duty/standby pair that outcome is maintaining the service when the duty unit fails — and put the arrangement wording in "standard". A function written as an arrangement produces a functional failure that is only the arrangement restated.
+- Duty rotation, wear equalisation, and run-hour balancing are operating strategies, NOT functions. Their failure accelerates wear, which is a cause of other failure modes; it is not a functional failure. Do not create a row for them.
 - Include only functions inside the subsystem boundary and supported by the function description, specs, or system context.
 - Do not create rows from causes, effects, alarms, inspections, repairs, tests, tags, personnel instructions, or maintenance tasks.
-- Cap the row count by function, not by failure. A function that yields several failed states is still one row.`;
+- Cap the row count by function, not by failure. A function that yields several failed states is still one row.
 
-// JA1011 5.2 requires all failed states per function, not one representative
-// failure. JA1012 enumerates them; this is that list. Generating one failure
-// per function silently under-reports the analysis by roughly two thirds.
-const JA1011_FAILED_STATE_RULES = `Failed-state enumeration (SAE JA1011 5.2):
-For each function, identify EVERY failed state the function and its standard actually support. Use only these types:
-- "total": the function is not performed at all.
-- "partial": the function is performed below the required standard.
-- "upper_limit": the function is performed in excess of the required upper limit, including failure to stop, unload, or shut down.
-- "lower_limit": the function is performed below a stated lower limit, where that is distinct from partial loss.
-- "intermittent": the function is performed erratically or only some of the time.
-- "on_demand": the function is demanded intermittently and is not performed when called. Use this for standby, protective, and any other function whose failure is not evident in normal operation.
-Rules:
-- Emit a failed state only when the function and its standard genuinely support it. Never pad to cover all six.
-- Use the quantified standard in the failure text whenever the row provides one — "below 8.5 barg" and "above 9.0 barg" are auditable, "outside the operating range" is not.
-- A protection or standby function almost always has an "on_demand" failed state. A continuously operating function usually does not.
-- Never restate the same failed state twice in different words.`;
+Performance standard parameters:
+- Split each row's standard into its separate measurable requirements and return them in "standardParameters". "599 Sm3/hr at 130 psig (9 barg), 60 deg C" holds three requirements, not one.
+- Each parameter carries: "name" (what is required — flow, discharge pressure, air quality), "value" (as written), "unit" (or null when qualitative), and "bound".
+- "bound" says which way the parameter can be violated: "min" when only falling below it is a failure, "max" when only exceeding it is, "target" or "range" when both are, "spec" for a conformance requirement with no magnitude such as air quality or cleanliness.
+- A quality, grade, or cleanliness requirement stated in the function is a parameter in its own right. Do not fold it into a flow or pressure parameter.
+- Take values from Specs verbatim. Do not invent a parameter that the standard does not state, and do not drop one that it does.
+- When the standard is qualitative and holds no measurable requirement, return an empty "standardParameters" array rather than inventing values.`;
+
+// JA1011 5.2 requires all failed states per function. The earlier version of
+// this block listed six failed-state types and asked the model to work through
+// them, which is a template: every function came back with roughly the same
+// spread whatever the equipment could actually do, and two compressors in
+// different services produced identical failures.
+//
+// WHAT a function can fail at is its own performance standard -- flow,
+// pressure, temperature, quality for an air compressor; leak rate and leaked
+// medium for a containment duty. Those dimensions are context and cannot come
+// from a list. The failed-state types are only the DIRECTIONS a single
+// parameter can be violated in. So enumeration runs parameter x credible
+// direction, and the count of failures is an output, never an input.
+const JA1011_FAILED_STATE_RULES = `Failed-state derivation (SAE JA1011 5.2):
+Do NOT work through a list of failure types. Derive the failures from the function's own performance standard.
+
+Method, applied per row:
+1. Take the row's "standardParameters". Each is one requirement that can be violated independently.
+2. For each parameter, ask which of these directions is physically credible for THIS parameter in THIS service. The parameter's "bound" limits what is even askable — a "min" bound makes falling below credible and exceeding usually not; a "max" bound the reverse; "target" and "range" allow both; "spec" allows conformance loss only.
+   - "total": the function delivers nothing at all against this parameter.
+   - "partial": delivered below the required value.
+   - "upper_limit": delivered above the required value, including failing to stop, unload, or shut down.
+   - "intermittent": delivered erratically or only some of the time.
+3. Emit one failure per credible parameter-and-direction pair, and nothing else. State the reason a direction was rejected in "skipped" rather than emitting a weak failure to fill space.
+4. Set "parameter" on every failure to the parameter name it violates, so two failures can share a direction without being duplicates.
+
+Hard rules:
+- There is NO target count. A function with one parameter and one credible direction correctly yields ONE failure. A function with four parameters may yield six. Never add a failure to reach a number, and never drop a credible one to stay under a number.
+- Do not emit "lower_limit". Below the requirement is "partial"; the distinction was never real.
+- "on_demand" is not a direction. Emit it only for a row whose "evidence" is "hidden", where it REPLACES that row's "total" failure — a hidden function's total loss is discovered on demand. Never emit both "total" and "on_demand" for the same row, and never emit "on_demand" for an evident function.
+- Use the parameter's own value in the failure text. "below 599 Sm3/hr" and "above 12.0 barg" are auditable; "outside the operating range" is not.
+- When the row has no parameters, the standard is qualitative. Emit total loss only, and do not invent values to enumerate against.
+- Two failures on the same row must differ in parameter or in direction. Identical states reworded are duplicates.`;
 
 const FUNCTIONAL_FAILURE_TECHNICAL_RULES = `Functional failure rules:
 - Describe required performance not achieved, not a physical mechanism.
 - Link directly to the subsystem function or decomposed function.
-- Use concise patterns such as "Fails to ...", "Unable to ...", "Does not ...", "Provides insufficient ...", "Provides excessive ...", "Operates intermittently ...", or "Operates when not required".
+- State the failed condition plainly. Openings such as "Fails to ...", "Unable to ...", "Does not ...", "Delivers below ...", "Supplies above ...", "Operates intermittently ...", or "Operates when not required" all work; choose whichever states this particular failure most directly rather than forcing every failure into one opening.
+- Never restate the function with "Fails to" prefixed to it. "Fails to supply air 599 Sm3/hr at 130 psig" is the function negated, not a failed state. Name what was not achieved and by which direction: "Supplies instrument air below 599 Sm3/hr".
+- Do not name the device that performs the duty — the duty fails, not the valve or the starter. Write "Does not relieve overpressure at 12.0 barg on demand", not "PSV fails to open".
 - Do not include causes, effects, failure modes, controls, mitigations, maintenance tasks, tags, equipment IDs, downstream narrative, or invented values.`;
 
 const FAILURE_MODE_TECHNICAL_RULES = `Failure mode / cause / effect rules:
@@ -769,6 +797,15 @@ export const AIService = {
         return s.replace(/\s+/g, ' ').trim();
     },
 
+    /**
+     * Demo-mode fixture ONLY.
+     *
+     * This is the function restated as a failure, which is the textbook bad FF.
+     * It is acceptable in the keyless demo path, where there is no real analysis
+     * for it to be confused with and the rows are flagged needsReview. It must
+     * never be used to paper over a rejected generation on a real run — see
+     * cleanFunctionalFailureText for what that cost.
+     */
     fallbackFunctionalFailure(row?: { function?: string; standard?: string }): string {
         const fn = this.normalizeFunctionPhraseForFailure(row?.function || 'perform required function');
         const standard = this.cleanSingleFieldText(row?.standard || '');
@@ -778,11 +815,37 @@ export const AIService = {
         return `Fails to ${combined}`.replace(/\s+/g, ' ').trim();
     },
 
-    cleanFunctionalFailureText(text: string, row?: { function?: string; standard?: string }): string {
+    /**
+     * Clean a generated functional failure, or reject it.
+     *
+     * Returns null when the text is unusable. It used to return a template built
+     * from the row instead, and that was the single most damaging line in the
+     * generation chain:
+     *
+     *   - The template is the function with "Fails to" glued on the front, which
+     *     is exactly the FMECA error the rest of these rules exist to prevent.
+     *     When generation broke, the output did not degrade toward nothing, it
+     *     degraded toward a confident wrong answer.
+     *   - It reads as real work. Right values, right register, grammatical. It is
+     *     optimised for surviving review, which is the opposite of what a failure
+     *     signal should do.
+     *   - Every reject for one row produced the SAME string, so the later dedupe
+     *     collapsed them to one. A row that lost three of four failures looked
+     *     like a row that only had two.
+     *   - Substitution happens after _withRetry, so a rejected generation looked
+     *     like a successful call and nothing retried.
+     *
+     * The old accept test was an allowlist of eight openings, which only covered
+     * total and partial loss. Every excess-side, erratic, and containment-leak
+     * wording the failed-state rules ask for was rejected on arrival. The test is
+     * now inverted: reject text that is a failure MODE, a cause, or an effect,
+     * and accept anything that states unmet performance however it opens.
+     */
+    cleanFunctionalFailureText(text: string, _row?: { function?: string; standard?: string }): string | null {
         let s = this.cleanSingleFieldText(text);
         const leakPattern = /\b(?:wait|let me|i need|i should|i think|i will|reconsider|analysis|reasoning|scratchpad|thought process|internal note|actually)\b/i;
         if (leakPattern.test(s)) {
-            const candidates = Array.from(s.matchAll(/\b(?:Fails to|Unable to|Does not|Provides insufficient|Provides excessive|Operates intermittently|Operates when not required|Performs [^.;!?]+)\b[^.;!?]*/gi))
+            const candidates = Array.from(s.matchAll(/\b(?:Fails to|Unable to|Does not|Provides insufficient|Provides excessive|Delivers|Supplies|Operates|Leaks|Releases|Performs)\b[^.;!?]*/gi))
                 .map(m => this.cleanSingleFieldText(m[0]))
                 .filter(Boolean);
             s = candidates.length ? candidates[candidates.length - 1] : '';
@@ -793,13 +856,55 @@ export const AIService = {
             .replace(/\s+/g, ' ')
             .trim();
 
+        if (!s || leakPattern.test(s)) return null;
         const words = s.split(/\s+/).filter(Boolean);
-        const startsLikeFailure = /^(Fails to|Unable to|Does not|Provides insufficient|Provides excessive|Operates intermittently|Operates when not required|Performs\b)/i.test(s);
-        const invalid = !s || !startsLikeFailure || words.length > 22 || leakPattern.test(s);
-        return invalid ? this.fallbackFunctionalFailure(row) : s;
+        if (words.length < 3 || words.length > 22) return null;
+
+        // A cause explains why; a functional failure states what was not achieved.
+        if (/\b(?:due to|because of|caused by|resulting from|as a result of|owing to)\b/i.test(s)) return null;
+        // An effect or a maintenance action is a later column, not this one.
+        if (/\b(?:production loss|downtime|requires? (?:repair|replacement|inspection)|inspection|preventive maintenance|pm task|mitigation|recommend(?:ed|ation)?)\b/i.test(s)) return null;
+        // A bare mechanism with no statement of unmet performance is a failure mode.
+        if (/^(?:seized|worn|cracked|ruptured|corroded|eroded|contaminated|misaligned|blocked|restricted|stuck|fouled|leaking|broken|loose|damaged)\b/i.test(s)) return null;
+
+        return s;
     },
 
-    cleanBreakdownRow(row: { function: string; standard: string; snippet: string; functionClass?: string; quantified?: boolean; evidence?: string }): { function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden' } {
+    /**
+     * Normalise the parameters parsed out of a performance standard.
+     *
+     * A parameter with no name or no value cannot be enumerated against, so it
+     * is dropped rather than carried as an empty slot that later reads as a
+     * coverage gap. The bound falls back to "target" — the permissive choice,
+     * which asks about both directions — because guessing "min" would silently
+     * suppress the excess-side failure.
+     */
+    cleanStandardParameters(raw: unknown): StandardParameter[] {
+        if (!Array.isArray(raw)) return [];
+        const validBounds: StandardParameter['bound'][] = ['min', 'max', 'target', 'range', 'spec'];
+        const seen = new Set<string>();
+        return raw
+            .map((p: any) => {
+                const name = this.cleanSingleFieldText(String(p?.name ?? '')).toLowerCase();
+                const value = this.cleanSingleFieldText(String(p?.value ?? ''));
+                const unitRaw = this.cleanSingleFieldText(String(p?.unit ?? ''));
+                const claimed = String(p?.bound ?? '').toLowerCase().trim() as StandardParameter['bound'];
+                return {
+                    name,
+                    value,
+                    unit: unitRaw && unitRaw.toLowerCase() !== 'null' ? unitRaw : null,
+                    bound: validBounds.includes(claimed) ? claimed : 'target',
+                };
+            })
+            .filter(p => {
+                if (!p.name || !p.value) return false;
+                if (seen.has(p.name)) return false;
+                seen.add(p.name);
+                return true;
+            });
+    },
+
+    cleanBreakdownRow(row: { function: string; standard: string; snippet: string; functionClass?: string; quantified?: boolean; evidence?: string; standardParameters?: unknown }): { function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden'; standardParameters: StandardParameter[] } {
         const fn = this.normalizeFunctionPhraseForFailure(row.function);
         const standard = this.cleanSingleFieldText(row.standard)
             .replace(/^(?:to|and)\s+/i, '')
@@ -807,6 +912,7 @@ export const AIService = {
             .trim();
         const validClasses: FunctionClass[] = ['primary', 'containment', 'protection', 'control', 'support', 'efficiency'];
         const claimedClass = String(row.functionClass || '').toLowerCase().trim() as FunctionClass;
+        const standardParameters = this.cleanStandardParameters(row.standardParameters);
         return {
             function: fn,
             standard,
@@ -814,8 +920,11 @@ export const AIService = {
             functionClass: validClasses.includes(claimedClass) ? claimedClass : 'primary',
             // Trust a digit in the standard over the model's own claim — JA1011 5.1.2
             // asks for a measurable standard, and "quantified: true" on prose is worthless.
-            quantified: /\d/.test(standard),
+            // A parsed parameter also counts: "instrument grade" carries no digit but is
+            // a real, auditable requirement.
+            quantified: /\d/.test(standard) || standardParameters.some(p => /\d/.test(p.value)),
             evidence: String(row.evidence || '').toLowerCase().trim() === 'hidden' ? 'hidden' : 'evident',
+            standardParameters,
         };
     },
 
@@ -1278,7 +1387,10 @@ ${formatRule}`;
             apiKey: key,
             responseFormat: 'text'
         });
-        if (isFunctionalFailureField) return this.cleanFunctionalFailureText(generated, { function: (contextData as any).subsystemFunction || (contextData as any).function || '', standard: '' });
+        // This is the single-field wand behind a text box the user is editing. A
+        // rejected clean leaves the box untouched rather than writing a template
+        // into it — the user asked for a suggestion, not a placeholder.
+        if (isFunctionalFailureField) return this.cleanFunctionalFailureText(generated) ?? '';
         // Specs was the only text field with no cleaner, so fences, bold markers and a
         // "Specs:" prefix reached state, the Excel cell, the map view, and every
         // downstream prompt that interpolates it.
@@ -1398,7 +1510,7 @@ ${formatRule}`;
         subsystemName: string;
         subsystemSpecs: string;
         funcDesc: string;
-        rows: Array<{ id: string; function: string; standard: string; snippet: string; functionClass?: FunctionClass; quantified?: boolean; evidence?: 'evident' | 'hidden' }>;
+        rows: Array<{ id: string; function: string; standard: string; snippet: string; functionClass?: FunctionClass; quantified?: boolean; evidence?: 'evident' | 'hidden'; standardParameters?: StandardParameter[] }>;
         existingFailures: string[];
         key: string;
         modelName: string;
@@ -1407,91 +1519,159 @@ ${formatRule}`;
         powerAutomateUrl?: string;
         systemContext?: string;
         sessionId?: string;
-    }): Promise<{ failures: Array<{ rowId: string; desc: string; sourceSnippet?: string; failedState?: FailedStateType; needsReview?: boolean }> }> {
-        const { systemName, subsystemName, subsystemSpecs, funcDesc, rows, existingFailures, key, modelName, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', systemContext = '', sessionId } = args;
-        if (!rows.length) return { failures: [] };
+        siblingSubsystems?: string[];
+    }): Promise<{
+        failures: Array<{ rowId: string; desc: string; sourceSnippet?: string; failedState?: FailedStateType; parameter?: string; needsReview?: boolean }>;
+        /** Generations thrown away by the cleaner, keyed by rowId. Reported, never replaced with a template. */
+        rejected: Array<{ rowId: string; raw: string }>;
+    }> {
+        const { systemName, subsystemName, subsystemSpecs, funcDesc, rows, existingFailures, key, modelName, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', systemContext = '', sessionId, siblingSubsystems = [] } = args;
+        if (!rows.length) return { failures: [], rejected: [] };
         if ((!key || key.length < 10) && aiProvider !== 'copilot') {
-            return { failures: rows.map(r => ({ rowId: r.id, desc: `Fails to ${r.function} ${r.standard}`.replace(/\s+/g, ' ').trim(), sourceSnippet: r.snippet, failedState: 'total' as FailedStateType, needsReview: true })) };
+            return {
+                failures: rows.map(r => ({ rowId: r.id, desc: this.fallbackFunctionalFailure(r), sourceSnippet: r.snippet, failedState: 'total' as FailedStateType, needsReview: true })),
+                rejected: []
+            };
         }
         const existingBlock = existingFailures.length > 0
             ? `Existing Functional Failures already defined (DO NOT repeat or closely resemble):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n`
             : '';
+        const rowBlock = JSON.stringify(rows.map(r => ({
+            rowId: r.id,
+            function: r.function,
+            standard: r.standard,
+            standardParameters: r.standardParameters ?? [],
+            functionClass: r.functionClass || 'primary',
+            evidence: r.evidence || 'evident',
+            snippet: r.snippet,
+        })), null, 2);
+
         const prompt = `Context: System "${systemName}", Subsystem "${subsystemName}".
 Subsystem Specs: "${subsystemSpecs || 'N/A'}"
 Subsystem Function: "${funcDesc}"
-
+${buildSiblingSubsystemBlock(siblingSubsystems, 'functional failures')}
 Function breakdown rows:
-${JSON.stringify(rows.map(r => ({ rowId: r.id, function: r.function, standard: r.standard, functionClass: r.functionClass || 'primary', evidence: r.evidence || 'evident', snippet: r.snippet })), null, 2)}
+${rowBlock}
 
-${existingBlock}Task: For EACH breakdown row, generate every Functional Failure that row's function and standard genuinely support. A row normally yields 2 to 4 failures; one is correct only when the function truly has a single failed state.
+${existingBlock}Task: For EACH breakdown row, derive the Functional Failures that row's own performance standard supports — no more, no fewer.
 ${FMECA_HIERARCHY_RULES}
 ${FMECA_CONCISE_WORDING_RULES}
 ${FUNCTIONAL_FAILURE_TECHNICAL_RULES}
 ${JA1011_FAILED_STATE_RULES}
-Use each row's function label and performance standard as the primary source. The standard defines what "failed" means; do not ignore it.
-Each row carries "functionClass" and "evidence". A row with evidence "hidden" — a standby or protective duty — must include an "on_demand" failure. A "protection" or "containment" row must not be reduced to a single generic loss.
+Each row's "standardParameters" is the list of requirements to enumerate against. Where it is empty the standard is qualitative: emit total loss only and do not invent values.
+"evidence" tells you how the failure is discovered, not how many failures there are. A hidden row's total loss is written as an on-demand failure and REPLACES the total row; it is not an extra one.
 Use the full subsystem function only to resolve ambiguity, not to add extra details.
 Write short professional FMECA failure states, not narratives.
 Length per failure: 6-14 words.
 Repeat the same rowId once per failure generated for that row.
-Do NOT generate duplicate or closely similar failures, within a row or across rows.
 
-Return ONLY strict JSON:
-{ "failures": [ { "rowId": "same rowId from input", "failedState": "total|partial|upper_limit|lower_limit|intermittent|on_demand", "desc": "Functional Failure", "sourceSnippet": "source snippet from row" } ] }`;
-        // Functional Failure generation must remain independent from historical
-        // failed-state labels. Keep parameter for API compatibility.
-        const content = prompt;
-        try {
-            const parsed = await this._withRetry(async () => {
-                const res = await this.chat({
-                    feature: 'ff-batch-generation',
-                    provider: (aiProvider || inferProvider(key)) as any,
-                    azureEndpoint: azureEndpoint || undefined,
-                    powerAutomateUrl: powerAutomateUrl || undefined,
-                    sessionId,
-                    model: modelName,
-                    messages: [{ role: 'user', content }],
-                    mode: 'ai',
-                    refText: '',
-                    apiKey: key,
-                    responseFormat: 'json'
-                });
-                return this.extractJSON(res);
+Return ONLY strict JSON. "parameter" names the standardParameters entry the failure violates, or "" when the row has no parameters. "skipped" records directions you considered and rejected, so the count reflects the equipment rather than a quota:
+{
+  "failures": [ { "rowId": "same rowId from input", "parameter": "discharge pressure", "failedState": "total|partial|upper_limit|intermittent|on_demand", "desc": "Functional Failure", "sourceSnippet": "source snippet from row" } ],
+  "skipped": [ { "rowId": "...", "parameter": "...", "failedState": "...", "reason": "why this direction is not credible here" } ]
+}`;
+
+        // systemContext carries the operating philosophy — redundancy, duty, and
+        // control behaviour. It used to be accepted and then dropped on the floor
+        // here, which is why a standby duty had nothing to establish itself
+        // against at the step that decides whether a failure is discovered on
+        // demand.
+        const content = prompt + (systemContext ? '\n\n' + systemContext : '');
+
+        const validRowIds = new Set(rows.map(r => r.id));
+        const validStates: FailedStateType[] = ['total', 'partial', 'upper_limit', 'lower_limit', 'intermittent', 'on_demand'];
+
+        const callOnce = (messages: Array<{ role: string; content: string }>) => this._withRetry(async () => {
+            const res = await this.chat({
+                feature: 'ff-batch-generation',
+                provider: (aiProvider || inferProvider(key)) as any,
+                azureEndpoint: azureEndpoint || undefined,
+                powerAutomateUrl: powerAutomateUrl || undefined,
+                sessionId,
+                model: modelName,
+                messages: messages as any,
+                mode: 'ai',
+                refText: '',
+                apiKey: key,
+                responseFormat: 'json'
             });
-            const failures = Array.isArray(parsed?.failures) ? parsed.failures : [];
-            const validRowIds = new Set(rows.map(r => r.id));
-            const validStates: FailedStateType[] = ['total', 'partial', 'upper_limit', 'lower_limit', 'intermittent', 'on_demand'];
-            const seen = new Set<string>();
-            return {
-                failures: failures
-                    .map((f: any) => {
-                        const rowId = String(f?.rowId ?? f?.row_id ?? '').trim();
-                        const row = rows.find(r => r.id === rowId);
-                        const raw = String(f?.desc ?? f?.failure ?? f?.functionalFailure ?? '').trim();
-                        const desc = this.cleanFunctionalFailureText(raw, row);
-                        const claimedState = String(f?.failedState ?? f?.failed_state ?? '').toLowerCase().trim() as FailedStateType;
-                        return {
-                            rowId,
-                            desc,
-                            // The cleaner silently swaps unusable output for a template. Flag it
-                            // so a placeholder is never mistaken for analysis on review.
-                            needsReview: Boolean(row) && desc === this.fallbackFunctionalFailure(row),
-                            failedState: validStates.includes(claimedState) ? claimedState : undefined,
-                            sourceSnippet: String(f?.sourceSnippet ?? f?.source_snippet ?? '').trim(),
-                        };
-                    })
-                    .filter((f: any) => {
-                        if (!validRowIds.has(f.rowId) || !f.desc) return false;
-                        // Several failures now share a rowId, so dedupe on the text itself.
-                        const key = f.desc.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-                        if (seen.has(key)) return false;
-                        seen.add(key);
-                        return true;
-                    })
-            };
+            return this.extractJSON(res);
+        });
+
+        type Kept = { rowId: string; desc: string; sourceSnippet?: string; failedState?: FailedStateType; parameter?: string };
+        const kept: Kept[] = [];
+        const rejected: Array<{ rowId: string; raw: string }> = [];
+        // Uniqueness is rowId + parameter + failed state. Text alone was wrong in
+        // both directions: it let the same state through twice reworded, and — once
+        // every reject collapsed to one template string — it deleted the evidence
+        // that anything had been lost.
+        const seen = new Set<string>();
+
+        const absorb = (parsed: any) => {
+            const list = Array.isArray(parsed?.failures) ? parsed.failures : [];
+            for (const f of list) {
+                const rowId = String(f?.rowId ?? f?.row_id ?? '').trim();
+                if (!validRowIds.has(rowId)) continue;
+                const raw = String(f?.desc ?? f?.failure ?? f?.functionalFailure ?? '').trim();
+                const desc = this.cleanFunctionalFailureText(raw);
+                if (!desc) {
+                    if (raw) rejected.push({ rowId, raw });
+                    continue;
+                }
+                const claimed = String(f?.failedState ?? f?.failed_state ?? '').toLowerCase().trim() as FailedStateType;
+                // "lower_limit" never meant anything distinct from "partial".
+                const failedState = claimed === 'lower_limit'
+                    ? 'partial'
+                    : validStates.includes(claimed) ? claimed : undefined;
+                const parameter = this.cleanSingleFieldText(String(f?.parameter ?? '')).toLowerCase() || undefined;
+                const dedupeKey = `${rowId}|${parameter ?? ''}|${failedState ?? desc.toLowerCase()}`;
+                if (seen.has(dedupeKey)) continue;
+                seen.add(dedupeKey);
+                kept.push({
+                    rowId,
+                    desc,
+                    failedState,
+                    parameter,
+                    sourceSnippet: String(f?.sourceSnippet ?? f?.source_snippet ?? '').trim(),
+                });
+            }
+        };
+
+        try {
+            absorb(await callOnce([{ role: 'user', content }]));
+
+            // One repair pass. Rejects are almost always a wording mismatch rather
+            // than a reasoning failure, and the old code could never retry them: it
+            // substituted a template after _withRetry had already seen a successful
+            // call, so the loss was invisible to the retry logic and to the user.
+            if (rejected.length) {
+                const repairList = rejected
+                    .map(r => `- rowId "${r.rowId}": ${r.raw}`)
+                    .join('\n');
+                const repair = `${rejected.length} of your functional failures were rejected as unusable:
+
+${repairList}
+
+A failure is rejected when it states a cause ("due to", "caused by"), an effect or a maintenance action, or a bare mechanism ("seized", "worn", "leaking") instead of performance that was not achieved. It is also rejected when it runs past 22 words.
+
+Restate ONLY those failures as failed states. Keep the same rowId, parameter, and failedState for each. Do not add new failures, and do not repeat the ones that were accepted.
+
+Return the same JSON shape: { "failures": [ ... ] }`;
+                const before = rejected.length;
+                const recovered = await callOnce([
+                    { role: 'user', content },
+                    { role: 'assistant', content: JSON.stringify({ failures: kept }) },
+                    { role: 'user', content: repair },
+                ]);
+                rejected.length = 0;
+                absorb(recovered);
+                if (rejected.length) console.warn(`[generateFFsForBreakdownRows] ${rejected.length}/${before} still unusable after repair`);
+            }
+
+            return { failures: kept, rejected };
         } catch (e) {
             console.warn('[generateFFsForBreakdownRows] failed:', e);
-            return { failures: [] };
+            return { failures: kept, rejected };
         }
     },
 
@@ -2629,22 +2809,34 @@ Output format:
         azureEndpoint: string = '',
         powerAutomateUrl: string = '',
         systemContext: string = '',
-        sessionId?: string
+        sessionId?: string,
+        rowEvidence: 'evident' | 'hidden' = 'evident',
+        rowParameters: StandardParameter[] = []
     ): Promise<string> {
         if ((!key || key.length < 10) && aiProvider !== 'copilot') return '';
         const existingBlock = existingFailures.length > 0
             ? `Existing Functional Failures already defined (DO NOT repeat or closely resemble):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n`
+            : '';
+        // This is the manual top-up button beside a row. It generates one failure by
+        // design, but it used to do so without the derivation rules, so the only
+        // thing it could ever add was another total-loss line — useless for filling
+        // the gap a user opens it to fill. It now sees the row's parameters and what
+        // is already there, and is asked for the strongest remaining gap.
+        const parameterBlock = rowParameters.length
+            ? `Requirements inside that standard:\n${JSON.stringify(rowParameters, null, 2)}\n\n`
             : '';
         const prompt = `Context: System "${systemName}", Subsystem "${subsystemName}".
 Subsystem Specs: "${subsystemSpecs || 'N/A'}"
 Subsystem Function: "${funcDesc}"
 Function label (black text): "${breakdownSnippet}"
 Performance/condition standard (grey text): "${breakdownStandard || 'N/A'}"
+This function is ${rowEvidence}.
 
-${existingBlock}Task: Generate ONE Functional Failure that specifically addresses the loss or degradation of this functional aspect.
+${parameterBlock}${existingBlock}Task: Generate ONE Functional Failure for this row — the most significant failed state the standard supports that is NOT already covered by the list above. Pick the requirement and direction that is still missing.
 ${FMECA_HIERARCHY_RULES}
 ${FMECA_CONCISE_WORDING_RULES}
 ${FUNCTIONAL_FAILURE_TECHNICAL_RULES}
+${JA1011_FAILED_STATE_RULES}
 Use the function label and performance/condition standard as the primary source. The standard defines what "failed" means; do not ignore it.
 Use the full subsystem function only to resolve ambiguity, not to add extra details.
 Write a short professional FMECA failure state, not a narrative.
@@ -2666,7 +2858,8 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
                 apiKey: key,
                 responseFormat: 'text'
             }));
-            return this.cleanFunctionalFailureText(res, { function: breakdownSnippet, standard: breakdownStandard });
+            // Empty string, not a template: the caller leaves the row alone.
+            return this.cleanFunctionalFailureText(res) ?? '';
         } catch {
             return '';
         }
@@ -2684,8 +2877,9 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
         systemContext: string = '',
         detailLevel: 'normal' | 'detailed' = 'detailed',
         subsystemSpecs: string = '',
-        sessionId?: string
-    ): Promise<Array<{ function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden' }>> {
+        sessionId?: string,
+        siblingSubsystems: string[] = []
+    ): Promise<Array<{ function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden'; standardParameters: StandardParameter[] }>> {
         if (!funcDesc?.trim()) return [];
         // Every other call in the generation chain answers with a fixture when
         // there is no key; this one returned nothing, which dead-ended Auto-Fill
@@ -2705,13 +2899,20 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
                     snippet: part,
                     functionClass: 'primary' as FunctionClass,
                     quantified: /\d/.test(part),
-                    evidence: 'evident' as const
+                    evidence: 'evident' as const,
+                    standardParameters: [] as StandardParameter[]
                 }));
         }
 
         const contextLine = (subsystemName || projectName)
             ? `Subsystem: "${subsystemName}"${projectName ? ` within System: "${projectName}"` : ''}\n\n`
             : '';
+
+        // Step one already knows which subsystems sit alongside this one; step two
+        // did not, so a duty delivered through a neighbouring subsystem's hardware
+        // (a standby start through the MCC, a changeover through the control system)
+        // had nothing to check itself against and became a row here.
+        const siblingBlock = buildSiblingSubsystemBlock(siblingSubsystems, 'functions');
 
         // Without specs the breakdown can only quantify what survived into the
         // function prose, so every standard degraded to "within operating range".
@@ -2728,7 +2929,7 @@ ${FMECA_HIERARCHY_RULES}
 ${FMECA_CONCISE_WORDING_RULES}
 ${FUNCTION_BREAKDOWN_TECHNICAL_RULES}
 
-${contextLine}${specsBlock}Function description:
+${contextLine}${specsBlock}${siblingBlock}Function description:
 """
 ${funcDesc}
 """
@@ -2738,13 +2939,16 @@ Use this method silently:
 2. Identify the primary function: what the subsystem exists to deliver.
 3. Identify every secondary function the description or specs support: containment, protection, control, support, efficiency. Do not skip a class merely because the description states it briefly.
 4. For each function, write its performance standard. Take exact values from the Specs whenever they exist; only fall back to qualitative wording when no value is available.
-5. Decide whether each function is evident or hidden. A function is hidden when its failure would not be apparent to operating staff under normal circumstances — standby duties, protective duties, and anything demanded only intermittently.
-6. Treat monitoring references, control architecture, locations, identifiers, and personnel instructions as supporting context, not functions. A protective DUTY is a function; the device performing it is not.
-7. Merge two functions when they would fail in the same way and produce the same failure.
-8. Before final answer, audit silently:
+5. Split each standard into its separate measurable requirements. Ask what the standard is really requiring: a flow AND a pressure AND a temperature AND a quality grade are four requirements that fail independently, not one. Record each as a parameter with its bound.
+6. Decide whether each function is evident or hidden. A function is hidden when its failure would not be apparent to operating staff under normal circumstances — standby duties, protective duties, and anything demanded only intermittently.
+7. Treat monitoring references, control architecture, locations, identifiers, and personnel instructions as supporting context, not functions. A protective DUTY is a function; the device performing it is not.
+8. Where the description states a redundancy or duty arrangement, write the OUTCOME it delivers as the function and move the arrangement into the standard. "2 x 100%, one duty one standby, lead/lag" is not a function; "maintain supply when the duty unit fails" is, and it is hidden.
+9. Merge two functions when they would fail in the same way and produce the same failure.
+10. Before final answer, audit silently:
    - Did I miss a containment or protection function that the specs imply?
-   - Did I create a row for an operating envelope or an equipment condition instead of a function?
+   - Did I create a row for an operating envelope, an equipment condition, or a design arrangement instead of a function?
    - Did I leave a standard qualitative when the Specs held a number?
+   - Did I split every standard that holds more than one requirement into separate parameters?
    - Did I mark standby and protective functions as hidden?
 
 ${detailRule}
@@ -2752,13 +2956,14 @@ ${detailRule}
 JSON field rules:
 - function = concise functional verb + object, 2-7 words. No leading "to", no gerund.
 - standard = the required performance standard. Use exact values and units from Specs when available, 3-12 words.
+- standardParameters = array, one entry per separate requirement inside "standard". Each: { "name": what is required, "value": the value as written, "unit": unit string or null, "bound": "min" | "max" | "target" | "range" | "spec" }. Empty array only when the standard holds no measurable requirement at all.
 - quantified = true only when "standard" contains a real measurable value.
 - functionClass = exactly one of: primary, containment, protection, control, support, efficiency.
 - evidence = "evident" or "hidden".
 - snippet = verbatim source slice from the original description, 15-80 characters.
 
 Return ONLY this JSON, no prose, no markdown:
-{ "rows": [ { "function": "...", "standard": "...", "quantified": true, "functionClass": "primary", "evidence": "evident", "snippet": "..." } ] }`;
+{ "rows": [ { "function": "...", "standard": "...", "standardParameters": [ { "name": "...", "value": "...", "unit": "...", "bound": "min" } ], "quantified": true, "functionClass": "primary", "evidence": "evident", "snippet": "..." } ] }`;
 
         const content = prompt + (systemContext ? '\n\n' + systemContext : '');
         try {
@@ -2780,7 +2985,7 @@ Return ONLY this JSON, no prose, no markdown:
                 if (!p || !Array.isArray(p.rows)) throw new Error('decompose: bad shape');
                 return p;
             });
-            type BreakdownRow = { function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden' };
+            type BreakdownRow = { function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden'; standardParameters: StandardParameter[] };
             const rawRows: BreakdownRow[] = parsed.rows
                 .map((r: any) => this.cleanBreakdownRow({
                     function: String(r?.function ?? '').trim(),
@@ -2789,6 +2994,7 @@ Return ONLY this JSON, no prose, no markdown:
                     functionClass: String(r?.functionClass ?? r?.function_class ?? '').trim(),
                     quantified: Boolean(r?.quantified),
                     evidence: String(r?.evidence ?? '').trim(),
+                    standardParameters: r?.standardParameters ?? r?.standard_parameters,
                 }))
                 .filter((r: any) => r.function && r.standard);
 
@@ -2814,6 +3020,7 @@ Return ONLY this JSON, no prose, no markdown:
                     functionClass: row.functionClass,
                     quantified: row.quantified,
                     evidence: row.evidence,
+                    standardParameters: row.standardParameters,
                 };
                 const key = rowKey(cleaned);
                 if (!cleaned.function || !cleaned.standard || usedKeys.has(key)) return;
@@ -2822,7 +3029,11 @@ Return ONLY this JSON, no prose, no markdown:
             };
 
             const weakOnly = /^(reliable|efficient|safe|available|continuous|proper|properly|as required|normal|normal operation|good condition|acceptable|adequate|within limits|per design)$/i;
-            const controlTerms = [/\b(control|regulate|maintain|stabilize|modulate|sequence|start|stop|load|unload|setpoint|set point|feedback|demand response)\b/];
+            // "maintain" is deliberately absent. It is the ordinary verb for a primary
+            // duty ("maintain discharge pressure", "maintain lubrication"), so matching
+            // on it pulled primary rows into the control bucket, where merging then
+            // deleted them.
+            const controlTerms = [/\b(control|regulate|stabilize|modulate|sequence|start|stop|load|unload|setpoint|set point|feedback|demand response)\b/];
             const envelopeTerms = [/\b(operating envelope|envelope|range|limit|rated|design|maximum|minimum|temperature|pressure|flow|speed|capacity|level)\b/];
             const serviceFunctionTerms = [/\b(deliver|supply|provide|pump|transfer|convert|heat|cool|filter|separate|store|contain|generate)\b/];
             const ppeTerms = [/\b(hearing protection|ppe|personnel|operator exposure|protective equipment)\b/];
@@ -2859,13 +3070,20 @@ Return ONLY this JSON, no prose, no markdown:
             // Bucket by declared JA1011 class so distinct secondary functions are never
             // merged into one another. Two rows only collapse when they share a class
             // AND would fail the same way.
+            //
+            // Every bucket key is now per-row. Control and envelope used to return the
+            // literal strings 'control' and 'envelope', so EVERY control function in a
+            // subsystem landed in one bucket and mergeBucket kept exactly one of them.
+            // A compressor that supplies air and also holds pressure by loading and
+            // unloading lost the load/unload function outright, and it was invisible:
+            // the survivor looked like a complete answer.
             const bucketOf = (row: BreakdownRow) => {
                 if (shouldSkip(row)) return '';
                 const text = textOf(row);
                 const fn = compact(row.function);
                 if (row.functionClass === 'containment' || row.functionClass === 'protection') return `${row.functionClass}:${rowKey(row)}`;
-                if (row.functionClass === 'control' || includesAny(text, controlTerms)) return 'control';
-                if (includesAny(text, envelopeTerms) && !includesAny(fn, serviceFunctionTerms)) return 'envelope';
+                if (row.functionClass === 'control' || includesAny(text, controlTerms)) return `control:${rowKey(row)}`;
+                if (includesAny(text, envelopeTerms) && !includesAny(fn, serviceFunctionTerms)) return `envelope:${rowKey(row)}`;
                 return `row:${rowKey(row)}`;
             };
             // Merging used to overwrite the standard with fixed prose, which deleted the
@@ -2873,8 +3091,17 @@ Return ONLY this JSON, no prose, no markdown:
             const mergeBucket = (_bucket: string, group: BreakdownRow[]): BreakdownRow => {
                 if (group.length === 1) return group[0];
                 const quantified = group.filter(r => r.quantified);
+                // Prefer the member carrying the most parsed requirements: that is the
+                // one the FF step can enumerate against. Standard length is only the
+                // tiebreak, since a long qualitative standard beats a short measured one
+                // on characters while being worth less.
+                const richest = (a: BreakdownRow, b: BreakdownRow) => {
+                    const byParams = (b.standardParameters?.length ?? 0) - (a.standardParameters?.length ?? 0);
+                    if (byParams !== 0) return byParams < 0 ? a : b;
+                    return b.standard.length > a.standard.length ? b : a;
+                };
                 const winner = quantified.length
-                    ? quantified.reduce((a, b) => (b.standard.length > a.standard.length ? b : a))
+                    ? quantified.reduce(richest)
                     : group[0];
                 return {
                     ...winner,

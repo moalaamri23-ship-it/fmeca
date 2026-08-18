@@ -1320,7 +1320,8 @@ render();
         try {
         const decomposed = await AIService.decomposeFunction(
             sub.func, sub.name, activeProject!.name,
-            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', sub.specs || '', newConversationId()
+            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', sub.specs || '', newConversationId(),
+            siblingSubsystemNames(sId)
         );
         const rows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
         if (rows.length > 0) {
@@ -1369,8 +1370,12 @@ render();
         const desc = await AIService.generateFFForRow(
             activeProject!.name, sub.name, sub.specs || '', sub.func,
             row.snippet || row.function, row.standard,
-            sub.failures.filter(f => f.desc).map(f => f.desc),
-            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', newConversationId()
+            // Only this row's existing failures. Passing the whole subsystem's told
+            // the model to avoid failures belonging to other functions, which is how
+            // a legitimate gap on this row got treated as already covered.
+            sub.failures.filter(f => f.desc && f.sourceBreakdownRowId === row.id).map(f => f.desc),
+            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', newConversationId(),
+            row.evidence || 'evident', row.standardParameters || []
         );
         if (desc?.trim()) {
             const newId = generateId();
@@ -1494,8 +1499,9 @@ render();
             if (!workingFunc) {
                 workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId) }, aiProvider, azureEndpoint, '', powerAutomateUrl, runSession) || '').trim();
             }
+            const siblings = siblingSubsystemNames(sId);
             const rows = workingFunc
-                ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '', runSession)).map(r => ({ ...r, id: generateId() }))
+                ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '', runSession, siblings)).map(r => ({ ...r, id: generateId() }))
                 : [];
             if (!rows.length) {
                 alert("Auto-Fill could not decompose the function.");
@@ -1513,9 +1519,15 @@ render();
                 aiProvider,
                 azureEndpoint,
                 powerAutomateUrl,
-                systemContext: '',
-                sessionId: runSession
+                // The operating philosophy establishes duty and redundancy, which is
+                // what decides whether a function's failure is found on demand.
+                systemContext: modeSystemContext,
+                sessionId: runSession,
+                siblingSubsystems: siblings
             });
+            if (ffBatch.rejected.length) {
+                console.warn(`[Auto-Fill] ${ffBatch.rejected.length} functional failures were unusable and were dropped, not replaced.`, ffBatch.rejected);
+            }
             const generatedFailures = ffBatch.failures.map(f => ({
                 id: generateId(),
                 desc: f.desc,
@@ -1525,6 +1537,7 @@ render();
                 sourceBreakdownRowId: f.rowId,
                 sourceSnippet: f.sourceSnippet || rows.find(r => r.id === f.rowId)?.snippet || '',
                 failedState: f.failedState,
+                parameter: f.parameter,
                 needsReview: f.needsReview
             }));
             if (!generatedFailures.length) {
@@ -1687,10 +1700,11 @@ render();
                     const func = (funcDesc || s.func || '').trim();
                     mark('Functions ready', 1);
 
+                    const subSiblings = rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean);
                     let breakdown: BreakdownRow[] = [];
                     if (func) {
                         mark('Decomposing functions');
-                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '', subSession);
+                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '', subSession, subSiblings);
                         if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                         breakdown = rows.map(r => ({ ...r, id: generateId() }));
                     }
@@ -1713,9 +1727,15 @@ render();
                             aiProvider,
                             azureEndpoint,
                             powerAutomateUrl,
-                            systemContext: '',
-                            sessionId: subSession
+                            // Duty and redundancy live in the project description, and this
+                            // step is where they decide whether a failure is found on demand.
+                            systemContext: masterSystemContext,
+                            sessionId: subSession,
+                            siblingSubsystems: subSiblings
                         });
+                        if (ffBatch.rejected.length) {
+                            issues.push(`${s.name}: ${ffBatch.rejected.length} functional failures were unusable and were dropped`);
+                        }
                         failures = ffBatch.failures.map(f => ({
                             id: generateId(),
                             desc: f.desc,
@@ -1724,6 +1744,7 @@ render();
                             sourceBreakdownRowId: f.rowId,
                             sourceSnippet: f.sourceSnippet || breakdown.find(r => r.id === f.rowId)?.snippet || '',
                             failedState: f.failedState,
+                            parameter: f.parameter,
                             needsReview: f.needsReview
                         }));
                         // One row now yields several failed states, so group by row instead
@@ -2274,16 +2295,21 @@ render();
                                                                                 <div className="flex-1">
 	                                                                                    <SmartInput label="Functional Failure" locked={subsystemLocked(sub.id)} value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func}} />
 	                                                                                    <SourceBadges tags={fail.sourceTags} />
-                                                                                    {(fail.failedState || fail.needsReview) && (
+                                                                                    {(fail.failedState || fail.parameter || fail.needsReview) && (
                                                                                         <div className="flex flex-wrap items-center gap-1 mt-1">
                                                                                             {fail.failedState && (
                                                                                                 <span title="JA1011 5.2 failed state covered by this functional failure" className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-semibold">
                                                                                                     {fail.failedState.replace('_', ' ')}
                                                                                                 </span>
                                                                                             )}
+                                                                                            {fail.parameter && (
+                                                                                                <span title="Requirement inside the performance standard that this failure violates" className="text-[9px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-mono">
+                                                                                                    {fail.parameter}
+                                                                                                </span>
+                                                                                            )}
                                                                                             {fail.needsReview && (
-                                                                                                <span title="Generation fell back to a template — this text is a placeholder, not analysis" className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-semibold">
-                                                                                                    Needs review
+                                                                                                <span title="Template text saved before generation was fixed — a placeholder, not analysis. Re-run Auto-Fill on this subsystem to replace it." className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-semibold">
+                                                                                                    Placeholder
                                                                                                 </span>
                                                                                             )}
                                                                                         </div>

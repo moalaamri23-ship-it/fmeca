@@ -42,7 +42,20 @@ export interface Failure {
   sourceSnippet?: string;
   /** Which JA1012 failed state this row covers. Several failures share one breakdown row. */
   failedState?: FailedStateType;
-  /** Set when generation fell back to a template — the text is a placeholder, not analysis. */
+  /**
+   * Which requirement inside the breakdown row's standard this failure violates
+   * (StandardParameter.name). One row legitimately carries two "partial"
+   * failures -- flow low and quality off-spec are both "below required" -- so
+   * uniqueness is rowId + parameter + failedState, never the failed state alone.
+   */
+  parameter?: string;
+  /**
+   * Placeholder text, not analysis.
+   *
+   * Nothing generates placeholders any more: a rejected generation is dropped
+   * and the row is shown empty. The flag stays because projects saved before
+   * that change still hold template text, and it must keep warning about them.
+   */
   needsReview?: boolean;
   /** Evidence found for this failure's fields, keyed by field name. */
   citations?: Record<string, FieldCitations>;
@@ -51,8 +64,53 @@ export interface Failure {
 /** SAE JA1011 5.1 function classes. Secondary functions carry the highest-severity failures. */
 export type FunctionClass = 'primary' | 'containment' | 'protection' | 'control' | 'support' | 'efficiency';
 
-/** JA1012 failed-state types. One function yields several of these. */
+/**
+ * Direction a performance standard can be violated in.
+ *
+ * Not a list of failure categories to work through -- doing that yields one
+ * padded row per type whatever the equipment can actually do. These are the
+ * directions available on a single parameter. WHAT a function can fail at
+ * comes from its own standard (see StandardParameter); this type only says
+ * which way each of those parameters can go wrong.
+ *
+ * "lower_limit" is kept for stored data only. It never meant anything
+ * distinct from "partial" -- both are "below what was required" -- and is no
+ * longer generated; incoming values map to "partial".
+ *
+ * "on_demand" is not a direction either. It is total loss of a function whose
+ * failure stays hidden until the function is called for, so it is emitted only
+ * for a hidden function and REPLACES that function's "total" row rather than
+ * adding a row beside it.
+ */
 export type FailedStateType = 'total' | 'partial' | 'upper_limit' | 'lower_limit' | 'intermittent' | 'on_demand';
+
+/**
+ * One measurable requirement inside a function's performance standard.
+ *
+ * The standard used to be free text alone, so nothing downstream could tell
+ * that "599 Sm3/hr at 130 psig (9 barg), 60 deg C" holds three separate
+ * requirements. Failed states were invented from a fixed list instead of
+ * derived from the standard, which is why two compressors in different
+ * services produced identical functional failures.
+ */
+export interface StandardParameter {
+  /** What is required: flow, discharge pressure, air quality, casing temperature. */
+  name: string;
+  /** The required value as written, e.g. "599", "instrument grade". */
+  value: string;
+  /** Unit where one exists, e.g. "Sm3/hr", "barg". Null for qualitative requirements. */
+  unit?: string | null;
+  /**
+   * Which way this parameter can be violated, and so which failed states are
+   * even askable:
+   *   min    -> below is credible, above usually is not
+   *   max    -> above is credible, below usually is not
+   *   target -> both directions credible
+   *   range  -> both directions credible against a band
+   *   spec   -> conformance, not magnitude (air quality, cleanliness)
+   */
+  bound: 'min' | 'max' | 'target' | 'range' | 'spec';
+}
 
 export interface BreakdownRow {
   id: string;
@@ -64,6 +122,8 @@ export interface BreakdownRow {
   quantified?: boolean;
   /** Hidden functions have no operational evidence of failure and drive failure-finding tasks (JA1011 5.2). */
   evidence?: 'evident' | 'hidden';
+  /** Parsed requirements inside `standard`. Absent on rows saved before this existed. */
+  standardParameters?: StandardParameter[];
 }
 
 export interface BreakdownMatch {
