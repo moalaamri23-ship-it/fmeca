@@ -138,21 +138,27 @@ export function copilotSessionAge(): { id: string | null; idleMs: number; ageMs:
 
 // Byte length is part of the key so an edited or re-imported file counts as new
 // and goes again, rather than being mistaken for the copy already in the thread.
-function attachmentKey(attachment: CopilotAttachment): string {
-    return `${attachment.name}:${attachment.contentType}:${attachment.contentBytes.length}`;
+//
+// The conversation is part of it too. What an agent holds belongs to ONE thread:
+// a file uploaded to the shared session is invisible to a citation run on a
+// conversation of its own, and skipping it there would ask the agent about a
+// document it has never seen — the silent failure this ledger exists to avoid.
+function attachmentKey(conversationId: string, attachment: CopilotAttachment): string {
+    return `${conversationId}:${attachment.name}:${attachment.contentType}:${attachment.contentBytes.length}`;
 }
 
 /**
- * The attachments this turn actually has to upload: everything the agent's
- * current conversation is not already holding a fresh copy of.
+ * The attachments this turn actually has to upload: everything the conversation
+ * it is going to is not already holding a fresh copy of.
  */
 export function pendingAttachments(
+    conversationId: string,
     attachments: CopilotAttachment[],
     now: number = Date.now()
 ): CopilotAttachment[] {
     const ledger = readLedger();
     return attachments.filter(attachment => {
-        const sentAt = ledger[attachmentKey(attachment)];
+        const sentAt = ledger[attachmentKey(conversationId, attachment)];
         return sentAt == null || now - sentAt >= ATTACHMENT_RESEND_AFTER_MS;
     });
 }
@@ -161,10 +167,14 @@ export function pendingAttachments(
  * Record attachments the flow accepted. Called only after a successful request —
  * a failed one never reached the agent, so it must not suppress the next try.
  */
-export function markAttachmentsSent(attachments: CopilotAttachment[], now: number = Date.now()): void {
+export function markAttachmentsSent(
+    conversationId: string,
+    attachments: CopilotAttachment[],
+    now: number = Date.now()
+): void {
     if (attachments.length === 0) return;
     const ledger = readLedger();
-    for (const attachment of attachments) ledger[attachmentKey(attachment)] = now;
+    for (const attachment of attachments) ledger[attachmentKey(conversationId, attachment)] = now;
 
     const keys = Object.keys(ledger);
     if (keys.length > LEDGER_LIMIT) {

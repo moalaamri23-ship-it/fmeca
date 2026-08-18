@@ -57,6 +57,12 @@ export interface SmartSearchConfig {
     provider: AIRequestPayload['provider'];
     azureEndpoint?: string;
     powerAutomateUrl?: string;
+    /**
+     * Copilot conversation to run on. A burst of independent questions gets one
+     * of its own so it runs beside other work instead of queueing behind the
+     * app's shared thread; leaving it unset keeps the shared thread.
+     */
+    sessionId?: string;
 }
 
 const EXPAND_PROMPT = `You expand a reader's search intent into the wording a real document would use.
@@ -131,6 +137,7 @@ async function ask(config: SmartSearchConfig, system: string, user: string): Pro
         apiKey: config.apiKey,
         azureEndpoint: config.azureEndpoint,
         powerAutomateUrl: config.powerAutomateUrl,
+        sessionId: config.sessionId,
         mode: 'ai',
         responseFormat: 'json',
         messages: [
@@ -158,6 +165,7 @@ async function askWithPayload(
         apiKey: config.apiKey,
         azureEndpoint: config.azureEndpoint,
         powerAutomateUrl: config.powerAutomateUrl,
+        sessionId: config.sessionId,
         mode: 'ai',
         responseFormat: 'json',
         attachments: payload.file ? [payload.file] : undefined,

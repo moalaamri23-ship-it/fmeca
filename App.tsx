@@ -566,8 +566,16 @@ setProjects(
     }
 
     const [citeModal, setCiteModal] = useState<{ target: CiteTarget; sources: CiteSource[] } | null>(null);
-    /** The field being searched right now — only one runs at a time. */
-    const [citeRunning, setCiteRunning] = useState<string | null>(null);
+    /**
+     * Every field being searched right now.
+     *
+     * Several can run at once: the reader cites a row's controls, then its
+     * mitigation, without waiting for the first to come back. Where the provider
+     * cannot take concurrent turns — Copilot shares one agent conversation — the
+     * transport queues them itself, so this stays a plain set of what is in
+     * flight and the buttons all spin.
+     */
+    const [citeRunning, setCiteRunning] = useState<Set<string>>(new Set());
     const [citeError, setCiteError] = useState<string | null>(null);
 
     const citeKey = (t: CiteTarget) => [t.subId, t.failId ?? '', t.modeId ?? '', t.field].join('|');
@@ -638,7 +646,7 @@ setProjects(
         target: CiteTarget,
         owner: { citations?: Record<string, FieldCitations> }
     ): { state: CiteState; count: number } => {
-        if (citeRunning === citeKey(target)) return { state: 'running', count: 0 };
+        if (citeRunning.has(citeKey(target))) return { state: 'running', count: 0 };
         const stored = owner.citations?.[target.field];
         const claims = stored?.claims ?? [];
         if (!stored || (claims.length === 0 && stored.items.length === 0)) return { state: 'none', count: 0 };
@@ -670,7 +678,9 @@ setProjects(
     /** Search every source in scope, store what is found, and show it. */
     const runCitation = async (target: CiteTarget) => {
         const key = citeKey(target);
-        if (citeRunning) return;
+        // The same field twice over would race its own result; a different field
+        // is welcome to run beside this one.
+        if (citeRunning.has(key)) return;
         const entity = citeEntity(target);
         const corpus = citeCorpusRequest(target);
         if (!entity || !corpus) return;
@@ -679,7 +689,7 @@ setProjects(
             return;
         }
         setCiteError(null);
-        setCiteRunning(key);
+        setCiteRunning(prev => new Set(prev).add(key));
         try {
             const sources = await collectCiteSources(corpus);
             const found = await citeField({
@@ -699,16 +709,25 @@ setProjects(
                 sources: found.sources,
                 emptySources: found.emptySources,
             });
-            setCiteModal({ target, sources });
+            // Opening is what the click asked for — but only when the reader is
+            // not already inside another field's citations. A second run
+            // finishing must never pull the panel out from under them; its
+            // button turns cited instead, and waits to be clicked.
+            setCiteModal(open => (open ? open : { target, sources }));
             if (found.failures.length > 0) {
                 setCiteError(
-                    `Could not read ${found.failures.map(f => f.fileName).join(', ')}. The rest were searched.`
+                    `${target.label}: could not read ${found.failures.map(f => f.fileName).join(', ')}. The rest were searched.`
                 );
             }
         } catch (e: any) {
-            setCiteError(e?.message || 'The citation search failed.');
+            // Several fields can be searching, so an error has to say which.
+            setCiteError(`${target.label}: ${e?.message || 'the citation search failed.'}`);
         } finally {
-            setCiteRunning(null);
+            setCiteRunning(prev => {
+                const next = new Set(prev);
+                next.delete(key);
+                return next;
+            });
         }
     };
 
@@ -2339,7 +2358,7 @@ render();
                                 claims={stored?.claims || []}
                                 emptySources={stored?.emptySources}
                                 onRecite={() => { void runCitation(citeModal.target); }}
-                                reciting={citeRunning === citeKey(citeModal.target)}
+                                reciting={citeRunning.has(citeKey(citeModal.target))}
                                 ai={{ apiKey, model: modelName, provider: aiProvider as any, azureEndpoint, powerAutomateUrl }}
                                 sendFiles={sendFilesMode}
                                 entityName={[citeModal.target.label, subName].filter(Boolean).join(' · ')}

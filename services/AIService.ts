@@ -9,6 +9,7 @@ import {
     pendingAttachments,
     rotateCopilotSession,
 } from './CopilotSession';
+import { runExclusive } from './CopilotQueue';
 import { pngAttachmentName, toPngPayload } from './imagePng';
 import type { SystemMode } from './SystemModesService';
 
@@ -1885,10 +1886,21 @@ Output format:
         return data.content;
     },
 
+    /**
+     * One Copilot turn.
+     *
+     * Queued rather than fired straight off: the app shares one Conversation ID
+     * across calls, and an agent thread cannot take two turns at once. See
+     * `CopilotQueue` for what goes wrong when it does.
+     */
     async _powerAutomateRequest(req: AIRequestPayload): Promise<string> {
         if (!req.powerAutomateUrl) {
             throw new Error('Power Automate URL is required for Copilot provider.');
         }
+        return this._powerAutomateTurn(req);
+    },
+
+    async _powerAutomateTurn(req: AIRequestPayload): Promise<string> {
 
         const rawPrompt = req.feature === 'chatbot'
             ? req.messages
@@ -1905,10 +1917,13 @@ Output format:
         // A spreadsheet finishes the conversation it lands in, so it gets one of
         // its own and the shared session survives.
         const oneShot = carriesSpreadsheet(attachments);
-        // Sending nothing keeps the caller's own id (the chatbot passes a literal
-        // one), so existing features keep behaving exactly as they did.
+        // A caller that brought its own conversation is kept on it, attachments
+        // or not: that is how work which wants to run beside the rest — a
+        // citation run — stays off the shared thread instead of queueing behind
+        // it. The ledger is keyed per conversation, so its files still travel
+        // once and only once.
         const sessionFor = () =>
-            attachments.length > 0 || !req.sessionId ? copilotSessionId({ oneShot }) : req.sessionId;
+            req.sessionId && !oneShot ? req.sessionId : copilotSessionId({ oneShot });
 
         const send = async (sessionId: string, files: FilePayload[]): Promise<string> => {
             const payload: Record<string, unknown> = {
@@ -1946,24 +1961,34 @@ Output format:
         };
 
         const sessionId = sessionFor();
-        // Only what this conversation is not already holding travels again.
-        const toSend = oneShot ? attachments : pendingAttachments(attachments);
-        const reply = await send(sessionId, toSend);
 
-        // A one-shot conversation holds nothing worth remembering.
-        if (!oneShot && toSend.length > 0) markAttachmentsSent(toSend);
+        // One turn at a time on a conversation. Different conversations run side
+        // by side — the flow takes concurrent runs happily; a single agent thread
+        // does not. See `CopilotQueue`.
+        return runExclusive(sessionId, async () => {
+            // Only what this conversation is not already holding travels again.
+            const toSend = oneShot ? attachments : pendingAttachments(sessionId, attachments);
+            const reply = await send(sessionId, toSend);
 
-        // Skipped an upload and the agent answered as if it had no file: the
-        // conversation is gone. Start a clean one, send everything, once.
-        const skipped = attachments.length > toSend.length;
-        if (skipped && looksLikeLostSession(reply)) {
-            console.warn('[AIService] Copilot conversation looks expired — reattaching and retrying once');
-            const retryReply = await send(rotateCopilotSession(), attachments);
-            markAttachmentsSent(attachments);
-            return retryReply;
-        }
+            // A one-shot conversation holds nothing worth remembering.
+            if (!oneShot && toSend.length > 0) markAttachmentsSent(sessionId, toSend);
 
-        return reply;
+            // Skipped an upload and the agent answered as if it had no file: the
+            // conversation is gone. Start a clean one, send everything, once.
+            const skipped = attachments.length > toSend.length;
+            if (skipped && looksLikeLostSession(reply)) {
+                console.warn('[AIService] Copilot conversation looks expired — reattaching and retrying once');
+                // Only the shared session is the app's to rotate. A caller that
+                // brought its own id keeps it — rotating it would abandon a
+                // conversation the app never owned.
+                const retryId = req.sessionId && !oneShot ? sessionId : rotateCopilotSession();
+                const retryReply = await send(retryId, attachments);
+                markAttachmentsSent(retryId, attachments);
+                return retryReply;
+            }
+
+            return reply;
+        });
     },
 
     async _directChat(req: AIRequestPayload): Promise<string> {

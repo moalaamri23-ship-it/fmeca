@@ -38,7 +38,9 @@ export const CiteButton: React.FC<{
         : state === 'stale'
         ? `${count} citation${count === 1 ? '' : 's'} — found before this field was edited`
         : state === 'flagged'
-        ? `${count} citation${count === 1 ? '' : 's'} — one or more lines need attention`
+        ? count === 0
+            ? 'Nothing in the sources supports this field'
+            : `${count} citation${count === 1 ? '' : 's'} — one or more lines need attention`
         : state === 'cited'
         ? `${count} citation${count === 1 ? '' : 's'}`
         : 'Find citations for this text';

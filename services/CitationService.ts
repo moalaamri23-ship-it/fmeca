@@ -26,6 +26,7 @@
 import { extractDocumentText } from './DocumentText';
 import { buildDocumentPayload, payloadIsUsable } from './DocumentPayload';
 import { askDocument, excerptPayloadFor, expandIntent } from './SmartSearchService';
+import { newConversationId } from './CopilotQueue';
 import type { SmartSearchConfig } from './SmartSearchService';
 import { toSourceRef } from './CitationCorpus';
 import type { CiteSource } from './CitationCorpus';
@@ -291,16 +292,26 @@ export async function citeField(req: CiteFieldRequest): Promise<CiteFieldResult>
     const claims = buildClaims(req.field, fieldText).slice(0, MAX_CLAIMS);
     if (claims.length === 0) throw new Error('There is nothing in this field to cite.');
 
+    // This run gets a conversation of its own.
+    //
+    // Its questions are independent of everything else the app is asking, so it
+    // has no use for the shared Copilot thread's history — and every reason not
+    // to be stuck behind it. On its own conversation this run's calls queue only
+    // against each other, which is what lets a second field be cited at the same
+    // time. Providers other than Copilot ignore the field entirely.
+    const ai: SmartSearchConfig = { ...req.ai, sessionId: req.ai.sessionId ?? newConversationId() };
+    const scoped: CiteFieldRequest = { ...req, ai };
+
     // One expansion for the whole field, shared by every source: the claims are
     // about one subject, and expanding each of them separately buys nothing.
-    const terms = await expandIntent(`${req.fieldLabel}: ${claims.map(c => c.text).join('; ')}`, req.ai);
+    const terms = await expandIntent(`${req.fieldLabel}: ${claims.map(c => c.text).join('; ')}`, ai);
 
     let done = 0;
     req.onProgress?.({ done: 0, total: req.sources.length, current: req.sources[0].fileName });
 
     const results = await mapWithLimit(req.sources, CONCURRENCY, async source => {
         try {
-            return await citeOneSource(source, claims, req, terms);
+            return await citeOneSource(source, claims, scoped, terms);
         } catch (e) {
             return {
                 source, items: [], duplicateClaims: [], empty: true,
