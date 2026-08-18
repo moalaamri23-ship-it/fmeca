@@ -57,6 +57,7 @@ export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value
             {label && (
                 <div className="flex items-center gap-1.5 mb-1 ml-1">
                     <label onClick={(e) => { e.stopPropagation(); setExpanded(true); }} className="text-[10px] font-bold text-slate-400 uppercase cursor-default select-none hover:text-brand-600 transition">{label}</label>
+                    {onCite && <CiteButton state={citeState} count={citeCount} onClick={onCite} />}
                     {labelAddon}
                 </div>
             )}
@@ -69,9 +70,6 @@ export const SmartInput: React.FC<SmartInputProps> = ({ label, labelAddon, value
                 <button onClick={(e)=>{e.stopPropagation(); handleAI();}} className="absolute right-2 top-2 text-slate-300 hover:text-brand-600 bg-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition border border-transparent hover:border-slate-200">
                     {loading?"...":<Icon name="wand"/>}
                 </button>
-                {onCite && (
-                    <CiteButton state={citeState} count={citeCount} onClick={onCite} className="right-9" />
-                )}
             </div>
             {expanded && createPortal((
                 <div className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-6" onClick={(e) => { e.stopPropagation(); setExpanded(false); }}>

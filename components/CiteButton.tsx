@@ -5,8 +5,9 @@ import { Icon } from './Icon';
  * One control per field, and nothing else.
  *
  * The field is already crowded — a label, a wand, a textarea, and in the table a
- * column two hundred pixels wide. So the citation feature gets a single button
- * that says everything by how it looks:
+ * column two hundred pixels wide. So the citation feature gets a single small
+ * button, sitting beside the field's label where it covers none of the text,
+ * and it says everything by how it looks:
  *
  *   nothing cited yet — faint, and only on hover, like the wand beside it
  *   searching        — a spinner in the same spot
@@ -47,23 +48,23 @@ export const CiteButton: React.FC<{
             disabled={running}
             title={title}
             className={[
-                'absolute top-2 flex items-center gap-0.5 rounded-full border bg-white p-1 transition',
+                'flex shrink-0 items-center gap-0.5 leading-none transition',
                 // Evidence is worth seeing without hunting for it; an empty field's
                 // button stays out of the way exactly like the wand.
                 has || running ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
                 state === 'stale'
-                    ? 'border-amber-200 text-amber-600 hover:border-amber-300'
+                    ? 'text-amber-600 hover:text-amber-700'
                     : state === 'cited'
-                    ? 'border-brand-200 text-brand-600 hover:border-brand-300'
-                    : 'border-transparent text-slate-300 hover:border-slate-200 hover:text-brand-600',
+                    ? 'text-brand-600 hover:text-brand-700'
+                    : 'text-slate-300 hover:text-brand-600',
                 className,
             ].join(' ')}
         >
             <Icon
                 name={running ? 'spinner' : 'quote'}
-                className={running ? 'w-4 h-4 animate-spin' : 'w-4 h-4'}
+                className={running ? 'w-3 h-3 animate-spin' : 'w-3 h-3'}
             />
-            {has && count > 0 && <span className="pr-0.5 text-[9px] font-bold leading-none">{count}</span>}
+            {has && count > 0 && <span className="text-[9px] font-bold leading-none">{count}</span>}
         </button>
     );
 };
