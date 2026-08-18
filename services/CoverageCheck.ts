@@ -110,7 +110,13 @@ export function checkRow(row: BreakdownRow, failures: Failure[]): CoverageFindin
         // Only report a parameter with NO coverage at all. Reporting each missing
         // direction turns the panel into the same six-per-function checklist the
         // derivation step exists to avoid.
-        if (missing.length && !Array.from(covered).some(k => k.startsWith(`${p.name}|`))) {
+        //
+        // "on_demand" does not count as covering a parameter. It stands in for
+        // total loss of a hidden function, so a protective limit whose only
+        // failure is "the trip did not fire" still has the excursion itself
+        // — the limit actually being crossed — unanalysed.
+        const directional = Array.from(covered).filter(k => !k.endsWith('|on_demand'));
+        if (missing.length && !directional.some(k => k.startsWith(`${p.name}|`))) {
             findings.push({
                 rowId: row.id,
                 severity: 'gap',
@@ -160,9 +166,30 @@ export function checkRow(row: BreakdownRow, failures: Failure[]): CoverageFindin
     return findings;
 }
 
-/** Run every row in a breakdown against the subsystem's failures. */
-export function checkBreakdown(rows: BreakdownRow[], failures: Failure[]): CoverageFinding[] {
-    return rows.flatMap(row => checkRow(row, failures.filter(f => f.sourceBreakdownRowId === row.id)));
+/**
+ * Run every row in a breakdown against the subsystem's failures.
+ *
+ * `matches` is the output of the "Match Failures to Breakdown" step. It is
+ * consulted because `sourceBreakdownRowId` is only set when the failure was
+ * generated alongside the row: re-decomposing mints fresh row ids and orphans
+ * every existing failure, and a failure written by hand never had one. Falling
+ * back to the match result keeps the checker working in both cases instead of
+ * silently reporting nothing — which is the one failure mode a safety net must
+ * not have.
+ */
+export function checkBreakdown(
+    rows: BreakdownRow[],
+    failures: Failure[],
+    matches?: Array<{ rowId: string; failureIds: string[] }> | null,
+): CoverageFinding[] {
+    const byId = new Map(failures.map(f => [f.id, f]));
+    return rows.flatMap(row => {
+        const direct = failures.filter(f => f.sourceBreakdownRowId === row.id);
+        if (direct.length) return checkRow(row, direct);
+        const matched = (matches ?? []).find(m => m.rowId === row.id);
+        const viaMatch = (matched?.failureIds ?? []).map(id => byId.get(id)).filter(Boolean) as Failure[];
+        return checkRow(row, viaMatch);
+    });
 }
 
 /** Findings grouped by rowId, for rendering beside each row. */

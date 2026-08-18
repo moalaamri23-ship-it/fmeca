@@ -48,8 +48,8 @@ export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
     }, [matchResults, sub.failures]);
 
     const coverage = React.useMemo(
-        () => findingsByRow(checkBreakdown(rows, sub.failures)),
-        [rows, sub.failures]
+        () => findingsByRow(checkBreakdown(rows, sub.failures, matchResults)),
+        [rows, sub.failures, matchResults]
     );
 
     return (
