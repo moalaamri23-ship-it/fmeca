@@ -1,6 +1,6 @@
 import React from 'react';
-import { Subsystem, BreakdownRow, BreakdownMatch, Failure } from '../types';
-import { checkBreakdown, findingsByRow, CoverageFinding } from '../services/CoverageCheck';
+import { Subsystem, BreakdownRow, BreakdownMatch, Failure, Project } from '../types';
+import { checkBreakdown, checkProject, findingsByRow, CoverageFinding } from '../services/CoverageCheck';
 
 interface FunctionBreakdownModalProps {
     sub: Subsystem;
@@ -15,6 +15,8 @@ interface FunctionBreakdownModalProps {
     generatingRowIds: Set<string>;
     /** True while Auto-Fill owns this subsystem — its AI actions are held. */
     locked?: boolean;
+    /** The whole project, so a setpoint stated differently in a sibling subsystem shows up here. */
+    project?: Project | null;
 }
 
 export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
@@ -28,6 +30,7 @@ export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
     onGenerateFF,
     generatingRowIds,
     locked = false,
+    project = null,
 }) => {
     const rows: BreakdownRow[] = sub.functionBreakdown ?? [];
 
@@ -47,10 +50,15 @@ export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
         return map;
     }, [matchResults, sub.failures]);
 
-    const coverage = React.useMemo(
-        () => findingsByRow(checkBreakdown(rows, sub.failures, matchResults)),
-        [rows, sub.failures, matchResults]
-    );
+    // Row-level findings, plus any cross-subsystem conflict that lands on one of
+    // these rows. checkProject reports against every row carrying the disputed
+    // parameter, so it needs no extra plumbing to reach the right line.
+    const coverage = React.useMemo(() => {
+        const own = checkBreakdown(rows, sub.failures, matchResults);
+        const rowIds = new Set(rows.map(r => r.id));
+        const cross = project ? checkProject(project).filter(f => rowIds.has(f.rowId)) : [];
+        return findingsByRow([...own, ...cross]);
+    }, [rows, sub.failures, matchResults, project]);
 
     return (
         <div

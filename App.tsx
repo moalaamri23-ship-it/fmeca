@@ -1367,7 +1367,7 @@ render();
         if (rowGenBusy.has(row.id) || subsystemLocked(sId)) return;
         setRowGenBusyFor(row.id, true);
         try {
-        const desc = await AIService.generateFFForRow(
+        const gen = await AIService.generateFFForRow(
             activeProject!.name, sub.name, sub.specs || '', sub.func,
             row.snippet || row.function, row.standard,
             // Only this row's existing failures. Passing the whole subsystem's told
@@ -1377,6 +1377,7 @@ render();
             apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', newConversationId(),
             row.evidence || 'evident', row.standardParameters || []
         );
+        const desc = gen.desc;
         if (desc?.trim()) {
             const newId = generateId();
             const tags = hybridSourceTags();
@@ -1391,7 +1392,10 @@ render();
                         : [...prevMatches, { rowId: row.id, failureIds: [newId] }];
                     return {
                         ...s,
-                        failures: [...s.failures, { id: newId, desc: desc.trim(), modes: [], collapsed: false, sourceTags: tags, sourceBreakdownRowId: row.id, sourceSnippet: row.snippet || row.function }],
+                        // parameter and failedState travel with the failure: CoverageCheck keys
+                        // on both, so a top-up saved without them never clears the gap chip
+                        // that prompted the user to click in the first place.
+                        failures: [...s.failures, { id: newId, desc: desc.trim(), modes: [], collapsed: false, sourceTags: tags, sourceBreakdownRowId: row.id, sourceSnippet: row.snippet || row.function, parameter: gen.parameter, failedState: gen.failedState }],
                         breakdownMatches: nextMatches,
                     };
                 }),
@@ -2604,6 +2608,7 @@ render();
                         onGenerateFF={(row) => generateFFForRow(breakdownSubId, row)}
                         generatingRowIds={rowGenBusy}
                         locked={subsystemLocked(breakdownSubId)}
+                        project={activeProject}
                     />
                 ) : null;
             })()}

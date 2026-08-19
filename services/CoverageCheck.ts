@@ -1,4 +1,4 @@
-import { BreakdownRow, Failure, StandardParameter } from '../types';
+import { BreakdownRow, Failure, StandardParameter, Project, Subsystem } from '../types';
 
 /**
  * Coverage checking for a subsystem's function breakdown and its functional
@@ -32,10 +32,10 @@ export interface CoverageFinding {
 const F_TO_C = (f: number) => (f - 32) * 5 / 9;
 
 /**
- * A standard often states the same quantity twice in different units:
- * "198.2 deg F (59 deg C)". When those disagree, every failure derived from the
- * parameter quantifies against whichever one the model picked. Worth surfacing
- * before it becomes a maintenance limit.
+ * A standard often states the same quantity twice: "198.2 deg F (59 deg C)", or
+ * "12 barg (13.8 barg design)". When the two disagree, every failure derived
+ * from the parameter quantifies against whichever one the model picked. Worth
+ * surfacing before it becomes a maintenance limit.
  */
 function findUnitConflict(text: string): string | null {
     const pair = text.match(/(-?\d+(?:\.\d+)?)\s*(?:deg\s*)?F\b[^)]*?\(?\s*(-?\d+(?:\.\d+)?)\s*(?:deg\s*)?C\b/i);
@@ -47,6 +47,27 @@ function findUnitConflict(text: string): string | null {
     // 1 degree of slack absorbs honest rounding.
     if (Math.abs(expected - c) <= 1) return null;
     return `${f} deg F is ${expected.toFixed(1)} deg C, but the standard says ${c} deg C.`;
+}
+
+/**
+ * Two bare magnitudes in one value, far enough apart that they cannot be the
+ * same number rounded. Catches the disputed-value case that findUnitConflict
+ * misses because both figures carry the same unit -- the source documents for
+ * one package stated design pressure as both 12 barg and 13.8 barg, and the
+ * pipeline turned the disagreement into separate functional failures instead of
+ * one disputed requirement.
+ */
+function findValueConflict(value: string, unit?: string | null): string | null {
+    const nums = Array.from(String(value).matchAll(/-?\d+(?:\.\d+)?/g)).map(m => Number(m[0]));
+    if (nums.length < 2) return null;
+    const [a, b] = [nums[0], nums[1]];
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+    const spread = Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1);
+    // 2% absorbs rounding between two statements of one figure. Anything wider is
+    // two different figures wearing one requirement.
+    if (spread <= 0.02) return null;
+    const u = unit ? ` ${unit}` : '';
+    return `states both ${a}${u} and ${b}${u}. Which one does the equipment have to meet?`;
 }
 
 /** Directions that a parameter's bound makes worth asking about. */
@@ -96,6 +117,11 @@ export function checkRow(row: BreakdownRow, failures: Failure[]): CoverageFindin
         });
     }
 
+    // Hoisted: loop-invariant. "on_demand" does not count as covering a parameter --
+    // it stands in for total loss of a hidden function, so a protective duty whose only
+    // failure is "the trip did not fire" still has nothing said about the requirement.
+    const directional = Array.from(covered).filter(k => !k.endsWith('|on_demand'));
+
     for (const p of params) {
         const conflict = findUnitConflict(`${p.value} ${p.unit ?? ''}`) ?? findUnitConflict(row.standard);
         if (conflict) {
@@ -106,16 +132,26 @@ export function checkRow(row: BreakdownRow, failures: Failure[]): CoverageFindin
                 detail: `"${p.name}": ${conflict}`,
             });
         }
+        // Only when the units agree, so "198.2 deg F (59 deg C)" is reported once as
+        // a unit conflict rather than twice.
+        const valueConflict = conflict ? null : findValueConflict(p.value, p.unit);
+        if (valueConflict) {
+            findings.push({
+                rowId: row.id,
+                severity: 'conflict',
+                label: 'Disputed value',
+                detail: `"${p.name}" ${valueConflict}`,
+            });
+        }
         const missing = credibleDirections(p).filter(d => !covered.has(`${p.name}|${d}`));
         // Only report a parameter with NO coverage at all. Reporting each missing
         // direction turns the panel into the same six-per-function checklist the
         // derivation step exists to avoid.
-        //
-        // "on_demand" does not count as covering a parameter. It stands in for
-        // total loss of a hidden function, so a protective limit whose only
-        // failure is "the trip did not fire" still has the excursion itself
-        // — the limit actually being crossed — unanalysed.
-        const directional = Array.from(covered).filter(k => !k.endsWith('|on_demand'));
+        // A protective function correctly has exactly one failed state: inability to
+        // protect (JA1011 5.1.5), carried as "on_demand". Its trip setpoint therefore
+        // has no directional failure and must not be reported as an uncovered
+        // requirement -- doing so is what pushed the excursion back in as a second row.
+        if (row.functionClass === 'protection' && states.has('on_demand')) continue;
         if (missing.length && !directional.some(k => k.startsWith(`${p.name}|`))) {
             findings.push({
                 rowId: row.id,
@@ -190,6 +226,87 @@ export function checkBreakdown(
         const viaMatch = (matched?.failureIds ?? []).map(id => byId.get(id)).filter(Boolean) as Failure[];
         return checkRow(row, viaMatch);
     });
+}
+
+
+/**
+ * Leading magnitude of a parameter value, for comparing two statements of the
+ * same quantity. Returns null when the value is qualitative.
+ */
+function magnitudeOf(value: string): number | null {
+    const m = String(value).match(/-?\d+(?:\.\d+)?/);
+    if (!m) return null;
+    const n = Number(m[0]);
+    return Number.isFinite(n) ? n : null;
+}
+
+/** Parameter names normalise loosely so "cut in pressure" and "cut-in pressure" meet. */
+function paramKey(name: string): string {
+    return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * Cross-subsystem consistency.
+ *
+ * One project's subsystems are analysed independently, so nothing noticed when
+ * two of them stated different values for the same quantity. In a real run the
+ * compressor's breakdown said the unit loads at 8.5 barg while the wet air
+ * receiver said it loads at 8.0 barg. Both values were in the source documents,
+ * which contradicted each other; each subsystem quietly picked a side, and the
+ * finished FMECA contained two different setpoints for one control action.
+ *
+ * A conflict is reported against every row that carries the parameter, so it
+ * appears in the breakdown modal beside the requirement it disputes. Like
+ * everything else in this file it reports and never writes: which value is
+ * right is a document-control question, not one a checker can settle.
+ */
+export function checkProject(project: Project): CoverageFinding[] {
+    type Sighting = { subsystem: string; rowId: string; value: string; unit?: string | null; magnitude: number };
+    const byParam = new Map<string, Sighting[]>();
+
+    for (const sub of project.subsystems as Subsystem[]) {
+        for (const row of sub.functionBreakdown ?? []) {
+            for (const p of row.standardParameters ?? []) {
+                const magnitude = magnitudeOf(p.value);
+                if (magnitude === null) continue;
+                const key = paramKey(p.name);
+                if (!key) continue;
+                if (!byParam.has(key)) byParam.set(key, []);
+                byParam.get(key)!.push({ subsystem: sub.name, rowId: row.id, value: p.value, unit: p.unit, magnitude });
+            }
+        }
+    }
+
+    const findings: CoverageFinding[] = [];
+    for (const [key, sightings] of byParam) {
+        if (sightings.length < 2) continue;
+        // Only compare sightings sharing a unit: 9 barg and 130 psig are the same
+        // pressure, and flagging them would bury the real disagreements.
+        const byUnit = new Map<string, Sighting[]>();
+        for (const sight of sightings) {
+            const u = (sight.unit ?? '').toLowerCase().trim();
+            if (!byUnit.has(u)) byUnit.set(u, []);
+            byUnit.get(u)!.push(sight);
+        }
+        for (const group of byUnit.values()) {
+            const subsystems = new Set(group.map(g => g.subsystem));
+            if (subsystems.size < 2) continue;
+            const magnitudes = new Set(group.map(g => g.magnitude));
+            if (magnitudes.size < 2) continue;
+            const shown = group
+                .map(g => `${g.subsystem}: ${g.value}${g.unit ? ' ' + g.unit : ''}`)
+                .join('; ');
+            for (const sight of group) {
+                findings.push({
+                    rowId: sight.rowId,
+                    severity: 'conflict',
+                    label: 'Cross-subsystem conflict',
+                    detail: `"${key}" is stated differently elsewhere in this project — ${shown}. One requirement, two values.`,
+                });
+            }
+        }
+    }
+    return findings;
 }
 
 /** Findings grouped by rowId, for rendering beside each row. */

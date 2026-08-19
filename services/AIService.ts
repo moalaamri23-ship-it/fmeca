@@ -88,7 +88,8 @@ const FMECA_HIERARCHY_RULES = `FMECA hierarchy and field separation:
 - Current Controls / Mitigation = detection, control, prevention, safeguard, or consequence-reduction content using the existing required format.
 - Keep all generated content inside the subsystem boundary. Avoid parent-system, upstream, downstream, or component details unless the input clearly includes them.
 - Do not move causes, effects, controls, mitigations, inspections, recommendations, or maintenance tasks into the function, functional failure, failure mode, cause, or effect fields.
-- Do not invent design values, operating limits, component names, causes, controls, or operating conditions. Use exact specifications only when provided in the Specs, system description, reference data, or checklist knowledge. Otherwise use "required", "specified", or "operating range".`;
+- Do not invent design values, operating limits, component names, causes, controls, or operating conditions. Use exact specifications only when provided in the Specs, system description, reference data, or checklist knowledge. Otherwise use "required", "specified", or "operating range".
+- Source conflicts are data, not choices. When the reference data flags a CONFLICT, or states two different values for the same quantity, treat the quantity as ONE requirement whose value is disputed. Name both values and say they conflict. Never silently pick a side, and never let one disputed quantity become several separate rows or failures -- that multiplies a documentation problem into an analysis that looks thorough and is wrong.`;
 
 const FMECA_CONCISE_WORDING_RULES = `Professional FMECA wording:
 - Return concise, direct engineering statements. Prefer 6-14 words for functional failures, 2-7 words for failure modes, and 2-8 words for causes.
@@ -153,7 +154,7 @@ const FUNCTION_BREAKDOWN_TECHNICAL_RULES = `Function breakdown rules (SAE JA1011
 - Identify every function the subsystem must perform, primary and secondary alike. Classify each into exactly one class:
   - "primary": the reason the subsystem exists — the value, service, conversion, movement, or storage it delivers.
   - "containment": what it must hold in or keep separated — process fluid, lubricant, pressure, heat.
-  - "protection": a protective duty it must perform — limit pressure, relieve overpressure, isolate on demand, prevent reverse flow. The duty belongs here; the device that performs it does not become its own row.
+  - "protection": a protective duty it must perform — relieve overpressure, shut down on an excursion, isolate on demand, prevent reverse flow. The duty belongs here; the device that performs it does not become its own row. JA1011 5.1.5: write a protective function as the CAPABILITY, not the bare duty — "be able to shut down on high discharge temperature", not "limit discharge temperature". The capability phrasing is what makes its failed state come out as inability to protect rather than as the excursion itself.
   - "control": setpoints, bands, sequences, demand response, load/unload, start/stop behaviour it must maintain.
   - "support": structural, mounting, or containment-of-position duties.
   - "efficiency": economy or efficiency duties the description explicitly states.
@@ -161,8 +162,10 @@ const FUNCTION_BREAKDOWN_TECHNICAL_RULES = `Function breakdown rules (SAE JA1011
 - The operating envelope is NOT a function. Put measurable ranges, ratings, and limits in the row's "standard" field, which is where JA1011 puts a performance standard.
 - Equipment condition and integrity expectations are NOT functions. Do not create rows for vibration, wear, corrosion, or overheating — those are failure modes and belong to a later step.
 - A design arrangement is NOT a function. "2 x 100%", duty/standby, lead/lag, N+1, parallel trains, and installed spares describe HOW a duty is met, not what the subsystem does. Write the outcome the arrangement exists to deliver as the function — for a duty/standby pair that outcome is maintaining the service when the duty unit fails — and put the arrangement wording in "standard". A function written as an arrangement produces a functional failure that is only the arrangement restated.
+- Installed standby and redundancy are PROTECTION, not primary. A standby unit exists to take over when the duty unit fails, which is a protective duty on the duty unit's failure and is hidden by nature: nobody finds out it will not start until it is asked to. Class it "protection", mark it hidden, and phrase it as the capability — "be able to maintain supply when the duty unit is unavailable".
 - Duty rotation, wear equalisation, and run-hour balancing are operating strategies, NOT functions. Their failure accelerates wear, which is a cause of other failure modes; it is not a functional failure. Do not create a row for them.
-- A duty that limits, caps, relieves, isolates, or trips is "protection", even when the description states it as a bare maximum. "Maximum discharge temperature 198.2 deg F" is the protective duty "limit discharge temperature" — not a control function. Control is holding a variable at a setpoint during normal running; protection is stopping an excursion. Classify by what the duty does, not by the grammar of the sentence it appears in, and mark a protective limit hidden when it is only exercised once the process reaches it.
+- A duty that limits, caps, relieves, isolates, or trips is "protection", even when the description states it only as a bare maximum. Control holds a variable at a setpoint during normal running; protection stops an excursion. Classify by what the duty does, not by the grammar of the sentence it appears in, and mark a protective duty hidden when it is exercised only once the process reaches it.
+- A protective function's performance standard is its TRIP or SET POINT, not a design rating and not a performance-table maximum. Where the context offers both a rating and an instrumented setpoint for the same quantity, the setpoint is the standard: it is the value the protective device actually acts on. Take the trip.
 - Include only functions inside the subsystem boundary and supported by the function description, specs, or system context.
 - Do not create rows from causes, effects, alarms, inspections, repairs, tests, tags, personnel instructions, or maintenance tasks.
 - Cap the row count by function, not by failure. A function that yields several failed states is still one row.
@@ -172,46 +175,56 @@ Performance standard parameters:
 - Each parameter carries: "name" (what is required — flow, discharge pressure, air quality), "value" (as written), "unit" (or null when qualitative), and "bound".
 - "bound" says which way the parameter can be violated: "min" when only falling below it is a failure, "max" when only exceeding it is, "target" or "range" when both are, "spec" for a conformance requirement with no magnitude such as air quality or cleanliness.
 - A quality, grade, or cleanliness requirement stated in the function is a parameter in its own right. Do not fold it into a flow or pressure parameter.
-- For a containment function, EACH substance the subsystem must hold in is a parameter with bound "spec" — compressed air and lubricating oil are two parameters, not one, because they escape by different mechanisms and a release of each has different consequences. List them alongside any design pressure or temperature rating, which are separate parameters again. A containment row carrying only ratings cannot produce a leakage failure at all, and leakage is the whole reason the duty exists.
+- For a containment function, EACH substance the subsystem must hold in is a parameter with bound "spec". Two substances held in the same envelope are two parameters, not one: they escape by different mechanisms and a release of each has different consequences. A containment row carrying no substance cannot produce a leakage failure at all, and leakage is the whole reason the duty exists.
+- Design pressure and design temperature ratings belong in the containment row's "standard" TEXT, never in "standardParameters". A rating states what the envelope withstands, not what the function delivers, so exceeding it is a cause of losing containment rather than a failed state of it. Listing ratings as parameters turns one envelope into several near-identical failures that are really the same event described in different units.
 - Take values from Specs verbatim. Do not invent a parameter that the standard does not state, and do not drop one that it does.
 - "value" holds the magnitude alone and "unit" holds the unit alone. Do not repeat the unit inside "value".
-- A consumption or absorbed rating — shaft power, absorbed kW, current draw, design margin — is NOT a parameter of the service the subsystem delivers. It measures what the equipment takes, not what it gives, so a failure derived from it competes with the flow and pressure the function exists to produce. Put such a rating on an "efficiency" function of its own when the description supports one, and otherwise leave it out. The same applies to design ratings on a delivery function: a design pressure constrains the containment duty, not the supply duty.
+- A rating that measures what the equipment CONSUMES or WITHSTANDS is not a parameter of the service it delivers. It describes the cost or the envelope of doing the duty, not the duty, so a failure derived from it competes with the output the function exists to produce. Put a consumption rating on an "efficiency" function of its own when the description supports one, and otherwise leave it out. Put a withstand rating in the containment row's standard text.
 - Order "standardParameters" with the requirements the function exists to deliver first.
 - When the standard is qualitative and holds no measurable requirement, return an empty "standardParameters" array rather than inventing values.`;
 
-// JA1011 5.2 requires all failed states per function. The earlier version of
-// this block listed six failed-state types and asked the model to work through
-// them, which is a template: every function came back with roughly the same
-// spread whatever the equipment could actually do, and two compressors in
-// different services produced identical failures.
+// JA1011 5.2 requires all failed states of each FUNCTION -- not of each
+// parameter, and the difference is the whole design of this block.
 //
-// WHAT a function can fail at is its own performance standard -- flow,
-// pressure, temperature, quality for an air compressor; leak rate and leaked
-// medium for a containment duty. Those dimensions are context and cannot come
-// from a list. The failed-state types are only the DIRECTIONS a single
-// parameter can be violated in. So enumeration runs parameter x credible
-// direction, and the count of failures is an output, never an input.
+// Two wrong versions came before. The first listed six failed-state types and
+// asked the model to work through them: a template, so every function came back
+// with the same spread whatever the equipment could do, and two compressors in
+// different services produced identical failures. The second replaced that with
+// a mandatory parameter x direction matrix -- every pair had to appear in
+// "failures" or in "skipped" with a written justification, plus a self-check
+// counting step. That made declining cost more than complying, which is an
+// asymmetric pressure toward output: the model stopped judging and started
+// filling cells. One live subsystem went from 7 failures to 18, of which five
+// were duplicates or hierarchy violations (three "exceeds design rating" rows,
+// a protective excursion double-counted against its own trip, and a second
+// erratic row on the same duty).
+//
+// So: the parameters are EVIDENCE of what "required" means, and the direction
+// list is the vocabulary for describing a violation. Neither is a checklist.
+// The model enumerates candidates and then SELECTS the ones that leave the user
+// in a materially different position. Declining is free again.
 const JA1011_FAILED_STATE_RULES = `Failed-state derivation (SAE JA1011 5.2):
-Do NOT work through a list of failure types. Derive the failures from the function's own performance standard. JA1011 5.2 requires ALL failed states of every function: completeness is the requirement, and padding is the thing to avoid while meeting it. Both matter. Leaving a credible failure out is exactly as wrong as inventing one that the equipment cannot have.
+JA1011 5.2 requires all failed states of each FUNCTION, not of each parameter. A function is failed when it no longer delivers what its users require. The parameters are evidence of what "required" means; they are not a matrix to fill.
 
 Method, applied per row:
-1. Take the row's "standardParameters". Each is one requirement that can be violated independently, and EVERY one of them must be worked through — not the most obvious, not the first, not the last.
-2. For each parameter, consider each direction below and decide whether it is physically credible for THIS parameter in THIS service. The parameter's "bound" limits what is askable — a "min" bound makes falling below credible and exceeding usually not; a "max" bound the reverse; "target" and "range" allow both; "spec" allows conformance loss only.
-   - "total": the function delivers nothing at all against this parameter.
-   - "partial": delivered below the required value.
-   - "upper_limit": delivered above the required value, including failing to stop, unload, or shut down.
+1. Read the function and its standard as one duty in its operating context. Ask what states leave this duty unmet in a way the user would notice and act on.
+2. Use "standardParameters" as evidence of what can be violated, and the directions below as the vocabulary for how one requirement goes wrong. They inform the judgement; they do not make it.
+   - "total": the function delivers nothing.
+   - "partial": delivered below what is required.
+   - "upper_limit": delivered above what is required, including failing to stop, unload, or shut down.
    - "intermittent": delivered erratically or only some of the time.
-3. Every parameter-and-direction pair you considered must appear in EXACTLY ONE of the two output arrays. Credible pairs go in "failures". Pairs you rejected go in "skipped" with the physical reason they cannot occur here. A pair that appears in neither array is an incomplete analysis and the answer is wrong.
-4. Set "parameter" on every failure to the parameter name it violates, so two failures can share a direction without being duplicates.
-5. Before answering, check your own output: for each row, count the parameters you were given and confirm every one of them is named in "failures" or in "skipped". A row whose parameters carry real measured values will almost always produce more than one failure — if you have written only one for such a row, you have skipped parameters without saying so. Go back and finish them.
+3. SELECT the states that carry a distinct consequence. Two states that differ only in which parameter moved, but leave the user in the same position, are ONE failed state: write it once, against the parameter that best describes it. A parameter nobody would respond to differently produces no row of its own.
+4. Set "parameter" and "failedState" on every failure you write, so the analysis can be audited.
+5. "skipped" is optional. Use it to record a direction you deliberately considered and rejected. Nothing requires you to account for every combination, and an unlisted combination is not an error.
 
 Hard rules:
-- There is no fixed count, in either direction. A function with one parameter and one credible direction correctly yields ONE failure. A function with four measured parameters typically yields four to six. Do not invent a failure to reach a number, and do not stop early to stay under one.
-- The primary service parameters are the point of the function. Never emit a failure for a secondary rating — absorbed power, a design margin — while leaving the flow, pressure, temperature, or quality the function exists to deliver without one.
+- There is no target count, in either direction. Write what this equipment can actually do. A function with four measured parameters may correctly yield two failed states or five; those are right answers about different equipment, not a better and a worse answer about the same one.
+- PROTECTIVE FUNCTIONS (JA1011 5.1.5): the failed state of a protective function is its inability to protect, and nothing else. Write the protective action not happening -- "unable to shut down on high discharge temperature", "unable to relieve overpressure at the set pressure", "standby does not start on duty trip". The excursion the device guards against is a failed state of the function being PROTECTED, usually in another subsystem, and it does not belong here. Never write both.
+- At most ONE "intermittent" failure per function. Erratic delivery is one failed state of the duty, not one per parameter.
+- A design rating or withstand limit is not something the function delivers, so exceeding it is never a failed state. It is a cause of losing containment or integrity. Do not write it as a functional failure.
+- When a requirement appears in a flagged source CONFLICT, write ONE failure for it and name the conflict in the text. Never one failure per conflicting value.
 - Do not emit "lower_limit". Below the requirement is "partial"; the distinction was never real.
-- "on_demand" is not a direction. Emit it only for a row whose "evidence" is "hidden", where it REPLACES that row's "total" failure — a hidden function's total loss is discovered on demand. Never emit both "total" and "on_demand" for the same row, and never emit "on_demand" for an evident function.
-- "on_demand" replaces "total" and NOTHING ELSE. A hidden function still fails in every other direction its parameters allow, and those failures are separate rows in the output. A temperature limit that is not enforced has two distinct failures: the protective action not happening when called (on_demand) and the temperature actually going past the limit (upper_limit). Writing only the first leaves the excursion itself unanalysed.
-- Word an "on_demand" failure as the protective or standby action not happening — "does not shut down on high discharge temperature", "standby does not start on duty trip". Do not write it as the limit itself being crossed; that is the "upper_limit" failure and it is a different row.
+- "on_demand" is not a direction. Emit it only for a row whose "evidence" is "hidden", where it REPLACES that row's "total" failure -- a hidden function's total loss is discovered on demand. Never emit both "total" and "on_demand" for the same row, and never "on_demand" for an evident function.
 - Use the parameter's own value in the failure text, and make the wording agree with the direction. "partial" reads as below/insufficient, "upper_limit" reads as above/exceeds. A failure tagged "upper_limit" whose text says "below" is a contradiction and will be rejected.
 - When the row has no parameters, the standard is qualitative. Emit total loss only, and do not invent values to enumerate against.
 - Two failures on the same row must differ in parameter or in direction. Identical states reworded are duplicates.`;
@@ -421,6 +434,223 @@ type SystemModeOccurrenceEvidence = {
 
 // Vision-specific payload extension (handled via contextData or standardized logic in contract)
 // The contract requires a unified interface. We will map vision specific fields into the payload structure.
+
+/**
+ * A breakdown row before it is given an id.
+ *
+ * Deliberately not the `BreakdownRow` in types.ts: that one carries an `id`,
+ * which is minted by the caller once the row survives merging. Shared between
+ * decomposeFunction and buildBreakdownRows so the extraction stays type-checked.
+ */
+export type RawBreakdownRow = {
+    function: string;
+    standard: string;
+    snippet: string;
+    functionClass: FunctionClass;
+    quantified: boolean;
+    evidence: 'evident' | 'hidden';
+    standardParameters: StandardParameter[];
+};
+
+/**
+ * Bucket, merge, and cap the raw rows a model returned for one subsystem.
+ *
+ * Extracted from decomposeFunction so it can be tested without an API call.
+ * Everything here is deterministic: given the same rows and names it returns the
+ * same breakdown, which is the property the golden fixtures assert.
+ */
+export function buildBreakdownRows(
+    rawRows: RawBreakdownRow[],
+    subsystemName: string,
+    projectName: string,
+    detailLevel: 'normal' | 'detailed' = 'detailed',
+): RawBreakdownRow[] {
+    const isControlSubsystem = /transmitter|sensor|instrument|control|panel|plc|ucp|pcs|sgs|logic|controller/i.test(`${subsystemName} ${projectName}`);
+    const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const textOf = (r: RawBreakdownRow) => compact(`${r.function} ${r.standard} ${r.snippet}`);
+    const includesAny = (text: string, terms: RegExp[]) => terms.some(re => re.test(text));
+    const rows: RawBreakdownRow[] = [];
+    const usedKeys = new Set<string>();
+    // Cap functions, not failures. Each row now yields several failed states,
+    // so the analysis grows through JA1011 5.2 enumeration rather than row count.
+    const maxRows = detailLevel === 'normal' ? 6 : 8;
+    // Keyed on the FUNCTION alone, not function+standard.
+    //
+    // Including the standard meant one duty stated twice with different
+    // standards — "contain air and oil / 13.8 barg, 150 deg C" beside
+    // "contain air and oil / retained within pressure envelope" — produced
+    // two keys and survived as two rows, one of them unquantified. They are
+    // the same function; the second is just a worse description of the same
+    // standard. Merging them and unioning the parameters keeps the measured
+    // requirements and drops the duplicate.
+    const rowKey = (row: RawBreakdownRow) => compact(row.function)
+        // Fold verb inflections before keying. a65c305 rebuilt FUNCTION_VERB_FORMS to
+        // stop "contain" and "contains" producing different keys, but wired it only
+        // into the failure-phrase normaliser -- this key, the one that actually
+        // decides whether two rows are the same duty, never saw it. So "contain air
+        // and oil" and "contains air and oil" still survived as two rows, one of them
+        // unquantified.
+        .replace(FUNCTION_VERB_PATTERN, m => FUNCTION_VERB_FORMS[m.toLowerCase()] || m)
+        .replace(/\b(leaks?|leakage)\b/g, 'leak')
+        .replace(/\b(properly|correctly|adequately|reliably)\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    // Keyed on the caller's bucket key, not on rowKey(row).
+    //
+    // bucketOf deliberately prefixes the class, so "limit discharge temperature"
+    // classified protection survives alongside the same phrase classified control.
+    // Re-deriving a bare rowKey here collided them again and dropped the second
+    // silently, taking its parameters with it -- the merge decided to keep two
+    // rows and this line overruled it without telling anyone. When a key does
+    // repeat, union the parameters instead of discarding the loser.
+    const addRow = (row: RawBreakdownRow, key: string) => {
+        const cleaned = {
+            function: row.function.trim(),
+            standard: row.standard.trim(),
+            snippet: (row.snippet || row.function).trim(),
+            functionClass: row.functionClass,
+            quantified: row.quantified,
+            evidence: row.evidence,
+            standardParameters: row.standardParameters,
+        };
+        if (!cleaned.function || !cleaned.standard) return;
+        if (usedKeys.has(key)) {
+            const existing = rows.find(r => rowKey(r) === rowKey(cleaned) && r.functionClass === cleaned.functionClass);
+            if (existing) {
+                const seen = new Set((existing.standardParameters ?? []).map(pp => pp.name));
+                for (const pp of cleaned.standardParameters ?? []) {
+                    if (seen.has(pp.name)) continue;
+                    seen.add(pp.name);
+                    (existing.standardParameters ??= []).push(pp);
+                }
+            }
+            return;
+        }
+        usedKeys.add(key);
+        rows.push(cleaned);
+    };
+
+    const weakOnly = /^(reliable|efficient|safe|available|continuous|proper|properly|as required|normal|normal operation|good condition|acceptable|adequate|within limits|per design)$/i;
+    // "maintain" is deliberately absent. It is the ordinary verb for a primary
+    // duty ("maintain discharge pressure", "maintain lubrication"), so matching
+    // on it pulled primary rows into the control bucket, where merging then
+    // deleted them.
+    const controlTerms = [/\b(control|regulate|stabilize|modulate|sequence|start|stop|load|unload|setpoint|set point|feedback|demand response)\b/];
+    const envelopeTerms = [/\b(operating envelope|envelope|range|limit|rated|design|maximum|minimum|temperature|pressure|flow|speed|capacity|level)\b/];
+    const serviceFunctionTerms = [/\b(deliver|supply|provide|pump|transfer|convert|heat|cool|filter|separate|store|contain|generate)\b/];
+    const ppeTerms = [/\b(hearing protection|ppe|personnel|operator exposure|protective equipment)\b/];
+    const safeguardTerms = [/\b(safety valve|relief valve|rupture disc|interlock|trip|alarm|shutdown|protection device|overpressure protection|set pressure)\b/];
+    const monitoringTerms = [/\b(transmitter|sensor|indicator|feedback|monitored|monitoring|control panel|plc|dcs|scada|ucp|pcs|sgs)\b/];
+    const designOnlyTerms = [/\b(material|construction|casing|housing|frame|skid|designed for)\b/];
+
+    const isNoiseExposureOnly = (text: string) =>
+        /\b(noise|sound)\b/.test(text) && /\b(db|decibel|hearing|personnel|operator|meter|metre)\b/.test(text);
+    const isFunctionalVerb = (fn: string) =>
+        /\b(operate|run|maintain|deliver|supply|provide|contain|control|regulate|protect|store|transfer|generate)\b/.test(compact(fn));
+    const isProtectiveFunction = (fn: string) =>
+        /\b(protect|limit|relieve|contain|isolate|prevent|restrict|shut|trip|stop)\b/.test(compact(fn));
+    const shouldSkip = (row: RawBreakdownRow) => {
+        const text = textOf(row);
+        if (weakOnly.test(row.standard.trim())) return true;
+        if (includesAny(text, ppeTerms)) return true;
+        if (!/noise|sound|acoustic/i.test(`${subsystemName} ${projectName}`) && isNoiseExposureOnly(text)) return true;
+        // A relief or isolation DUTY is a protection function under JA1011 5.1 and
+        // must survive; only a row describing the device itself is dropped. The
+        // blanket skip here was what erased overpressure-limiting failures.
+        if (!isControlSubsystem && includesAny(text, safeguardTerms) && !isProtectiveFunction(row.function)) return true;
+        if (!isControlSubsystem && includesAny(text, monitoringTerms)) return true;
+        if (includesAny(text, designOnlyTerms) && !isFunctionalVerb(row.function)) return true;
+        return false;
+    };
+
+    // The synthesised "operates within equipment condition limits" rows are gone.
+    // Vibration, wear, corrosion and overheating are failure modes, not functions,
+    // and a row built from them produced a functional failure that was really a
+    // mode -- the exact field confusion FMECA_HIERARCHY_RULES forbids elsewhere.
+    const candidateRows: RawBreakdownRow[] = rawRows.filter(row => !shouldSkip(row));
+
+    // Bucket by declared JA1011 class so distinct secondary functions are never
+    // merged into one another. Two rows only collapse when they share a class
+    // AND would fail the same way.
+    //
+    // Every bucket key is now per-row. Control and envelope used to return the
+    // literal strings 'control' and 'envelope', so EVERY control function in a
+    // subsystem landed in one bucket and mergeBucket kept exactly one of them.
+    // A compressor that supplies air and also holds pressure by loading and
+    // unloading lost the load/unload function outright, and it was invisible:
+    // the survivor looked like a complete answer.
+    const bucketOf = (row: RawBreakdownRow) => {
+        if (shouldSkip(row)) return '';
+        const text = textOf(row);
+        const fn = compact(row.function);
+        if (row.functionClass === 'containment' || row.functionClass === 'protection') return `${row.functionClass}:${rowKey(row)}`;
+        if (row.functionClass === 'control' || includesAny(text, controlTerms)) return `control:${rowKey(row)}`;
+        if (includesAny(text, envelopeTerms) && !includesAny(fn, serviceFunctionTerms)) return `envelope:${rowKey(row)}`;
+        return `row:${rowKey(row)}`;
+    };
+    // Merging used to overwrite the standard with fixed prose, which deleted the
+    // measured value JA1011 5.1.2 requires. Keep the most quantified member instead.
+    const mergeBucket = (_bucket: string, group: RawBreakdownRow[]): RawBreakdownRow => {
+        if (group.length === 1) return group[0];
+        const quantified = group.filter(r => r.quantified);
+        // Prefer the member carrying the most parsed requirements: that is the
+        // one the FF step can enumerate against. Standard length is only the
+        // tiebreak, since a long qualitative standard beats a short measured one
+        // on characters while being worth less.
+        const richest = (a: RawBreakdownRow, b: RawBreakdownRow) => {
+            const byParams = (b.standardParameters?.length ?? 0) - (a.standardParameters?.length ?? 0);
+            if (byParams !== 0) return byParams < 0 ? a : b;
+            return b.standard.length > a.standard.length ? b : a;
+        };
+        const winner = quantified.length
+            ? quantified.reduce(richest)
+            : group[0];
+        // Union the parameters across the group. Keeping only the winner's
+        // would silently drop a measured requirement that the losing row
+        // was the one to state.
+        const mergedParameters: StandardParameter[] = [];
+        const seenParam = new Set<string>();
+        for (const member of [winner, ...group]) {
+            for (const p of member.standardParameters ?? []) {
+                if (seenParam.has(p.name)) continue;
+                seenParam.add(p.name);
+                mergedParameters.push(p);
+            }
+        }
+        return {
+            ...winner,
+            standardParameters: mergedParameters,
+            quantified: winner.quantified || mergedParameters.some(p => /\d/.test(p.value)),
+            snippet: winner.snippet || winner.function,
+            // A hidden member makes the merged function hidden: the stricter
+            // classification is the safe one, since it drives failure-finding.
+            evidence: group.some(r => r.evidence === 'hidden') ? 'hidden' : winner.evidence,
+        };
+    };
+
+    const bucketOrder: string[] = [];
+    const buckets = new Map<string, RawBreakdownRow[]>();
+    candidateRows.forEach(row => {
+        const bucket = bucketOf(row);
+        if (!bucket) return;
+        if (!buckets.has(bucket)) {
+            buckets.set(bucket, []);
+            bucketOrder.push(bucket);
+        }
+        buckets.get(bucket)!.push(row);
+    });
+
+    bucketOrder.forEach(bucket => addRow(mergeBucket(bucket, buckets.get(bucket)!), bucket));
+    if (rows.length > maxRows) {
+        // Say what was dropped. A subsystem with more real duties than the cap
+        // silently lost the tail, and the survivors read as a complete answer.
+        console.warn(
+            `[decomposeFunction] "${subsystemName}": ${rows.length - maxRows} function row(s) dropped by the ${maxRows}-row cap.`,
+            rows.slice(maxRows).map(r => r.function)
+        );
+    }
+    return rows.slice(0, maxRows);
+}
 
 export const AIService = {
     // -------------------------------------------------------------------------
@@ -911,8 +1141,24 @@ export const AIService = {
                 // Models routinely answer { value: "130 psig (9 barg)", unit: "psig" },
                 // and the chip then renders "130 psig (9 barg) psig". The value is the
                 // authoritative text, so drop a unit it already carries.
+                //
+                // Token-wise, not a \b-anchored regex and not a plain substring.
+                //
+                // \b needs a word character on the boundary, so every symbol unit failed
+                // that test: "40%" with unit "%" rendered "40% %". A plain includes()
+                // fixes those but still misses the composite units models emit against a
+                // dual-unit value -- a live run returned { value: "130 psig (9 barg)",
+                // unit: "psig (barg)" } and rendered "130 psig (9 barg) psig (barg)".
+                // So: the unit is redundant when every one of its meaningful tokens is
+                // already somewhere in the value.
                 const unit = unitRaw && unitRaw.toLowerCase() !== 'null' ? unitRaw : null;
-                const unitRedundant = Boolean(unit) && new RegExp(`\\b${unit!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(value);
+                const unitTokens = unit ? (unit.toLowerCase().match(/[\p{L}\p{N}%°]+/gu) ?? []) : [];
+                const lowerValue = value.toLowerCase();
+                const unitRedundant = Boolean(unit) && (
+                    unitTokens.length > 0
+                        ? unitTokens.every(t => lowerValue.includes(t))
+                        : lowerValue.includes(unit!.toLowerCase())
+                );
                 return {
                     name,
                     value,
@@ -1577,7 +1823,7 @@ ${buildSiblingSubsystemBlock(siblingSubsystems, 'functional failures')}
 Function breakdown rows:
 ${rowBlock}
 
-${existingBlock}Task: For EACH breakdown row, derive the Functional Failures that row's own performance standard supports — no more, no fewer.
+${existingBlock}Task: For EACH breakdown row, judge which failed states that row's own duty can actually reach, and write those. Completeness means every failed state a user would respond to differently; it does not mean every combination of parameter and direction.
 ${FMECA_HIERARCHY_RULES}
 ${FMECA_CONCISE_WORDING_RULES}
 ${FUNCTIONAL_FAILURE_TECHNICAL_RULES}
@@ -1589,7 +1835,7 @@ Write short professional FMECA failure states, not narratives.
 Length per failure: 6-14 words.
 Repeat the same rowId once per failure generated for that row.
 
-Return ONLY strict JSON. "parameter" names the standardParameters entry the failure violates, or "" when the row has no parameters. "skipped" records directions you considered and rejected, so the count reflects the equipment rather than a quota:
+Return ONLY strict JSON. "parameter" names the standardParameters entry the failure violates, or "" when the row has no parameters. "skipped" is OPTIONAL — use it only to record a direction worth showing as deliberately considered and rejected; leaving a combination out of both arrays is not an error:
 {
   "failures": [ { "rowId": "same rowId from input", "parameter": "discharge pressure", "failedState": "total|partial|upper_limit|intermittent|on_demand", "desc": "Functional Failure", "sourceSnippet": "source snippet from row" } ],
   "skipped": [ { "rowId": "...", "parameter": "...", "failedState": "...", "reason": "why this direction is not credible here" } ]
@@ -1650,8 +1896,14 @@ Return ONLY strict JSON. "parameter" names the standardParameters entry the fail
                 // A failure tagged upper_limit whose text says "below" is not a
                 // wording nit: the chip and the sentence disagree, and whichever the
                 // reader trusts, the other one is wrong. Send it back to be restated.
-                const saysBelow = /\b(below|under|insufficient|less than|fails to reach|short of)\b/i.test(desc);
-                const saysAbove = /\b(above|over|exceeds?|excessive|greater than|beyond)\b/i.test(desc);
+                // "under" and "over" only count as direction words when a number follows.
+                // Bare "under" is usually conditional -- "fails to shut down under high
+                // discharge temperature" is an upper_limit failure that was being rejected
+                // as contradictory, burning the repair pass on a correct sentence.
+                const saysBelow = /\b(below|insufficient|less than|fails to reach|short of)\b/i.test(desc)
+                    || /\bunder\s+[\d.]/i.test(desc);
+                const saysAbove = /\b(above|exceeds?|excessive|greater than|beyond|high|excess)\b/i.test(desc)
+                    || /\bover\s+[\d.]/i.test(desc);
                 if ((failedState === 'upper_limit' && saysBelow && !saysAbove) ||
                     (failedState === 'partial' && saysAbove && !saysBelow)) {
                     rejected.push({ rowId, raw, reason: `text direction contradicts failedState "${failedState}"` });
@@ -2857,8 +3109,8 @@ Output format:
         sessionId?: string,
         rowEvidence: 'evident' | 'hidden' = 'evident',
         rowParameters: StandardParameter[] = []
-    ): Promise<string> {
-        if ((!key || key.length < 10) && aiProvider !== 'copilot') return '';
+    ): Promise<{ desc: string; parameter?: string; failedState?: FailedStateType }> {
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') return { desc: '' };
         const existingBlock = existingFailures.length > 0
             ? `Existing Functional Failures already defined (DO NOT repeat or closely resemble):\n${existingFailures.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n`
             : '';
@@ -2886,7 +3138,9 @@ Use the function label and performance/condition standard as the primary source.
 Use the full subsystem function only to resolve ambiguity, not to add extra details.
 Write a short professional FMECA failure state, not a narrative.
 Length: 6-14 words.
-Return ONLY the Functional Failure statement — one concise line, no prefix, no explanation.`;
+
+Tag the failure so the coverage checker can see what it closed. Without "parameter" and "failedState" this failure is invisible to the check that reported the gap, and the gap keeps reporting itself.
+Return ONLY strict JSON: { "desc": "...", "parameter": "the standardParameters entry it violates, or empty", "failedState": "total|partial|upper_limit|intermittent|on_demand" }`;
 
         const content = prompt + (systemContext ? '\n\n' + systemContext : '');
         try {
@@ -2901,12 +3155,28 @@ Return ONLY the Functional Failure statement — one concise line, no prefix, no
                 mode: 'ai',
                 refText: '',
                 apiKey: key,
-                responseFormat: 'text'
+                responseFormat: 'json'
             }));
-            // Empty string, not a template: the caller leaves the row alone.
-            return this.cleanFunctionalFailureText(res) ?? '';
+            // Tolerate a bare sentence: some providers ignore the JSON contract on a
+            // single-field answer, and a usable failure should not be thrown away over
+            // its wrapper.
+            const parsed = this.extractJSON(res);
+            const rawDesc = parsed && typeof parsed === 'object'
+                ? String((parsed as any).desc ?? (parsed as any).failure ?? '')
+                : String(res ?? '');
+            // Empty desc, not a template: the caller leaves the row alone.
+            const desc = this.cleanFunctionalFailureText(rawDesc) ?? '';
+            if (!desc) return { desc: '' };
+            const claimed = String((parsed as any)?.failedState ?? '').toLowerCase().trim() as FailedStateType;
+            const validStates: FailedStateType[] = ['total', 'partial', 'upper_limit', 'intermittent', 'on_demand'];
+            return {
+                desc,
+                parameter: this.cleanSingleFieldText(String((parsed as any)?.parameter ?? '')).toLowerCase() || undefined,
+                // "lower_limit" folds to "partial", same as the batch path.
+                failedState: claimed === 'lower_limit' ? 'partial' : (validStates.includes(claimed) ? claimed : undefined),
+            };
         } catch {
-            return '';
+            return { desc: '' };
         }
     },
 
@@ -2992,9 +3262,12 @@ Use this method silently:
 10. Before final answer, audit silently:
    - Did I miss a containment or protection function that the specs imply?
    - Did I create a row for an operating envelope, an equipment condition, or a design arrangement instead of a function?
+   - Did I create a row for a design rating that is really another row's standard? A rating is not a duty.
+   - For each protective function: is its standard the trip or set point rather than a rating, and is it written as a capability?
    - Did I leave a standard qualitative when the Specs held a number?
-   - Did I split every standard that holds more than one requirement into separate parameters?
+   - Did I split every standard that holds more than one requirement into separate parameters, WITHOUT promoting design ratings into parameters?
    - Did I mark standby and protective functions as hidden?
+   - Where the context flagged a CONFLICT covering a value I used, did I keep it as one requirement and note the conflict, rather than treating each conflicting value as its own?
 
 ${detailRule}
 
@@ -3030,8 +3303,7 @@ Return ONLY this JSON, no prose, no markdown:
                 if (!p || !Array.isArray(p.rows)) throw new Error('decompose: bad shape');
                 return p;
             });
-            type BreakdownRow = { function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden'; standardParameters: StandardParameter[] };
-            const rawRows: BreakdownRow[] = parsed.rows
+            const rawRows: RawBreakdownRow[] = parsed.rows
                 .map((r: any) => this.cleanBreakdownRow({
                     function: String(r?.function ?? '').trim(),
                     standard: String(r?.standard ?? '').trim(),
@@ -3043,157 +3315,7 @@ Return ONLY this JSON, no prose, no markdown:
                 }))
                 .filter((r: any) => r.function && r.standard);
 
-            const isControlSubsystem = /transmitter|sensor|instrument|control|panel|plc|ucp|pcs|sgs|logic|controller/i.test(`${subsystemName} ${projectName}`);
-            const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-            const textOf = (r: BreakdownRow) => compact(`${r.function} ${r.standard} ${r.snippet}`);
-            const includesAny = (text: string, terms: RegExp[]) => terms.some(re => re.test(text));
-            const rows: BreakdownRow[] = [];
-            const usedKeys = new Set<string>();
-            // Cap functions, not failures. Each row now yields several failed states,
-            // so the analysis grows through JA1011 5.2 enumeration rather than row count.
-            const maxRows = detailLevel === 'normal' ? 6 : 8;
-            // Keyed on the FUNCTION alone, not function+standard.
-            //
-            // Including the standard meant one duty stated twice with different
-            // standards — "contain air and oil / 13.8 barg, 150 deg C" beside
-            // "contain air and oil / retained within pressure envelope" — produced
-            // two keys and survived as two rows, one of them unquantified. They are
-            // the same function; the second is just a worse description of the same
-            // standard. Merging them and unioning the parameters keeps the measured
-            // requirements and drops the duplicate.
-            const rowKey = (row: BreakdownRow) => compact(row.function)
-                .replace(/\b(leaks?|leakage)\b/g, 'leak')
-                .replace(/\b(properly|correctly|adequately|reliably)\b/g, '')
-                .replace(/\s+/g, ' ')
-                .trim();
-            const addRow = (row: BreakdownRow) => {
-                const cleaned = {
-                    function: row.function.trim(),
-                    standard: row.standard.trim(),
-                    snippet: (row.snippet || row.function).trim(),
-                    functionClass: row.functionClass,
-                    quantified: row.quantified,
-                    evidence: row.evidence,
-                    standardParameters: row.standardParameters,
-                };
-                const key = rowKey(cleaned);
-                if (!cleaned.function || !cleaned.standard || usedKeys.has(key)) return;
-                usedKeys.add(key);
-                rows.push(cleaned);
-            };
-
-            const weakOnly = /^(reliable|efficient|safe|available|continuous|proper|properly|as required|normal|normal operation|good condition|acceptable|adequate|within limits|per design)$/i;
-            // "maintain" is deliberately absent. It is the ordinary verb for a primary
-            // duty ("maintain discharge pressure", "maintain lubrication"), so matching
-            // on it pulled primary rows into the control bucket, where merging then
-            // deleted them.
-            const controlTerms = [/\b(control|regulate|stabilize|modulate|sequence|start|stop|load|unload|setpoint|set point|feedback|demand response)\b/];
-            const envelopeTerms = [/\b(operating envelope|envelope|range|limit|rated|design|maximum|minimum|temperature|pressure|flow|speed|capacity|level)\b/];
-            const serviceFunctionTerms = [/\b(deliver|supply|provide|pump|transfer|convert|heat|cool|filter|separate|store|contain|generate)\b/];
-            const ppeTerms = [/\b(hearing protection|ppe|personnel|operator exposure|protective equipment)\b/];
-            const safeguardTerms = [/\b(safety valve|relief valve|rupture disc|interlock|trip|alarm|shutdown|protection device|overpressure protection|set pressure)\b/];
-            const monitoringTerms = [/\b(transmitter|sensor|indicator|feedback|monitored|monitoring|control panel|plc|dcs|scada|ucp|pcs|sgs)\b/];
-            const designOnlyTerms = [/\b(material|construction|casing|housing|frame|skid|designed for)\b/];
-
-            const isNoiseExposureOnly = (text: string) =>
-                /\b(noise|sound)\b/.test(text) && /\b(db|decibel|hearing|personnel|operator|meter|metre)\b/.test(text);
-            const isFunctionalVerb = (fn: string) =>
-                /\b(operate|run|maintain|deliver|supply|provide|contain|control|regulate|protect|store|transfer|generate)\b/.test(compact(fn));
-            const isProtectiveFunction = (fn: string) =>
-                /\b(protect|limit|relieve|contain|isolate|prevent|restrict|shut|trip|stop)\b/.test(compact(fn));
-            const shouldSkip = (row: BreakdownRow) => {
-                const text = textOf(row);
-                if (weakOnly.test(row.standard.trim())) return true;
-                if (includesAny(text, ppeTerms)) return true;
-                if (!/noise|sound|acoustic/i.test(`${subsystemName} ${projectName}`) && isNoiseExposureOnly(text)) return true;
-                // A relief or isolation DUTY is a protection function under JA1011 5.1 and
-                // must survive; only a row describing the device itself is dropped. The
-                // blanket skip here was what erased overpressure-limiting failures.
-                if (!isControlSubsystem && includesAny(text, safeguardTerms) && !isProtectiveFunction(row.function)) return true;
-                if (!isControlSubsystem && includesAny(text, monitoringTerms)) return true;
-                if (includesAny(text, designOnlyTerms) && !isFunctionalVerb(row.function)) return true;
-                return false;
-            };
-
-            // The synthesised "operates within equipment condition limits" rows are gone.
-            // Vibration, wear, corrosion and overheating are failure modes, not functions,
-            // and a row built from them produced a functional failure that was really a
-            // mode -- the exact field confusion FMECA_HIERARCHY_RULES forbids elsewhere.
-            const candidateRows: BreakdownRow[] = rawRows.filter(row => !shouldSkip(row));
-
-            // Bucket by declared JA1011 class so distinct secondary functions are never
-            // merged into one another. Two rows only collapse when they share a class
-            // AND would fail the same way.
-            //
-            // Every bucket key is now per-row. Control and envelope used to return the
-            // literal strings 'control' and 'envelope', so EVERY control function in a
-            // subsystem landed in one bucket and mergeBucket kept exactly one of them.
-            // A compressor that supplies air and also holds pressure by loading and
-            // unloading lost the load/unload function outright, and it was invisible:
-            // the survivor looked like a complete answer.
-            const bucketOf = (row: BreakdownRow) => {
-                if (shouldSkip(row)) return '';
-                const text = textOf(row);
-                const fn = compact(row.function);
-                if (row.functionClass === 'containment' || row.functionClass === 'protection') return `${row.functionClass}:${rowKey(row)}`;
-                if (row.functionClass === 'control' || includesAny(text, controlTerms)) return `control:${rowKey(row)}`;
-                if (includesAny(text, envelopeTerms) && !includesAny(fn, serviceFunctionTerms)) return `envelope:${rowKey(row)}`;
-                return `row:${rowKey(row)}`;
-            };
-            // Merging used to overwrite the standard with fixed prose, which deleted the
-            // measured value JA1011 5.1.2 requires. Keep the most quantified member instead.
-            const mergeBucket = (_bucket: string, group: BreakdownRow[]): BreakdownRow => {
-                if (group.length === 1) return group[0];
-                const quantified = group.filter(r => r.quantified);
-                // Prefer the member carrying the most parsed requirements: that is the
-                // one the FF step can enumerate against. Standard length is only the
-                // tiebreak, since a long qualitative standard beats a short measured one
-                // on characters while being worth less.
-                const richest = (a: BreakdownRow, b: BreakdownRow) => {
-                    const byParams = (b.standardParameters?.length ?? 0) - (a.standardParameters?.length ?? 0);
-                    if (byParams !== 0) return byParams < 0 ? a : b;
-                    return b.standard.length > a.standard.length ? b : a;
-                };
-                const winner = quantified.length
-                    ? quantified.reduce(richest)
-                    : group[0];
-                // Union the parameters across the group. Keeping only the winner's
-                // would silently drop a measured requirement that the losing row
-                // was the one to state.
-                const mergedParameters: StandardParameter[] = [];
-                const seenParam = new Set<string>();
-                for (const member of [winner, ...group]) {
-                    for (const p of member.standardParameters ?? []) {
-                        if (seenParam.has(p.name)) continue;
-                        seenParam.add(p.name);
-                        mergedParameters.push(p);
-                    }
-                }
-                return {
-                    ...winner,
-                    standardParameters: mergedParameters,
-                    quantified: winner.quantified || mergedParameters.some(p => /\d/.test(p.value)),
-                    snippet: winner.snippet || winner.function,
-                    // A hidden member makes the merged function hidden: the stricter
-                    // classification is the safe one, since it drives failure-finding.
-                    evidence: group.some(r => r.evidence === 'hidden') ? 'hidden' : winner.evidence,
-                };
-            };
-
-            const bucketOrder: string[] = [];
-            const buckets = new Map<string, BreakdownRow[]>();
-            candidateRows.forEach(row => {
-                const bucket = bucketOf(row);
-                if (!bucket) return;
-                if (!buckets.has(bucket)) {
-                    buckets.set(bucket, []);
-                    bucketOrder.push(bucket);
-                }
-                buckets.get(bucket)!.push(row);
-            });
-
-            bucketOrder.forEach(bucket => addRow(mergeBucket(bucket, buckets.get(bucket)!)));
-            return rows.slice(0, maxRows);
+            return buildBreakdownRows(rawRows, subsystemName, projectName, detailLevel);
         } catch {
             return [];
         }

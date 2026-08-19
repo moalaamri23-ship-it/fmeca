@@ -11,6 +11,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > The canonical skill files are **global** (accessible across all projects), located at:
 > `~/.claude/plugins/cache/local/reliability-tools/unknown/skills/`
 
+## Changing the JA1011 derivation prompts
+
+`FUNCTION_BREAKDOWN_TECHNICAL_RULES` and `JA1011_FAILED_STATE_RULES` in
+`services/AIService.ts` are general rules applied to every subsystem. Two rules for
+changing them:
+
+1. **No equipment literals.** A specific tag value, substance, or rating in a general
+   prompt is overfitting. Express it as a class ("each substance the subsystem holds
+   in") rather than an instance ("compressed air and lubricating oil").
+2. **Never validate on one subsystem.** These prompts were once tuned against a single
+   live run of one screw compressor, which inflated every other subsystem's output.
+   Before shipping a change, run it on a non-rotating, non-air subsystem — a control
+   panel, a switchboard, a heat exchanger — and check the function count stays sane.
+
+`npm run test` covers the deterministic half (cleaners, bucketing, coverage checks).
+It cannot catch a prompt regression; only the live run can.
+
 ## Commands
 
 ```bash
