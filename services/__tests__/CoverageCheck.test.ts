@@ -243,7 +243,28 @@ describe('findValueConflict — dual-unit restatements are not disputes', () => 
         expect(detailFor('12 barg (13.8 barg design)')).toHaveLength(1);
     });
 
-    it('still flags two bare figures with no unit at all', () => {
-        expect(detailFor('8.5 (8.0 per control philosophy)')).toHaveLength(1);
+    /**
+     * A digit inside a unit or a source tag is not a second value. Both of these
+     * were flagged by an earlier version, against real values from a live run:
+     * "18 m3" was reported as "states both 18 m and 3 m", and a value carrying the
+     * document tags S3/S2 as "states both 8.5 barg and 3 barg".
+     */
+    it('does not treat a digit inside the unit as a second value', () => {
+        expect(detailFor('18 m3')).toEqual([]);
+        expect(detailFor('599 Sm3/hr')).toEqual([]);
+    });
+
+    it('does not treat a digit inside a source tag as a second value', () => {
+        expect(detailFor('8.5 barg (S3) / 8.0 barg (S2) - CONFLICT')).toEqual([]);
+    });
+
+    it('stays quiet on ordinary multi-number specs', () => {
+        for (const v of ['415 V, 3-phase, 50 Hz', '110 kW at 2960 rpm', '99.99% at 0.01 micron', '2 x 100%', '-15 deg C at 8 barg', 'ATEX Zone 2']) {
+            expect(detailFor(v), v).toEqual([]);
+        }
+    });
+
+    it('flags a repeated unit carrying two different figures', () => {
+        expect(detailFor('8.5 barg (control philosophy 8.0 barg; conflict)')).toHaveLength(1);
     });
 });

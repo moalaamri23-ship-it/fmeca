@@ -74,13 +74,20 @@ function findValueConflict(value: string, unit?: string | null): string | null {
     const [a, b] = [num(0), num(1)];
     if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
 
-    // "130 psig (9 barg)" and "198.2 deg F (59 deg C)" are ONE quantity written
-    // twice. Two different units means a restatement, not a dispute -- and the
-    // Fahrenheit/Celsius case that IS wrong is caught by findUnitConflict, which
-    // can actually do the conversion. Only a repeated or absent unit can disagree.
+    // Both numbers must carry the SAME explicit unit. Anything else is not a
+    // disagreement, and the looser tests were wrong on real data:
+    //
+    //   "130 psig (9 barg)"   two units -> one pressure written twice
+    //   "18 m3"               the 3 is part of the unit, not a second value
+    //   "8.5 barg (S3) / ..." the 3 is part of a source tag
+    //
+    // Requiring a unit on both sides drops all three. A genuine dispute repeats
+    // the unit -- "12 barg (13.8 barg design)" -- because it is two statements of
+    // the same measured thing. The Fahrenheit/Celsius pair that really does
+    // disagree is findUnitConflict's job; it can do the conversion.
     const ua = unitAfter(0);
     const ub = unitAfter(1);
-    if (ua && ub && ua !== ub) return null;
+    if (!ua || !ub || ua !== ub) return null;
 
     const spread = Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1);
     // 2% absorbs rounding between two statements of one figure. Anything wider is
