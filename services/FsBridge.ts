@@ -61,7 +61,12 @@ export const FSA_SUPPORTED =
  */
 export const IN_IFRAME = typeof window !== 'undefined' && window.self !== window.top;
 
-const CHANNEL = 'fmeca-folder-picker';
+/**
+ * The name every helper window is opened under, and the tag on every message it
+ * exchanges. Exported so the app can recognise a window meant for the helper —
+ * see the guard in index.tsx.
+ */
+export const CHANNEL = 'fmeca-folder-picker';
 const PICKER_PAGE = '/folder-picker.html';
 
 type BridgeHandle =
