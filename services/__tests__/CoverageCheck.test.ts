@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checkRow, checkBreakdown, checkProject } from '../CoverageCheck';
+import { checkRow, checkBreakdown, checkProject, matchesByRow } from '../CoverageCheck';
 import { BreakdownRow, Failure, Project } from '../../types';
 
 const brow = (over: Partial<BreakdownRow> = {}): BreakdownRow => ({
@@ -160,5 +160,90 @@ describe('checkProject', () => {
         const p = proj('9', '130');
         (p.subsystems[1].functionBreakdown![0].standardParameters![0] as any).unit = 'psig';
         expect(checkProject(p)).toEqual([]);
+    });
+});
+
+describe('matchesByRow', () => {
+    /**
+     * Auto-Fill wrote one match entry PER FAILURE — [{r1,[f1]},{r1,[f2]},{r1,[f3]}]
+     * — while MasterGen grouped them. Every reader assumed one entry per row: the
+     * modal used map.set and kept the LAST, checkBreakdown used .find and kept the
+     * FIRST. A row with five generated failures displayed one.
+     */
+    it('merges duplicate rowId entries instead of keeping one', () => {
+        const out = matchesByRow([
+            { rowId: 'r1', failureIds: ['f1'] },
+            { rowId: 'r1', failureIds: ['f2'] },
+            { rowId: 'r1', failureIds: ['f3'] },
+            { rowId: 'r2', failureIds: ['f4'] },
+        ]);
+        expect(out.get('r1')).toEqual(['f1', 'f2', 'f3']);
+        expect(out.get('r2')).toEqual(['f4']);
+    });
+
+    it('handles the already-grouped shape unchanged', () => {
+        const out = matchesByRow([{ rowId: 'r1', failureIds: ['f1', 'f2', 'f3'] }]);
+        expect(out.get('r1')).toEqual(['f1', 'f2', 'f3']);
+    });
+
+    it('deduplicates a failure listed under one row twice', () => {
+        const out = matchesByRow([
+            { rowId: 'r1', failureIds: ['f1', 'f2'] },
+            { rowId: 'r1', failureIds: ['f2', 'f3'] },
+        ]);
+        expect(out.get('r1')).toEqual(['f1', 'f2', 'f3']);
+    });
+
+    it('returns an empty map for null', () => {
+        expect(matchesByRow(null).size).toBe(0);
+    });
+});
+
+describe('checkBreakdown with per-failure match entries', () => {
+    it('sees every failure on a row split across duplicate match entries', () => {
+        // Two requirements, both covered, but the matches arrive one-per-entry.
+        const row = brow({
+            id: 'r1',
+            standardParameters: [
+                { name: 'flow', value: '599', unit: 'Sm3/hr', bound: 'min' },
+                { name: 'discharge pressure', value: '9', unit: 'barg', bound: 'min' },
+            ],
+        });
+        const fs = [
+            fail({ id: 'f1', sourceBreakdownRowId: 'stale', parameter: 'flow', failedState: 'partial' }),
+            fail({ id: 'f2', sourceBreakdownRowId: 'stale', parameter: 'discharge pressure', failedState: 'partial' }),
+        ];
+        const out = checkBreakdown([row], fs, [
+            { rowId: 'r1', failureIds: ['f1'] },
+            { rowId: 'r1', failureIds: ['f2'] },
+        ]);
+        // Before the fix .find() saw only f1 and reported discharge pressure uncovered.
+        expect(out).toEqual([]);
+    });
+});
+
+describe('findValueConflict — dual-unit restatements are not disputes', () => {
+    const detailFor = (value: string, unit: string | null = null) => {
+        const row = brow({ standardParameters: [{ name: 'discharge pressure', value, unit, bound: 'min' }] });
+        return checkRow(row, [fail({ parameter: 'discharge pressure', failedState: 'partial' })])
+            .filter(f => f.label === 'Disputed value');
+    };
+
+    it('does not flag one pressure written in two units', () => {
+        // Regression: "130 psig (9 barg)" was reported as "states both 130 and 9".
+        expect(detailFor('130 psig (9 barg)')).toEqual([]);
+    });
+
+    it('does not flag one temperature written in two units', () => {
+        // The F/C case that IS wrong is findUnitConflict's job -- it can convert.
+        expect(detailFor('198.2 deg F (59 deg C)')).toEqual([]);
+    });
+
+    it('still flags two different figures sharing one unit', () => {
+        expect(detailFor('12 barg (13.8 barg design)')).toHaveLength(1);
+    });
+
+    it('still flags two bare figures with no unit at all', () => {
+        expect(detailFor('8.5 (8.0 per control philosophy)')).toHaveLength(1);
     });
 });

@@ -1581,9 +1581,19 @@ render();
                 systemContext: modeSystemContext,
                 sessionId: runSession
             });
-            const breakdownMatches: BreakdownMatch[] = generatedFailures
-                .filter(f => f.sourceBreakdownRowId)
-                .map(f => ({ rowId: f.sourceBreakdownRowId as string, failureIds: [f.id] }));
+            // Group by row, one entry per row. Emitting one entry per FAILURE -- which
+            // this did -- gave a row with five failures five entries carrying one id
+            // each, and every reader assumed the grouped shape and kept a single one.
+            // The breakdown modal showed one failure per function while the failures
+            // themselves were all present and correct in the tree. MasterGen already
+            // grouped; only this path did not.
+            const autoFillByRow = new Map<string, string[]>();
+            generatedFailures.filter(f => f.sourceBreakdownRowId).forEach(f => {
+                const rowId = f.sourceBreakdownRowId as string;
+                if (!autoFillByRow.has(rowId)) autoFillByRow.set(rowId, []);
+                autoFillByRow.get(rowId)!.push(f.id);
+            });
+            const breakdownMatches: BreakdownMatch[] = Array.from(autoFillByRow, ([rowId, failureIds]) => ({ rowId, failureIds }));
             setActiveProject(p => p ? touchProject({
                 ...p,
                 subsystems: p.subsystems.map(s => s.id !== sId ? s : {

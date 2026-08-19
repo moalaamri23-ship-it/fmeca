@@ -1,6 +1,6 @@
 import React from 'react';
 import { Subsystem, BreakdownRow, BreakdownMatch, Failure, Project } from '../types';
-import { checkBreakdown, checkProject, findingsByRow, CoverageFinding } from '../services/CoverageCheck';
+import { checkBreakdown, checkProject, findingsByRow, matchesByRow, CoverageFinding } from '../services/CoverageCheck';
 
 interface FunctionBreakdownModalProps {
     sub: Subsystem;
@@ -44,8 +44,11 @@ export const FunctionBreakdownModal: React.FC<FunctionBreakdownModalProps> = ({
         if (!matchResults) return null;
         const failById = new Map(sub.failures.map(f => [f.id, f]));
         const map = new Map<string, Failure[]>();
-        for (const m of matchResults) {
-            map.set(m.rowId, m.failureIds.map(id => failById.get(id)).filter(Boolean) as Failure[]);
+        // matchesByRow merges duplicate rowId entries. This loop used map.set, which
+        // overwrote them, so a row whose failures arrived as one entry each -- the
+        // shape Auto-Fill wrote -- rendered only the last one.
+        for (const [rowId, ids] of matchesByRow(matchResults)) {
+            map.set(rowId, ids.map(id => failById.get(id)).filter(Boolean) as Failure[]);
         }
         return map;
     }, [matchResults, sub.failures]);

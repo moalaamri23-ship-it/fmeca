@@ -58,15 +58,35 @@ function findUnitConflict(text: string): string | null {
  * one disputed requirement.
  */
 function findValueConflict(value: string, unit?: string | null): string | null {
-    const nums = Array.from(String(value).matchAll(/-?\d+(?:\.\d+)?/g)).map(m => Number(m[0]));
-    if (nums.length < 2) return null;
-    const [a, b] = [nums[0], nums[1]];
+    // Capture each number together with the unit written after it, so a dual-unit
+    // restatement can be told apart from a genuine disagreement.
+    const hits = Array.from(String(value).matchAll(/(-?\d+(?:\.\d+)?)\s*([^\d,;()]*)/g));
+    if (hits.length < 2) return null;
+    const num = (i: number) => Number(hits[i][1]);
+    // Normalise the trailing text to a unit token: drop the words that decorate a
+    // value without being part of it.
+    const unitAfter = (i: number) => (hits[i][2] || '')
+        .toLowerCase()
+        .replace(/\b(design|nominal|normal|required|max|maximum|min|minimum|approx|about|rated|at|and|or|to)\b/g, '')
+        .replace(/[^a-z°%/]+/g, ' ')
+        .trim();
+
+    const [a, b] = [num(0), num(1)];
     if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+
+    // "130 psig (9 barg)" and "198.2 deg F (59 deg C)" are ONE quantity written
+    // twice. Two different units means a restatement, not a dispute -- and the
+    // Fahrenheit/Celsius case that IS wrong is caught by findUnitConflict, which
+    // can actually do the conversion. Only a repeated or absent unit can disagree.
+    const ua = unitAfter(0);
+    const ub = unitAfter(1);
+    if (ua && ub && ua !== ub) return null;
+
     const spread = Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1);
     // 2% absorbs rounding between two statements of one figure. Anything wider is
     // two different figures wearing one requirement.
     if (spread <= 0.02) return null;
-    const u = unit ? ` ${unit}` : '';
+    const u = ua ? ` ${ua}` : (unit ? ` ${unit}` : '');
     return `states both ${a}${u} and ${b}${u}. Which one does the equipment have to meet?`;
 }
 
@@ -203,6 +223,36 @@ export function checkRow(row: BreakdownRow, failures: Failure[]): CoverageFindin
 }
 
 /**
+ * Collapse the "Match Failures to Breakdown" result to rowId -> failureIds.
+ *
+ * Duplicate rowId entries are merged, not overwritten. That matters because the
+ * writers disagreed about the shape: MasterGen grouped failures by row and
+ * emitted one entry per row, while Auto-Fill emitted one entry PER FAILURE, so a
+ * row with five generated failures produced five entries carrying one id each.
+ * Both readers then assumed the grouped shape and silently kept a single entry --
+ * the modal used map.set and kept the last, this file used .find and kept the
+ * first -- so a fully analysed row displayed exactly one failure.
+ *
+ * The writer is fixed, but this stays the tolerant reader: projects saved before
+ * that fix still hold the per-failure shape in localStorage, and they should
+ * render correctly without being regenerated.
+ */
+export function matchesByRow(
+    matches?: Array<{ rowId: string; failureIds: string[] }> | null,
+): Map<string, string[]> {
+    const map = new Map<string, string[]>();
+    for (const m of matches ?? []) {
+        if (!m?.rowId) continue;
+        const list = map.get(m.rowId) ?? [];
+        for (const id of m.failureIds ?? []) {
+            if (!list.includes(id)) list.push(id);
+        }
+        map.set(m.rowId, list);
+    }
+    return map;
+}
+
+/**
  * Run every row in a breakdown against the subsystem's failures.
  *
  * `matches` is the output of the "Match Failures to Breakdown" step. It is
@@ -219,11 +269,11 @@ export function checkBreakdown(
     matches?: Array<{ rowId: string; failureIds: string[] }> | null,
 ): CoverageFinding[] {
     const byId = new Map(failures.map(f => [f.id, f]));
+    const byRow = matchesByRow(matches);
     return rows.flatMap(row => {
         const direct = failures.filter(f => f.sourceBreakdownRowId === row.id);
         if (direct.length) return checkRow(row, direct);
-        const matched = (matches ?? []).find(m => m.rowId === row.id);
-        const viaMatch = (matched?.failureIds ?? []).map(id => byId.get(id)).filter(Boolean) as Failure[];
+        const viaMatch = (byRow.get(row.id) ?? []).map(id => byId.get(id)).filter(Boolean) as Failure[];
         return checkRow(row, viaMatch);
     });
 }
