@@ -16,7 +16,9 @@ export const Icon = ({ name, className="w-5 h-5" }: { name: string, className?: 
         sparkles: "M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z",
         panelRight: "M4 6a2 2 0 012-2h12a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm11-2v16",
         spinner: "M12 3a9 9 0 019 9",
-        quote: "M9 7H6a2 2 0 00-2 2v3h5V7zm0 0v5a5 5 0 01-5 5m16-10h-3a2 2 0 00-2 2v3h5V7zm0 0v5a5 5 0 01-5 5"
+        quote: "M9 7H6a2 2 0 00-2 2v3h5V7zm0 0v5a5 5 0 01-5 5m16-10h-3a2 2 0 00-2 2v3h5V7zm0 0v5a5 5 0 01-5 5",
+        // "Cite everything on this card" — a stack, because it runs every field at once.
+        layers: "M12 3l9 4.5-9 4.5-9-4.5L12 3zM3 12l9 4.5 9-4.5M3 16.5L12 21l9-4.5"
     };
     return (<svg className={className + ` ${name === 'wand' ? 'text-brand-500' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={paths[name] || ""} /></svg>);
 };

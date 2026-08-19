@@ -26,12 +26,19 @@ const Spinner: React.FC<{ className?: string }> = ({ className = 'w-3.5 h-3.5' }
 );
 
 /**
- * Owns the find-in-document state for one open document. Mount it with a `key`
- * of the document's identity so switching documents starts a fresh search.
+ * Owns the find-in-document state for one open document.
+ *
+ * Switching documents has to start a fresh search, and `resetKey` is how that is
+ * asked for — NOT a `key` on the element. A remount would take the whole viewer
+ * body down with it, including the citations panel beside the document, which
+ * threw the reader's scroll position back to the top every time they clicked a
+ * citation that lived in another file.
  */
 export const DocumentSearchProvider: React.FC<{
     /** Bind ⌘F / Ctrl+F to the find bar (only while the viewer is on screen). */
     hotkey?: boolean;
+    /** The open document's identity. A change clears the search, in place. */
+    resetKey?: string;
     /** The document's extracted text — what find-in-document searches. */
     documentText?: string;
     documentName?: string;
@@ -51,7 +58,7 @@ export const DocumentSearchProvider: React.FC<{
     onStateChange?: (state: { open: boolean; close: () => void }) => void;
     children: ReactNode;
 }> = ({
-    hotkey = false, documentText = '', documentName = 'document', payload = null,
+    hotkey = false, resetKey = '', documentText = '', documentName = 'document', payload = null,
     sendFiles = 'text', ai = null, onStateChange, children,
 }) => {
     const [open, setOpen] = useState(false);
@@ -115,6 +122,16 @@ export const DocumentSearchProvider: React.FC<{
         setActive(0);
         setSmart(IDLE_SMART);
     }, []);
+
+    // A new document, in the same mounted provider: the previous document's
+    // query, matches and smart results mean nothing here, so they go — while
+    // everything rendered beside the document keeps its state and its scroll.
+    const lastReset = useRef(resetKey);
+    useEffect(() => {
+        if (lastReset.current === resetKey) return;
+        lastReset.current = resetKey;
+        closeSearch();
+    }, [resetKey, closeSearch]);
 
     // Readable means text OR the document itself: a photo and a scan carry no
     // text, and smart search reads their pages instead of refusing to run.

@@ -77,3 +77,73 @@ export const CiteButton: React.FC<{
         </button>
     );
 };
+
+/**
+ * One control for the whole card.
+ *
+ * Citing a subsystem properly means clicking five, ten, fifty buttons — Specs,
+ * Function, and then Current Controls and Mitigation on every failure mode
+ * below. That is the same request repeated, so it gets one button, beside the
+ * subsystem's own name, that runs them all and then opens a single modal
+ * holding every field's evidence at once.
+ *
+ * It reads the same way as a field's button, only summed: red if any field has
+ * a line nothing supports, amber if any is stale, brand-coloured with the total
+ * once there is evidence — and, like the wand and the field buttons beside it,
+ * it stays out of the way until there is either evidence to announce or a
+ * pointer on the card.
+ */
+export const BulkCiteButton: React.FC<{
+    state: CiteState;
+    count: number;
+    /** How many fields on this card can be cited. Zero disables the button. */
+    fields: number;
+    onClick: () => void;
+}> = ({ state, count, fields, onClick }) => {
+    const running = state === 'running';
+    const has = state === 'cited' || state === 'stale' || state === 'flagged';
+    const disabled = running || fields === 0;
+
+    const title = fields === 0
+        ? 'Nothing on this subsystem has enough text to cite yet'
+        : running
+        ? 'Searching the references for every field on this subsystem…'
+        : state === 'stale'
+        ? `${count} citation${count === 1 ? '' : 's'} across ${fields} field${fields === 1 ? '' : 's'} — some were found before the field was edited`
+        : state === 'flagged'
+        ? `${count} citation${count === 1 ? '' : 's'} across ${fields} field${fields === 1 ? '' : 's'} — one or more lines need attention`
+        : state === 'cited'
+        ? `${count} citation${count === 1 ? '' : 's'} across ${fields} field${fields === 1 ? '' : 's'}`
+        : `Cite every field on this subsystem — specs, function, and each mode's controls and mitigation (${fields})`;
+
+    return (
+        <button
+            type="button"
+            onClick={e => {
+                e.stopPropagation();
+                if (!disabled) onClick();
+            }}
+            disabled={disabled}
+            title={title}
+            className={[
+                'flex shrink-0 items-center gap-0.5 leading-none transition disabled:cursor-not-allowed',
+                has || running ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+                state === 'stale'
+                    ? 'text-amber-600 hover:text-amber-700'
+                    : state === 'flagged'
+                    ? 'text-red-600 hover:text-red-700'
+                    : state === 'cited'
+                    ? 'text-brand-600 hover:text-brand-700'
+                    : fields === 0
+                    ? 'text-slate-200'
+                    : 'text-slate-300 hover:text-brand-600',
+            ].join(' ')}
+        >
+            <Icon
+                name={running ? 'spinner' : 'layers'}
+                className={running ? 'w-3 h-3 animate-spin' : 'w-3 h-3'}
+            />
+            {!running && count > 0 && <span className="text-[9px] font-bold leading-none">{count}</span>}
+        </button>
+    );
+};

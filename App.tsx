@@ -8,8 +8,8 @@ import { SystemModesModal } from './components/SystemModesModal';
 import { TreeNode } from './components/TreeNode';
 import { HybridMapView } from './components/HybridMapView';
 import { AttachmentModal } from './components/AttachmentModal';
-import { CitationModal } from './components/CitationModal';
-import type { CiteState } from './components/CiteButton';
+import { CitationModal, type CitationGroup } from './components/CitationModal';
+import { BulkCiteButton, type CiteState } from './components/CiteButton';
 import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
@@ -610,7 +610,12 @@ setProjects(
         label: string;
     }
 
-    const [citeModal, setCiteModal] = useState<{ target: CiteTarget; sources: CiteSource[] } | null>(null);
+    /**
+     * The open citations modal: which fields it is showing, and every document
+     * they were searched against. One target when a field's own button opened
+     * it, all of a subsystem's when the card's bulk button did.
+     */
+    const [citeModal, setCiteModal] = useState<{ targets: CiteTarget[]; sources: CiteSource[] } | null>(null);
     /**
      * Every field being searched right now.
      *
@@ -720,8 +725,15 @@ setProjects(
         };
     };
 
-    /** Search every source in scope, store what is found, and show it. */
-    const runCitation = async (target: CiteTarget) => {
+    /**
+     * Search every source in scope, store what is found, and show it.
+     *
+     * `silent` is for the runs the reader did not aim at one field: the bulk
+     * button's, and a re-search fired from inside the modal. Those must not
+     * decide what the modal shows — the caller does that once, when every run
+     * it started has finished.
+     */
+    const runCitation = async (target: CiteTarget, opts: { silent?: boolean } = {}) => {
         const key = citeKey(target);
         // The same field twice over would race its own result; a different field
         // is welcome to run beside this one.
@@ -758,7 +770,7 @@ setProjects(
             // not already inside another field's citations. A second run
             // finishing must never pull the panel out from under them; its
             // button turns cited instead, and waits to be clicked.
-            setCiteModal(open => (open ? open : { target, sources }));
+            if (!opts.silent) setCiteModal(open => (open ? open : { targets: [target], sources }));
             if (found.failures.length > 0) {
                 setCiteError(
                     `${target.label}: could not read ${found.failures.map(f => f.fileName).join(', ')}. The rest were searched.`
@@ -790,13 +802,150 @@ setProjects(
         }
         const corpus = citeCorpusRequest(target);
         if (!corpus) return;
-        setCiteModal({ target, sources: await rehydrateSources(stored.sources, corpus) });
+        setCiteModal({ targets: [target], sources: await rehydrateSources(stored.sources, corpus) });
     };
 
     /** Props for one field's cite button — spread straight onto SmartInput. */
     const citeProps = (target: CiteTarget, owner: { citations?: Record<string, FieldCitations> }) => {
         const { state, count } = citeStateFor(target, owner);
         return { citeState: state, citeCount: count, onCite: () => { void openCitations(target); } };
+    };
+
+    /**
+     * Every field on a subsystem card worth citing, in reading order.
+     *
+     * The card's own two fields first, then each mode's controls and
+     * mitigation, because that is the order they appear on screen and the order
+     * the panel will show them in. A field with almost nothing in it is left
+     * out rather than sent to a model to be told there is nothing to cite.
+     */
+    const bulkCiteTargets = (sub: Subsystem): CiteTarget[] => {
+        const targets: CiteTarget[] = [];
+        const add = (target: CiteTarget, text: string) => {
+            if (isCitable(text)) targets.push(target);
+        };
+        add({ subId: sub.id, field: 'specs', label: 'Specs' }, sub.specs || '');
+        add({ subId: sub.id, field: 'func', label: 'Function' }, sub.func || '');
+        sub.failures.forEach(fail => {
+            fail.modes.forEach(mode => {
+                add(
+                    { subId: sub.id, failId: fail.id, modeId: mode.id, field: 'currentControls', label: 'Current Controls' },
+                    mode.currentControls || ''
+                );
+                add(
+                    { subId: sub.id, failId: fail.id, modeId: mode.id, field: 'mitigation', label: 'Mitigation' },
+                    mode.mitigation || ''
+                );
+            });
+        });
+        return targets;
+    };
+
+    /** The entity a target's field lives on — for reading its stored citations. */
+    const citeOwner = (target: CiteTarget): { citations?: Record<string, FieldCitations> } | null => {
+        const sub = activeProject?.subsystems.find(s => s.id === target.subId);
+        if (!sub) return null;
+        if (!target.failId) return sub;
+        const fail = sub.failures.find(f => f.id === target.failId);
+        if (!fail) return null;
+        if (!target.modeId) return fail;
+        return fail.modes.find(m => m.id === target.modeId) ?? null;
+    };
+
+    /**
+     * What the card's bulk button shows: the whole subsystem's evidence, summed.
+     *
+     * The worst state wins, because the button exists to say "there is something
+     * here to look at" — one unsupported control on one mode out of forty is
+     * exactly the thing that must not be averaged away.
+     */
+    const bulkCiteState = (sub: Subsystem): { state: CiteState; count: number; fields: number } => {
+        const targets = bulkCiteTargets(sub);
+        let running = false, flagged = false, stale = false, cited = false, count = 0;
+        for (const target of targets) {
+            const owner = citeOwner(target);
+            if (!owner) continue;
+            const { state, count: n } = citeStateFor(target, owner);
+            count += n;
+            if (state === 'running') running = true;
+            else if (state === 'flagged') flagged = true;
+            else if (state === 'stale') stale = true;
+            else if (state === 'cited') cited = true;
+        }
+        const state: CiteState = running ? 'running'
+            : flagged ? 'flagged'
+            : stale ? 'stale'
+            : cited ? 'cited'
+            : 'none';
+        return { state, count, fields: targets.length };
+    };
+
+    /** A group's heading in the modal — the field, and which mode it belongs to. */
+    const citeGroupLabel = (target: CiteTarget): string => {
+        const sub = activeProject?.subsystems.find(s => s.id === target.subId);
+        const fail = target.failId ? sub?.failures.find(f => f.id === target.failId) : undefined;
+        const mode = target.modeId ? fail?.modes.find(m => m.id === target.modeId) : undefined;
+        const where = (mode?.mode || fail?.desc || '').trim();
+        return where ? `${target.label} · ${where}` : target.label;
+    };
+
+    /**
+     * Every document a set of targets can be cited against, once each.
+     *
+     * The scope is not the same for all of them — a mode's fields also see its
+     * functional failure's attachments — so the corpora are collected per
+     * failure and merged. Read live rather than from what was stored: a run
+     * that has just written its citations has not reached this closure yet.
+     */
+    const gatherCiteSources = async (targets: CiteTarget[]): Promise<CiteSource[]> => {
+        const seenCorpus = new Set<string>();
+        const merged = new Map<string, CiteSource>();
+        for (const target of targets) {
+            const scope = target.failId ?? '';
+            if (seenCorpus.has(scope)) continue;
+            seenCorpus.add(scope);
+            const corpus = citeCorpusRequest(target);
+            if (!corpus) continue;
+            try {
+                for (const source of await collectCiteSources(corpus)) {
+                    if (!merged.has(source.id)) merged.set(source.id, source);
+                }
+            } catch {
+                // One unreadable folder does not cost the rest their sources.
+            }
+        }
+        return [...merged.values()];
+    };
+
+    /**
+     * The card's bulk button: cite every field on the subsystem at once, then
+     * show them together.
+     *
+     * A field that already has evidence is not searched again — this is the
+     * reader clicking every button on the card, and a field's own button opens
+     * what it has rather than paying for it twice. Re-searching is what the
+     * modal's buttons are for.
+     */
+    const openBulkCitations = async (sub: Subsystem) => {
+        const targets = bulkCiteTargets(sub);
+        if (targets.length === 0) {
+            setCiteError('There is not enough text on this subsystem to cite yet.');
+            return;
+        }
+        const pending = targets.filter(target => {
+            const stored = storedCitations(target);
+            return !stored || (stored.claims.length === 0 && stored.items.length === 0);
+        });
+        // Simultaneous by design: each field is an independent question, and the
+        // transport queues them where the provider cannot take them at once.
+        await Promise.all(pending.map(target => runCitation(target, { silent: true })));
+        setCiteModal({ targets, sources: await gatherCiteSources(targets) });
+    };
+
+    /** Props for the subsystem card's bulk cite button. */
+    const bulkCiteProps = (sub: Subsystem) => {
+        const { state, count, fields } = bulkCiteState(sub);
+        return { state, count, fields, onClick: () => { void openBulkCitations(sub); } };
     };
 
     const getAttachmentPath = () => {
@@ -2249,7 +2398,7 @@ render();
 	                                                    <div className="text-slate-400 cursor-grab hover:text-brand-600 drag-handle p-1" title="Reorder" onMouseEnter={()=>setDragAllowed(i)} onMouseLeave={()=>{ if(dragId===null) setDragAllowed(null); }}><Icon name="move"/></div>
 	                                                    <button onClick={(e) => {e.stopPropagation(); toggleSub(sub.id)}} className="text-slate-400"><Icon name={sub.collapsed ? "chevronDown" : "chevronUp"} /></button>
 	                                                    <div className="flex-1">
-	                                                        <SmartInput label="Subsystem" locked={subsystemLocked(sub.id)} value={sub.name} onChange={v => updateSub(sub.id, 'name', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} />
+	                                                        <SmartInput label="Subsystem" labelAddon={<BulkCiteButton {...bulkCiteProps(sub)} />} locked={subsystemLocked(sub.id)} value={sub.name} onChange={v => updateSub(sub.id, 'name', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} />
 	                                                        <SourceBadges tags={sub.sourceTags} />
 	                                                    </div>
 	                                                </div>
@@ -2545,22 +2694,33 @@ render();
                         sendFiles={sendFilesMode}
                     />
                     {citeModal && (() => {
-                        const stored = storedCitations(citeModal.target);
-                        const subName = activeProject.subsystems.find(s => s.id === citeModal.target.subId)?.name || '';
+                        const subName = activeProject.subsystems.find(s => s.id === citeModal.targets[0]?.subId)?.name || '';
+                        const groups: CitationGroup[] = citeModal.targets.map(target => {
+                            const stored = storedCitations(target);
+                            return {
+                                id: citeKey(target),
+                                label: citeGroupLabel(target),
+                                claims: stored?.claims || [],
+                                citations: stored?.items || [],
+                                emptySources: stored?.emptySources,
+                                // Silent: the modal is already open, and this run
+                                // replaces one section inside it, not the modal.
+                                onRecite: () => { void runCitation(target, { silent: true }); },
+                                reciting: citeRunning.has(citeKey(target)),
+                            };
+                        });
                         return (
                             <CitationModal
                                 isOpen={true}
                                 onClose={() => setCiteModal(null)}
                                 provider={storageProvider}
                                 sources={citeModal.sources}
-                                citations={stored?.items || []}
-                                claims={stored?.claims || []}
-                                emptySources={stored?.emptySources}
-                                onRecite={() => { void runCitation(citeModal.target); }}
-                                reciting={citeRunning.has(citeKey(citeModal.target))}
+                                groups={groups}
                                 ai={{ apiKey, model: modelName, provider: aiProvider as any, azureEndpoint, powerAutomateUrl }}
                                 sendFiles={sendFilesMode}
-                                entityName={[citeModal.target.label, subName].filter(Boolean).join(' · ')}
+                                entityName={citeModal.targets.length > 1
+                                    ? [subName, `${citeModal.targets.length} fields`].filter(Boolean).join(' · ')
+                                    : [citeModal.targets[0]?.label, subName].filter(Boolean).join(' · ')}
                             />
                         );
                     })()}

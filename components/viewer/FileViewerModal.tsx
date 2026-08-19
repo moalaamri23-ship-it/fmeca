@@ -98,7 +98,53 @@ const ClaimChip: React.FC<{ claim: FieldClaim }> = ({ claim }) => {
 };
 
 /**
- * The citations list, one section per claim.
+ * One cited field inside the viewer.
+ *
+ * A field's own citation button opens exactly one of these; the subsystem's
+ * bulk button opens all of them at once — specs, function, and every mode's
+ * controls and mitigation — in a single modal. So the panel is a list of
+ * groups, and each group carries its own re-search: the reader who finds one
+ * weak field fixes that field and searches again for it alone, rather than
+ * paying for a whole subsystem's worth of model calls.
+ */
+export interface CitationGroup {
+    /** Stable per field — the modal keys its sections and its map off this. */
+    id: string;
+    /** What was cited, e.g. "Mitigation · Seal leak". Empty renders no header. */
+    label: string;
+    claims: FieldClaim[];
+    citations: ViewerCitation[];
+    /** Sources searched for this field that supported nothing. */
+    emptySources?: string[];
+    /** Search this field's sources again. Omitted where re-searching is not offered. */
+    onRecite?: () => void;
+    reciting?: boolean;
+}
+
+/** The re-search control, in the panel header and on every group. */
+const ReciteButton: React.FC<{
+    onClick: () => void;
+    reciting: boolean;
+    title: string;
+    /** The header's button says what it does; a group's is icon-only. */
+    label?: string;
+}> = ({ onClick, reciting, title, label }) => (
+    <button
+        onClick={onClick}
+        disabled={reciting}
+        title={title}
+        className={cn(
+            'flex shrink-0 items-center gap-1 rounded border border-slate-200 bg-white text-[10px] font-bold text-brand-600 transition hover:bg-brand-50 disabled:cursor-not-allowed disabled:text-slate-300',
+            label ? 'px-2 py-1' : 'p-1'
+        )}
+    >
+        <Icon name={reciting ? 'spinner' : 'rotate'} className={cn('w-3 h-3', reciting && 'animate-spin')} />
+        {label && <span>{reciting ? 'Searching…' : label}</span>}
+    </button>
+);
+
+/**
+ * The citations for one field, one section per claim.
  *
  * A field makes several assertions and the panel is read assertion by
  * assertion, because "this line has nothing behind it" is the answer worth
@@ -109,21 +155,23 @@ const ClaimChip: React.FC<{ claim: FieldClaim }> = ({ claim }) => {
  * Opened from the References panel instead of a field, there are no claims and
  * no sections; that folder simply has nothing citing it yet.
  */
-const ReferencePanel: React.FC<{
-    claims: FieldClaim[];
-    byClaim: Map<string, ViewerCitation[]>;
-    loose: ViewerCitation[];
+const GroupSection: React.FC<{
+    group: CitationGroup;
     known: Set<string>;
     activeId: string | null;
     onSelect: (id: string) => void;
-    /** Sources searched that supported nothing — worth saying, not worth a card. */
-    emptySources?: string[];
-    onRecite?: () => void;
-    reciting?: boolean;
-}> = ({ claims, byClaim, loose, known, activeId, onSelect, emptySources = [], onRecite, reciting = false }) => {
-    // Smart results take the same slot while they are on screen, so the two
-    // panels never compete for the viewer's width.
-    if (useSmartPanelActive()) return null;
+    /** False for the lone group of a References-panel view — it has no name. */
+    showHeader: boolean;
+}> = ({ group, known, activeId, onSelect, showHeader }) => {
+    const byClaim = useMemo(() => {
+        const map = new Map<string, ViewerCitation[]>();
+        for (const c of group.citations) {
+            if (!c.claimId) continue;
+            map.set(c.claimId, [...(map.get(c.claimId) ?? []), c]);
+        }
+        return map;
+    }, [group.citations]);
+    const loose = useMemo(() => group.citations.filter(c => !c.claimId), [group.citations]);
 
     const cardsFor = (list: ViewerCitation[]) =>
         list.map(citation => (
@@ -137,67 +185,111 @@ const ReferencePanel: React.FC<{
         ));
 
     return (
+        <section className="space-y-2">
+            {showHeader && (
+                <header className="sticky top-0 z-10 -mx-3 flex items-center gap-1.5 border-b border-slate-100 bg-slate-50 px-3 py-1.5">
+                    <p className="min-w-0 flex-1 truncate text-[10px] font-bold uppercase text-slate-400" title={group.label}>
+                        {group.label}
+                    </p>
+                    <span className="shrink-0 font-mono text-[10px] text-slate-400">{group.citations.length}</span>
+                    {group.onRecite && (
+                        <ReciteButton
+                            onClick={group.onRecite}
+                            reciting={!!group.reciting}
+                            title={`Search the sources again for ${group.label}`}
+                        />
+                    )}
+                </header>
+            )}
+            {group.claims.length === 0 && loose.length === 0 ? (
+                <p className="px-1 py-3 text-[11px] leading-relaxed text-slate-400 italic">
+                    {group.reciting
+                        ? 'Searching the sources…'
+                        : 'Nothing in the sources supported this text. Re-search after editing the field, or attach the document this came from to the subsystem.'}
+                </p>
+            ) : (
+                group.claims.map(claim => {
+                    const list = byClaim.get(claim.id) ?? [];
+                    return (
+                        <section key={claim.id} className="space-y-1.5">
+                            <header className="flex items-start gap-1.5 px-0.5">
+                                <span className={cn(
+                                    'mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-bold',
+                                    claim.duplicateOfControl
+                                        ? 'bg-red-100 text-red-700'
+                                        : claim.unsupported
+                                        ? 'bg-amber-100 text-amber-700'
+                                        : 'bg-slate-200 text-slate-600'
+                                )}>
+                                    {claim.index}
+                                </span>
+                                <p className="flex-1 text-[10px] font-bold leading-snug text-slate-600" title={claim.text}>
+                                    {claim.text}
+                                </p>
+                                <ClaimChip claim={claim} />
+                            </header>
+                            {list.length === 0 ? (
+                                <p className="pl-5 text-[10px] leading-relaxed text-slate-400 italic">
+                                    No passage in any source supports this.
+                                </p>
+                            ) : (
+                                cardsFor(list)
+                            )}
+                        </section>
+                    );
+                })
+            )}
+            {loose.length > 0 && <div className="space-y-1.5">{cardsFor(loose)}</div>}
+            {(group.emptySources?.length ?? 0) > 0 && (
+                <p className="border-t border-slate-200 pt-2 text-[10px] leading-relaxed text-slate-400">
+                    Searched, nothing found: {group.emptySources!.join(', ')}
+                </p>
+            )}
+        </section>
+    );
+};
+
+/** The side panel: every cited field the modal was opened with, in order. */
+const ReferencePanel: React.FC<{
+    groups: CitationGroup[];
+    known: Set<string>;
+    activeId: string | null;
+    onSelect: (id: string) => void;
+}> = ({ groups, known, activeId, onSelect }) => {
+    // Smart results take the same slot while they are on screen, so the two
+    // panels never compete for the viewer's width.
+    if (useSmartPanelActive()) return null;
+
+    const recitable = groups.filter(g => g.onRecite);
+    const recitingAll = recitable.length > 0 && recitable.every(g => g.reciting);
+    // One group's header already carries its own button; a second one saying the
+    // same thing beside it is noise.
+    const showAll = recitable.length > 1;
+
+    return (
         <aside className="flex w-80 shrink-0 flex-col border-l border-slate-200 bg-slate-50">
             <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-3 py-2">
                 <p className="text-[10px] font-bold uppercase text-slate-400">Citations</p>
-                {onRecite && (
-                    <button
-                        onClick={onRecite}
-                        disabled={reciting}
-                        title="Search the sources again for this field"
-                        className="flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-brand-600 transition hover:bg-brand-50 disabled:cursor-not-allowed disabled:text-slate-300"
-                    >
-                        <Icon name={reciting ? 'spinner' : 'rotate'} className={cn('w-3 h-3', reciting && 'animate-spin')} />
-                        {reciting ? 'Searching…' : 'Re-search'}
-                    </button>
+                {recitable.length > 0 && (
+                    <ReciteButton
+                        onClick={() => { for (const g of recitable) g.onRecite?.(); }}
+                        reciting={recitingAll}
+                        title={showAll ? 'Search the sources again for every field here' : 'Search the sources again for this field'}
+                        label={showAll ? 'Re-search all' : 'Re-search'}
+                    />
                 )}
             </div>
-            <div className="flex-1 space-y-3 overflow-y-auto scroll-thin px-3 py-3">
-                {claims.length === 0 && loose.length === 0 ? (
-                    <p className="px-1 py-4 text-[11px] leading-relaxed text-slate-400 italic">
-                        Nothing in the sources supported this text. Re-search after editing the field, or attach
-                        the document this came from to the subsystem.
-                    </p>
-                ) : (
-                    claims.map(claim => {
-                        const list = byClaim.get(claim.id) ?? [];
-                        return (
-                            <section key={claim.id} className="space-y-1.5">
-                                <header className="flex items-start gap-1.5 px-0.5">
-                                    <span className={cn(
-                                        'mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-bold',
-                                        claim.duplicateOfControl
-                                            ? 'bg-red-100 text-red-700'
-                                            : claim.unsupported
-                                            ? 'bg-amber-100 text-amber-700'
-                                            : 'bg-slate-200 text-slate-600'
-                                    )}>
-                                        {claim.index}
-                                    </span>
-                                    <p className="flex-1 text-[10px] font-bold leading-snug text-slate-600" title={claim.text}>
-                                        {claim.text}
-                                    </p>
-                                    <ClaimChip claim={claim} />
-                                </header>
-                                {list.length === 0 ? (
-                                    <p className="pl-5 text-[10px] leading-relaxed text-slate-400 italic">
-                                        No passage in any source supports this.
-                                    </p>
-                                ) : (
-                                    cardsFor(list)
-                                )}
-                            </section>
-                        );
-                    })
-                )}
-                {loose.length > 0 && <div className="space-y-1.5">{cardsFor(loose)}</div>}
-                {emptySources.length > 0 && (
-                    <div className="border-t border-slate-200 pt-2">
-                        <p className="text-[10px] leading-relaxed text-slate-400">
-                            Searched, nothing found: {emptySources.join(', ')}
-                        </p>
-                    </div>
-                )}
+            <div className="flex-1 space-y-4 overflow-y-auto scroll-thin px-3 py-3">
+                {groups.map(group => (
+                    <GroupSection
+                        key={group.id}
+                        group={group}
+                        known={known}
+                        activeId={activeId}
+                        onSelect={onSelect}
+                        showHeader={!!group.label}
+                    />
+                ))}
             </div>
         </aside>
     );
@@ -230,6 +322,12 @@ export const FileViewerModal: React.FC<{
     citations?: ViewerCitation[];
     /** The field's assertions, each its own section in the panel. */
     claims?: FieldClaim[];
+    /**
+     * Several cited fields at once, each its own section with its own
+     * re-search. Supersedes `citations`/`claims`/`emptySources`/`onRecite`,
+     * which stay for the References panel's single unnamed list.
+     */
+    groups?: CitationGroup[];
     activeCitationId?: string | null;
     onSelectCitation?: (id: string) => void;
     /** Sources that were searched and supported nothing. */
@@ -245,9 +343,26 @@ export const FileViewerModal: React.FC<{
     entityName?: string | null;
 }> = ({
     isOpen, onClose, provider, files, pathParts, sources, openName, onOpenName,
-    citations = [], claims = [], activeCitationId = null, onSelectCitation, emptySources = [],
+    citations: citationsProp = [], claims = [], groups: groupsProp,
+    activeCitationId = null, onSelectCitation, emptySources = [],
     onRecite, reciting = false, ai = null, sendFiles = 'text', entityName,
 }) => {
+    // One code path inside: the flat props are the References panel's single
+    // group, with no name and therefore no header of its own.
+    const groups = useMemo<CitationGroup[]>(
+        () =>
+            groupsProp ?? [
+                { id: 'field', label: '', claims, citations: citationsProp, emptySources, onRecite, reciting },
+            ],
+        [groupsProp, claims, citationsProp, emptySources, onRecite, reciting]
+    );
+    const citations = useMemo(() => groups.flatMap(g => g.citations), [groups]);
+    /** How many citations the selected one is counted among — its own field's. */
+    const groupOf = useMemo(() => {
+        const map = new Map<string, CitationGroup>();
+        for (const group of groups) for (const c of group.citations) map.set(c.id, group);
+        return map;
+    }, [groups]);
     const [panelOpen, setPanelOpen] = useState(true);
     const [text, setText] = useState<{ key: string; value: string } | null>(null);
     const [payload, setPayload] = useState<{ key: string; value: DocumentPayload } | null>(null);
@@ -322,19 +437,6 @@ export const FileViewerModal: React.FC<{
         : null;
 
     const known = useMemo(() => new Set(docs.map(d => d.fileName)), [docs]);
-
-    // Grouped by the claim each passage answers. A citation with no claim — one
-    // stored before the panel became claim-shaped — still gets shown, below the
-    // sections, rather than silently dropped.
-    const byClaim = useMemo(() => {
-        const map = new Map<string, ViewerCitation[]>();
-        for (const c of citations) {
-            if (!c.claimId) continue;
-            map.set(c.claimId, [...(map.get(c.claimId) ?? []), c]);
-        }
-        return map;
-    }, [citations]);
-    const loose = useMemo(() => citations.filter(c => !c.claimId), [citations]);
 
     // Extract the document's text once its bytes are in: it is what smart search
     // reads, and the fallback for formats with no renderer of their own.
@@ -425,9 +527,10 @@ export const FileViewerModal: React.FC<{
                 className="flex h-[92vh] w-[96vw] max-w-[1500px] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl animate-enter"
                 onMouseDown={e => e.stopPropagation()}
             >
-                {/* Keyed by document: opening a different file starts a fresh search. */}
+                {/* Opening a different file starts a fresh search — in place, so
+                    the citations panel beside it keeps its scroll position. */}
                 <DocumentSearchProvider
-                    key={key}
+                    resetKey={key}
                     hotkey={searchable}
                     documentText={searchable ? (documentText ?? '') : ''}
                     documentName={shownName}
@@ -444,7 +547,7 @@ export const FileViewerModal: React.FC<{
                             <h3 className="truncate text-sm font-bold text-slate-900">{shownName}</h3>
                             <p className="truncate text-[11px] text-slate-400">
                                 {citation
-                                    ? `Citation ${citation.index} of ${citations.length}${locationLabel(citation) ? ` · ${locationLabel(citation)}` : ''}`
+                                    ? `Citation ${citation.index} of ${(groupOf.get(citation.id) ?? { citations }).citations.length}${locationLabel(citation) ? ` · ${locationLabel(citation)}` : ''}`
                                     : [
                                           category === 'unsupported' ? 'File' : category.toUpperCase(),
                                           size != null ? formatBytes(size) : null,
@@ -497,14 +600,9 @@ export const FileViewerModal: React.FC<{
 
                         {showPanel && (
                             <ReferencePanel
-                                claims={claims}
-                                byClaim={byClaim}
-                                loose={loose}
+                                groups={groups}
                                 known={known}
                                 activeId={activeCitationId}
-                                emptySources={emptySources}
-                                onRecite={onRecite}
-                                reciting={reciting}
                                 onSelect={id => {
                                     onSelectCitation?.(id);
                                     const target = citations.find(c => c.id === id);
