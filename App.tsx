@@ -1146,7 +1146,7 @@ body{margin:0;padding:0;background:#f8fafc;font-family:Inter,system-ui,sans-seri
 </style>
 </head>
 <body>
-<div class="fixed top-0 left-0 right-0 z-50 flex items-center gap-3 px-5 py-3 bg-white border-b border-slate-200 shadow-sm">
+<div id="topbar" class="fixed top-0 left-0 right-0 z-50 flex items-center gap-3 px-5 py-3 bg-white border-b border-slate-200 shadow-sm">
   <span class="text-sm font-bold text-slate-700 mr-2">${activeProject.name}</span>
   <button onclick="expandAll()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm">Expand All</button>
   <button onclick="collapseAll()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm">Collapse All</button>
@@ -1234,15 +1234,23 @@ function cancelHide(){clearTimeout(hideTimer);}
 // The frame is the map's own scroll area, not the window: a tooltip that fills
 // the window rides over the toolbar at the top of the page.
 function frameBounds(){
-  const w=document.getElementById('wrap'),r=w.getBoundingClientRect(),cs=getComputedStyle(w);
-  const pt=parseFloat(cs.paddingTop)||0,pb=parseFloat(cs.paddingBottom)||0;
-  const pl=parseFloat(cs.paddingLeft)||0,pr=parseFloat(cs.paddingRight)||0;
-  return{
-    top:Math.max(TIP_M,r.top+pt),
-    bottom:Math.min(window.innerHeight-TIP_M,r.bottom-pb),
-    left:Math.max(TIP_M,r.left+pl),
-    right:Math.min(window.innerWidth-TIP_M,r.right-pr)
-  };
+  // Every clipping ancestor intersected with the window, then pushed below the
+  // fixed toolbar. The map holder does not scroll — the window does — so its
+  // own box slides out of view and only the intersection stays honest.
+  let top=0,left=0,bottom=window.innerHeight,right=window.innerWidth;
+  let e=document.getElementById('map').parentElement;
+  while(e&&e!==document.documentElement){
+    const cs=getComputedStyle(e);
+    if(cs.overflowY!=='visible'||cs.overflowX!=='visible'){
+      const r=e.getBoundingClientRect();
+      top=Math.max(top,r.top);bottom=Math.min(bottom,r.bottom);
+      left=Math.max(left,r.left);right=Math.min(right,r.right);
+    }
+    e=e.parentElement;
+  }
+  const bar=document.getElementById('topbar');
+  if(bar&&getComputedStyle(bar).position==='fixed')top=Math.max(top,bar.getBoundingClientRect().bottom);
+  return{top:top+TIP_M,bottom:bottom-TIP_M,left:left+TIP_M,right:right-TIP_M};
 }
 // Place the tooltip anywhere between the frame's two ends — aligned with the
 // hovered card when that fits, slid up by exactly as much as it takes when it

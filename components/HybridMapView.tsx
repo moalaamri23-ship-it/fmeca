@@ -131,6 +131,29 @@ function vLine(x: number, y1: number, y2: number): React.ReactNode {
   return <div key={_k++} style={{ position:'absolute', left: Math.round(x) - 1, top, width: CONN_W, height, background: CONN_COLOR, zIndex: 5, pointerEvents:'none' }} />;
 }
 
+/**
+ * The region an element is actually visible in: the window, narrowed by every
+ * ancestor that clips (a scroll container, an overflow:hidden shell). Used to
+ * keep tooltips inside the map instead of inside the browser window.
+ */
+function clipRect(el: HTMLElement | null): { top: number; bottom: number; left: number; right: number } {
+  let top = 0, left = 0;
+  let bottom = window.innerHeight, right = window.innerWidth;
+  let e = el?.parentElement ?? null;
+  while (e && e !== document.documentElement) {
+    const cs = getComputedStyle(e);
+    if (cs.overflowY !== 'visible' || cs.overflowX !== 'visible') {
+      const r = e.getBoundingClientRect();
+      top    = Math.max(top, r.top);
+      bottom = Math.min(bottom, r.bottom);
+      left   = Math.max(left, r.left);
+      right  = Math.min(right, r.right);
+    }
+    e = e.parentElement;
+  }
+  return { top, bottom, left, right };
+}
+
 // ── Multi-line text clamp ─────────────────────────────────────────────────────
 function clamp(lines: number): React.CSSProperties {
   return { display:'-webkit-box', WebkitLineClamp:lines, WebkitBoxOrient:'vertical', overflow:'hidden' } as React.CSSProperties;
@@ -204,14 +227,16 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
 
     const place = () => {
       const M = 10;                                 // margin off the frame edge
-      // The frame is the map's own scroll area, not the window: a tooltip that
-      // fills the window rides over the app's top bar and toolbar.
-      const host = canvasRef.current?.closest('.tree-viewport') as HTMLElement | null;
-      const hb   = host ? host.getBoundingClientRect() : null;
-      const bTop    = Math.max(M, (hb?.top    ?? 0) + M);
-      const bBottom = Math.min(window.innerHeight - M, (hb?.bottom ?? window.innerHeight) - M);
-      const bLeft   = Math.max(M, (hb?.left   ?? 0) + M);
-      const bRight  = Math.min(window.innerWidth - M, (hb?.right  ?? window.innerWidth) - M);
+      // The frame is the part of the map the user can actually see, not the
+      // window: a tooltip sized against the window rides over the app's top
+      // bar. The visible part is every clipping ancestor intersected — the map
+      // holder is not the one that scrolls, and its own box slides out of view
+      // as the user scrolls down, so only the intersection stays honest.
+      const clip = clipRect(canvasRef.current);
+      const bTop    = clip.top + M;
+      const bBottom = clip.bottom - M;
+      const bLeft   = clip.left + M;
+      const bRight  = clip.right - M;
 
       const avail = Math.max(0, bBottom - bTop);
       const natH  = Math.max(el.scrollHeight, el.offsetHeight);
