@@ -1211,40 +1211,80 @@ function esc(s){const d=document.createElement('div');d.textContent=String(s||''
 function combineMit(m){const t=[m.currentControls,m.mitigation].filter(Boolean).join('\\n');if(!t)return '';return t.split('\\n').map(function(l){return l.trim()}).filter(Boolean).map(function(l){return l.replace(/^\\d+\\s*[-–.)]\\s*/,'')}).map(function(l,i){return (i+1)+'- '+l}).join('\\n');}
 let hoverTimer=null;
 let hideTimer=null;
+let lastTipRect=null;
+const HOVER_DELAY=500,TIP_M=10,TIP_GAP=10;
 function startHover(e,type,data){
   clearTimeout(hoverTimer);
   clearTimeout(hideTimer);
   const r=e.currentTarget.getBoundingClientRect();
-  hoverTimer=setTimeout(()=>showTip(r,type,data),1000);
+  hoverTimer=setTimeout(()=>showTip(r,type,data),HOVER_DELAY);
 }
 function endHover(typeOverride){
   clearTimeout(hoverTimer);
   const tip=document.getElementById('tip');
-  if(typeOverride==='sys' || tip.getAttribute('data-type')==='sys'){
+  // A tooltip the user may need to scroll must survive the trip from the card
+  // to the tooltip itself, so it gets the same grace period as the system one.
+  if(typeOverride==='sys' || tip.getAttribute('data-type')==='sys' || tip.dataset.scroll==='1'){
     hideTimer=setTimeout(()=>tip.style.display='none',500);
   }else{
     tip.style.display='none';
   }
 }
 function cancelHide(){clearTimeout(hideTimer);}
+// The frame is the map's own scroll area, not the window: a tooltip that fills
+// the window rides over the toolbar at the top of the page.
+function frameBounds(){
+  const w=document.getElementById('wrap'),r=w.getBoundingClientRect(),cs=getComputedStyle(w);
+  const pt=parseFloat(cs.paddingTop)||0,pb=parseFloat(cs.paddingBottom)||0;
+  const pl=parseFloat(cs.paddingLeft)||0,pr=parseFloat(cs.paddingRight)||0;
+  return{
+    top:Math.max(TIP_M,r.top+pt),
+    bottom:Math.min(window.innerHeight-TIP_M,r.bottom-pb),
+    left:Math.max(TIP_M,r.left+pl),
+    right:Math.min(window.innerWidth-TIP_M,r.right-pr)
+  };
+}
+// Place the tooltip anywhere between the frame's two ends — aligned with the
+// hovered card when that fits, slid up by exactly as much as it takes when it
+// does not. Taller than the frame means clamp it and let it scroll.
+function placeTip(r){
+  const tip=document.getElementById('tip');
+  const b=frameBounds();
+  const avail=Math.max(0,b.bottom-b.top);
+  const natH=Math.max(tip.scrollHeight,tip.offsetHeight);
+  const h=Math.min(natH,avail),w=tip.offsetWidth;
+  const scroll=natH>avail;
+  let top=r.top;
+  if(top+h>b.bottom)top=b.bottom-h;
+  if(top<b.top)top=b.top;
+  let left=r.right+TIP_GAP;
+  if(left+w>b.right)left=Math.max(b.left,r.left-TIP_GAP-w);
+  // Interactive only when the user has something to do inside it: the system
+  // tooltip is deliberately hoverable, and a clamped one needs the scroll.
+  const inter=tip.getAttribute('data-type')==='sys'||scroll;
+  const next={maxHeight:avail+'px',overflowY:scroll?'auto':'visible',pointerEvents:inter?'auto':'none',bottom:'auto',top:top+'px',left:left+'px'};
+  // Written only on change: the observer below re-places the tooltip whenever
+  // its box moves, and writing identical styles every pass would never settle.
+  Object.keys(next).forEach(k=>{if(tip.style[k]!==next[k])tip.style[k]=next[k];});
+  tip.dataset.scroll=scroll?'1':'';
+  tip.onmouseenter=inter?cancelHide:null;
+  tip.onmouseleave=inter?()=>endHover(tip.getAttribute('data-type')):null;
+}
+// A tooltip can grow after its first layout — a web font swaps in, text
+// rewraps — and a stale measurement is what pushes it past the frame edge.
+window.addEventListener('load',()=>{
+  const tip=document.getElementById('tip');
+  if(typeof ResizeObserver==='undefined')return;
+  new ResizeObserver(()=>{if(tip.style.display==='block'&&lastTipRect)placeTip(lastTipRect);}).observe(tip);
+});
+window.addEventListener('resize',()=>{
+  const tip=document.getElementById('tip');
+  if(tip.style.display==='block'&&lastTipRect)placeTip(lastTipRect);
+});
 function showTip(r,type,data){
   const tip=document.getElementById('tip');
   tip.setAttribute('data-type',type);
-  if(type==='sys'){
-    tip.style.pointerEvents='auto';
-    tip.style.overflowY='auto';
-    tip.style.maxHeight='50vh';
-    tip.classList.add('scroll-thin');
-    tip.onmouseenter=cancelHide;
-    tip.onmouseleave=()=>endHover('sys');
-  }else{
-    tip.style.pointerEvents='none';
-    tip.style.overflowY='visible';
-    tip.style.maxHeight='none';
-    tip.classList.remove('scroll-thin');
-    tip.onmouseenter=null;
-    tip.onmouseleave=null;
-  }
+  lastTipRect=r;
   let h='';
   if(type==='sys'){
     h='<div style="font-weight:700;color:#1e293b;font-size:13px;margin-bottom:8px">'+esc(data.name)+'</div>';
@@ -1264,11 +1304,15 @@ function showTip(r,type,data){
     const rv=rpnVal(data);if(rv)h+='<div style="font-size:11px;color:#94a3b8">RPN: <b style="color:#475569;font-size:13px">'+rv+'</b></div>';
   }
   tip.innerHTML=h;
+  // Off-frame and unclamped for the first paint so the natural height can be
+  // measured before a position is committed.
+  tip.style.maxHeight='none';
+  tip.style.overflowY='visible';
+  tip.style.left='-9999px';
+  tip.style.top='0px';
+  tip.style.bottom='auto';
   tip.style.display='block';
-  let left=r.right+10;
-  if(left+310>window.innerWidth)left=r.left-310-10;
-  tip.style.left=Math.max(8,left)+'px';
-  if(r.top>window.innerHeight/2){tip.style.top='auto';tip.style.bottom=Math.max(8,window.innerHeight-r.bottom)+'px';}else{tip.style.bottom='auto';tip.style.top=Math.max(8,r.top)+'px';}
+  placeTip(r);
 }
 function mk(cls,style,html){const d=document.createElement('div');d.className=cls;if(style)Object.assign(d.style,style);if(html!==undefined)d.innerHTML=html;return d;}
 function render(){
@@ -1287,7 +1331,7 @@ function render(){
   const sysCx=sl.x+SYS_W/2,sysBot=sl.y+SYS_H;
   const sv=vln(sysCx,sysBot,busY);if(sv)mel.appendChild(sv);
   const subCxs=DATA.subsystems.map((_,i)=>colXs[i]+SUB_W/2);
-  if(subCxs.length>1){const bh=hln(Math.min(...subCxs),busY,Math.max(...subCxs));if(bh)mel.appendChild(bh);}
+  if(subCxs.length){const bh=hln(Math.min(...subCxs,sysCx),busY,Math.max(...subCxs,sysCx));if(bh)mel.appendChild(bh);}
   DATA.subsystems.forEach((sub,i)=>{
     const s=map[sub.id];if(!s)return;
     const isExp=expanded.has(sub.id),subCx=s.x+SUB_W/2;
