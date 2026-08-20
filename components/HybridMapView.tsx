@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useRef } from 'react';
+import React, { useMemo, useState, useRef, useLayoutEffect } from 'react';
 import ReactDOM from 'react-dom';
 import { Project, Subsystem, Failure, Mode } from '../types';
 import { combineControlsAndMitigation } from './MitigationBuilder';
@@ -21,11 +21,15 @@ const BUS_TO_SUB = 28;
 const PADDING = 56;
 const CONN_COLOR = '#cbd5e1';
 const CONN_W = 2;
+const HOVER_DELAY = 500;   // ms before a hover tooltip appears
+const TIP_W = 300;         // tooltip max width
+const GAP = 10;            // gap between the hovered card and its tooltip
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface NodeLayout { x: number; y: number; w: number; h: number; }
 type LayoutMap = Record<string, NodeLayout>;
 interface TooltipState { type: 'sys' | 'sub' | 'ff' | 'fm'; rect: DOMRect; data: Project | Subsystem | Failure | Mode; }
+interface TooltipPos { top: number; left: number; maxH: number; scroll: boolean; }
 
 // ── Height helpers ────────────────────────────────────────────────────────────
 function ffRowHeight(fail: Failure, expanded: Set<string>): number {
@@ -160,6 +164,8 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
 
   // ── Tooltip ───────────────────────────────────────────────────────────────
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
+  const [tipPos, setTipPos] = useState<TooltipPos | null>(null);
+  const tipRef = useRef<HTMLDivElement | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -167,11 +173,13 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
     if (timerRef.current) clearTimeout(timerRef.current);
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    timerRef.current = setTimeout(() => setTooltip({ type, rect, data }), 1000);
+    timerRef.current = setTimeout(() => { setTipPos(null); setTooltip({ type, rect, data }); }, HOVER_DELAY);
   };
   const endHover = (typeOverride?: string | React.MouseEvent) => {
     if (timerRef.current) clearTimeout(timerRef.current);
-    if (typeOverride === 'sys' || tooltip?.type === 'sys') {
+    // A tooltip the user may need to scroll must survive the trip from the card
+    // to the tooltip itself, so it gets the same grace period as the system one.
+    if (typeOverride === 'sys' || tooltip?.type === 'sys' || tipPos?.scroll) {
       hideTimerRef.current = setTimeout(() => setTooltip(null), 500);
     } else {
       setTooltip(null);
@@ -180,6 +188,52 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
   const cancelHide = () => {
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
   };
+
+  /**
+   * Place the tooltip against the real viewport instead of picking one of two
+   * fixed anchors. Preferred position is aligned with the hovered card's top
+   * edge; when that overflows the bottom, the tooltip slides up by exactly as
+   * much as it takes to fit — anywhere between the two ends. A tooltip taller
+   * than the viewport is clamped and scrolls.
+   */
+  useLayoutEffect(() => {
+    if (!tooltip) { setTipPos(null); return; }
+    const el = tipRef.current;
+    if (!el) return;
+
+    const place = () => {
+      const M = 10;                                 // viewport margin
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const avail = vh - M * 2;
+      const natH  = Math.max(el.scrollHeight, el.offsetHeight);
+      const h     = Math.min(natH, avail);
+      const w     = el.offsetWidth;
+
+      let top = tooltip.rect.top;
+      if (top + h > vh - M) top = vh - M - h;
+      if (top < M) top = M;
+
+      const left = tooltip.rect.right + GAP + w > vw - M
+        ? Math.max(M, tooltip.rect.left - GAP - w)
+        : tooltip.rect.right + GAP;
+
+      const next = { top, left, maxH: avail, scroll: natH > avail };
+      // Re-entrant: the observer below calls this again after the new position
+      // is painted, so bail out once the answer stops moving.
+      setTipPos(prev =>
+        prev && prev.top === next.top && prev.left === next.left &&
+        prev.maxH === next.maxH && prev.scroll === next.scroll ? prev : next);
+    };
+
+    place();
+
+    // A tooltip can grow after its first layout — a web font swaps in, text
+    // rewraps — and a stale measurement is what pushes it off screen. Watch the
+    // real box instead of trusting the first pass.
+    const ro = new ResizeObserver(place);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [tooltip]);
 
   const sysLayout = map[project.id];
 
@@ -250,22 +304,28 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
   }
 
   // ── Tooltip portal ────────────────────────────────────────────────────────
+  // Interactive only when the user has something to do inside it: the system
+  // tooltip is deliberately hoverable, and any tooltip that had to be clamped
+  // needs to receive the scroll.
+  const tipInteractive = tooltip?.type === 'sys' || !!tipPos?.scroll;
+
   const tooltipEl = tooltip && ReactDOM.createPortal(
     <div
+      ref={tipRef}
       style={{
         position: 'fixed',
         zIndex: 9999,
-        ...(tooltip.rect.top > window.innerHeight / 2 
-           ? { bottom: Math.max(10, window.innerHeight - tooltip.rect.bottom) }
-           : { top: Math.max(10, tooltip.rect.top) }),
-        ...(tooltip.rect.right + 320 > window.innerWidth
-          ? { right: Math.max(10, window.innerWidth - tooltip.rect.left + 10) }
-          : { left: tooltip.rect.right + 10 }),
-        maxWidth: 300,
+        // First pass renders off-screen and unmeasured so the layout effect can
+        // read the natural height before committing a position.
+        top:  tipPos ? tipPos.top  : 0,
+        left: tipPos ? tipPos.left : -9999,
+        visibility: tipPos ? 'visible' : 'hidden',
+        maxWidth: TIP_W,
+        maxHeight: tipPos ? tipPos.maxH : undefined,
       }}
-      className={`bg-white border border-slate-200 rounded-xl shadow-2xl p-4 ${tooltip.type === 'sys' ? 'pointer-events-auto overflow-y-auto max-h-[50vh] scroll-thin' : 'pointer-events-none'}`}
-      onMouseEnter={tooltip.type === 'sys' ? cancelHide : undefined}
-      onMouseLeave={tooltip.type === 'sys' ? () => endHover('sys') : undefined}
+      className={`bg-white border border-slate-200 rounded-xl shadow-2xl p-4 ${tipInteractive ? 'pointer-events-auto overflow-y-auto scroll-thin' : 'pointer-events-none'}`}
+      onMouseEnter={tipInteractive ? cancelHide : undefined}
+      onMouseLeave={tipInteractive ? () => endHover(tooltip.type) : undefined}
     >
       {tooltip.type === 'sys' ? (() => {
         const p = tooltip.data as Project;
