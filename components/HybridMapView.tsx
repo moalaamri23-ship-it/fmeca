@@ -192,9 +192,12 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
 
     connectors.push(vLine(sysCx, sysBottom, busY));
 
+    // The bus must always span the system drop line as well — with a single
+    // subsystem (or any layout where the system is not above the sub span) the
+    // bus would otherwise be zero-width and leave the drop line hanging.
     const subCxs   = project.subsystems.map((_, i) => (colXs[i] ?? PADDING) + SUB_W / 2);
-    const busLeft  = Math.min(...subCxs);
-    const busRight = Math.max(...subCxs);
+    const busLeft  = Math.min(...subCxs, sysCx);
+    const busRight = Math.max(...subCxs, sysCx);
     if (busLeft < busRight) connectors.push(hLine(busLeft, busY, busRight));
 
     project.subsystems.forEach(sub => {
