@@ -166,6 +166,7 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
   const [tipPos, setTipPos] = useState<TooltipPos | null>(null);
   const tipRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -202,19 +203,27 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
     if (!el) return;
 
     const place = () => {
-      const M = 10;                                 // viewport margin
-      const vw = window.innerWidth, vh = window.innerHeight;
-      const avail = vh - M * 2;
+      const M = 10;                                 // margin off the frame edge
+      // The frame is the map's own scroll area, not the window: a tooltip that
+      // fills the window rides over the app's top bar and toolbar.
+      const host = canvasRef.current?.closest('.tree-viewport') as HTMLElement | null;
+      const hb   = host ? host.getBoundingClientRect() : null;
+      const bTop    = Math.max(M, (hb?.top    ?? 0) + M);
+      const bBottom = Math.min(window.innerHeight - M, (hb?.bottom ?? window.innerHeight) - M);
+      const bLeft   = Math.max(M, (hb?.left   ?? 0) + M);
+      const bRight  = Math.min(window.innerWidth - M, (hb?.right  ?? window.innerWidth) - M);
+
+      const avail = Math.max(0, bBottom - bTop);
       const natH  = Math.max(el.scrollHeight, el.offsetHeight);
       const h     = Math.min(natH, avail);
       const w     = el.offsetWidth;
 
       let top = tooltip.rect.top;
-      if (top + h > vh - M) top = vh - M - h;
-      if (top < M) top = M;
+      if (top + h > bBottom) top = bBottom - h;
+      if (top < bTop) top = bTop;
 
-      const left = tooltip.rect.right + GAP + w > vw - M
-        ? Math.max(M, tooltip.rect.left - GAP - w)
+      const left = tooltip.rect.right + GAP + w > bRight
+        ? Math.max(bLeft, tooltip.rect.left - GAP - w)
         : tooltip.rect.right + GAP;
 
       const next = { top, left, maxH: avail, scroll: natH > avail };
@@ -363,7 +372,7 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div className="hybrid-map-canvas" style={{ position:'relative', width:canvasW, height:canvasH, background:'#f8fafc' }}>
+    <div ref={canvasRef} className="hybrid-map-canvas" style={{ position:'relative', width:canvasW, height:canvasH, background:'#f8fafc' }}>
       {connectors}
 
       {/* System card */}
