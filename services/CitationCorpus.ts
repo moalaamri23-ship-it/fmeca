@@ -4,7 +4,8 @@
  * A field is cited against four kinds of source, and no others: the two
  * app-wide knowledge files, the documents filed under the field's subsystem,
  * and — for a field that belongs to a functional failure — the documents filed
- * under that failure. Scoping it this tightly is what keeps a citation run
+ * under that failure. Not every field sees all four: `sourceAppliesTo` says
+ * which kinds a given field may be cited against. Scoping it this tightly is what keeps a citation run
  * affordable and its result explainable: every passage came from a document the
  * reader could have opened from this row.
  *
@@ -15,6 +16,7 @@
 
 import { sanitizeName } from './FileSystem';
 import type { LocalFileSystemProvider } from './FileSystem';
+import type { CitableField } from './FieldClaims';
 import type { CitedSourceKind, CitedSourceRef, FileEntry } from '../types';
 
 /** A source with what it takes to read it — a file handle, or its text. */
@@ -33,6 +35,23 @@ const ORIGIN_LABELS: Record<CitedSourceKind, string> = {
     subsystem: 'Subsystem reference',
     function: 'Failure reference',
 };
+
+/**
+ * Whether a field is cited against a kind of source at all.
+ *
+ * Specs are cited on documents that STATE a value — the knowledge file and the
+ * subsystem's and the failure's attachments. A PM checklist records when a task
+ * is performed, never what the equipment is rated for, so a specification
+ * "found" there is a coincidence of wording. It is left out of the scope rather
+ * than searched and then argued with: a source that cannot answer the question
+ * costs a model call and can only produce a wrong answer.
+ */
+export const sourceAppliesTo = (field: CitableField, kind: CitedSourceKind): boolean =>
+    !(field === 'specs' && kind === 'checklist');
+
+/** The sources of `sources` this field is allowed to cite. */
+export const sourcesForField = (field: CitableField, sources: CiteSource[]): CiteSource[] =>
+    sources.filter(source => sourceAppliesTo(field, source.kind));
 
 /** Attachment folder of a subsystem — the path the References panel opens. */
 export const subsystemPath = (subName: string): string[] => ['Subsystems', sanitizeName(subName)];

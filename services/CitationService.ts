@@ -28,7 +28,7 @@ import { buildDocumentPayload, payloadIsUsable } from './DocumentPayload';
 import { askDocument, excerptPayloadFor, expandIntent } from './SmartSearchService';
 import { newConversationId } from './CopilotQueue';
 import type { SmartSearchConfig } from './SmartSearchService';
-import { toSourceRef } from './CitationCorpus';
+import { sourcesForField, toSourceRef } from './CitationCorpus';
 import type { CiteSource } from './CitationCorpus';
 import { buildClaims } from './FieldClaims';
 import type { CitableField } from './FieldClaims';
@@ -283,9 +283,15 @@ export interface CiteFieldResult extends FieldCitations {
 export async function citeField(req: CiteFieldRequest): Promise<CiteFieldResult> {
     const fieldText = req.fieldText.trim();
     if (!isCitable(fieldText)) throw new Error('There is not enough text in this field to cite.');
-    if (req.sources.length === 0) {
+    // Filtered here rather than trusted from the caller: this is the only place
+    // every run passes through, so a source the field cannot be cited against
+    // is never read, never charged for, and never stored as one that was.
+    const sources = sourcesForField(req.field, req.sources);
+    if (sources.length === 0) {
         throw new Error(
-            'Nothing to cite against. Load a knowledge or checklist file, or attach documents to this subsystem.'
+            req.field === 'specs'
+                ? 'Nothing to cite specs against. Load a knowledge file, or attach documents to this subsystem — specs are not cited against the PM checklist.'
+                : 'Nothing to cite against. Load a knowledge or checklist file, or attach documents to this subsystem.'
         );
     }
 
@@ -300,16 +306,16 @@ export async function citeField(req: CiteFieldRequest): Promise<CiteFieldResult>
     // against each other, which is what lets a second field be cited at the same
     // time. Providers other than Copilot ignore the field entirely.
     const ai: SmartSearchConfig = { ...req.ai, sessionId: req.ai.sessionId ?? newConversationId() };
-    const scoped: CiteFieldRequest = { ...req, ai };
+    const scoped: CiteFieldRequest = { ...req, ai, sources };
 
     // One expansion for the whole field, shared by every source: the claims are
     // about one subject, and expanding each of them separately buys nothing.
     const terms = await expandIntent(`${req.fieldLabel}: ${claims.map(c => c.text).join('; ')}`, ai);
 
     let done = 0;
-    req.onProgress?.({ done: 0, total: req.sources.length, current: req.sources[0].fileName });
+    req.onProgress?.({ done: 0, total: sources.length, current: sources[0].fileName });
 
-    const results = await mapWithLimit(req.sources, CONCURRENCY, async source => {
+    const results = await mapWithLimit(sources, CONCURRENCY, async source => {
         try {
             return await citeOneSource(source, claims, scoped, terms);
         } catch (e) {
@@ -319,7 +325,7 @@ export async function citeField(req: CiteFieldRequest): Promise<CiteFieldResult>
             } satisfies SourceResult;
         } finally {
             done += 1;
-            req.onProgress?.({ done, total: req.sources.length, current: source.fileName });
+            req.onProgress?.({ done, total: sources.length, current: source.fileName });
         }
     });
 
@@ -352,7 +358,7 @@ export async function citeField(req: CiteFieldRequest): Promise<CiteFieldResult>
         generatedAt: new Date().toISOString(),
         claims: resolved,
         items,
-        sources: req.sources.map(toSourceRef),
+        sources: sources.map(toSourceRef),
         emptySources: results.filter(r => r.empty && !r.error).map(r => r.source.fileName),
         failures: results
             .filter(r => r.error)

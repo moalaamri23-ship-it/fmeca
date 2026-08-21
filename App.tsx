@@ -16,7 +16,7 @@ import { AIService, TieredModels } from './services/AIService';
 import { LocalFileSystemProvider, sanitizeName, isCancellation } from './services/FileSystem';
 import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch, SendFilesMode, FieldCitations } from './types';
-import { collectCiteSources, rehydrateSources, type CiteSource, type CorpusRequest } from './services/CitationCorpus';
+import { collectCiteSources, rehydrateSources, sourcesForField, type CiteSource, type CorpusRequest } from './services/CitationCorpus';
 import { citationsAreStale, citeField, isCitable } from './services/CitationService';
 import { newConversationId } from './services/CopilotQueue';
 import type { CitableField } from './services/FieldClaims';
@@ -748,7 +748,9 @@ setProjects(
         setCiteError(null);
         setCiteRunning(prev => new Set(prev).add(key));
         try {
-            const sources = await collectCiteSources(corpus);
+            // Only the sources this field is cited against, so the modal lists
+            // exactly the documents that were searched.
+            const sources = sourcesForField(target.field as CitableField, await collectCiteSources(corpus));
             const found = await citeField({
                 field: target.field as CitableField,
                 fieldLabel: target.label,
@@ -802,7 +804,10 @@ setProjects(
         }
         const corpus = citeCorpusRequest(target);
         if (!corpus) return;
-        setCiteModal({ targets: [target], sources: await rehydrateSources(stored.sources, corpus) });
+        setCiteModal({
+            targets: [target],
+            sources: sourcesForField(target.field as CitableField, await rehydrateSources(stored.sources, corpus)),
+        });
     };
 
     /** Props for one field's cite button — spread straight onto SmartInput. */
