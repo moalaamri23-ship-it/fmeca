@@ -54,6 +54,7 @@ This is a fully client-side SPA — no backend. AI calls go directly from the br
   - `ModelSelector.tsx` — live model picker with search, tier groups, and favorites
   - `Chatbot.tsx` — floating RCM Consultant panel. RAG ON: calls `chatWithTools()` to select tools, `executeToolCall()` to fetch exact data, then `chat()` for the final answer. Falls back to JSON planner then keyword retrieval. RAG OFF: direct general-knowledge chat.
   - `SystemModesModal.tsx` — System Modes feature: import Component + Failure Mode + Occurrences by heading and preview component-grouped operational history
+  - `OperatingContextModal.tsx` — SAE JA1011 Q1 operating context (summary, redundancy, duty cycle, environment, production-impact rule, safety/environmental regime). Stored on `Project.operatingContext` and exported with the project JSON; RCM Studio classifies failure consequences in this context instead of inferring one, so leaving it blank costs the downstream study a Minor gap.
   - `TreeNode.tsx` — tree visualization node
   - `AttachmentModal.tsx`, `SystemModesModal.tsx`, `MitigationBuilder.tsx`
 - **`services/AIService.ts`** — all AI calls (~820 lines); supports Gemini, OpenAI, Anthropic, Azure, OpenRouter. Key additions:
@@ -67,6 +68,7 @@ This is a fully client-side SPA — no backend. AI calls go directly from the br
   - `executeToolCall(name, args, project)` — executes one of 5 named tools against real project data: `list_subsystems`, `get_subsystem_detail`, `get_failure_modes`, `search_project`, `get_rpn_summary`
   - `buildContextByPlan(plan, query, project)` — JSON-planner-driven retrieval (fallback path)
   - `retrieveContext(query, project, limit)` — keyword scoring fallback (last resort)
+- **`services/RcmFeedbackService.ts`** — the return leg of the RCM round trip. RCM Studio exports `RCM_Feedback_*.json` (`kind: 'rcm-feedback'`) carrying the approved JA1011 controls, mitigations, policies and task intervals per failure mode plus the gaps it found in the FMECA itself (unlisted protective functions, occurrence ratings contradicted by CM history, missing fields). `importJSON` detects that shape **before** the `isFmecaProject` guard and calls `applyRcmFeedback`, which matches on subsystem/mode ids (project ids are regenerated on import, so they never match), writes the approved text either replacing or appending to the FMECA lines at the user's choice, tags touched modes `RCM`, adopts the operating context when the FMECA has none, and stores the gaps on `Project.rcmFeedback` for the banner above the project header.
 - **`services/FileSystem.ts`** — wraps the File System Access API; persists folder handles in IndexedDB (`FmecaPro_FS`)
 
 ### Data model hierarchy

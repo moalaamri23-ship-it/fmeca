@@ -150,6 +150,19 @@ export interface Subsystem {
   citations?: Record<string, FieldCitations>;
 }
 
+/**
+ * SAE JA1011 Q1 operating context. Free text per field; empty means "not stated".
+ * Exported with the project so RCM Studio classifies consequences in this context.
+ */
+export interface OperatingContext {
+  summary: string;
+  redundancy: string;
+  dutyCycle: string;
+  environment: string;
+  productionImpactRule: string;
+  safetyEnvRegime: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -157,6 +170,16 @@ export interface Project {
   created: string;
   updated: string;
   subsystems: Subsystem[];
+  /** Stated operating context (JA1011 Q1); absent until the user records it. */
+  operatingContext?: OperatingContext;
+  /** Last RCM Studio feedback import: what was applied and the FMECA-facing gaps to resolve. */
+  rcmFeedback?: {
+    importedAt: string;
+    rcmProjectName: string;
+    generatedAt: string;
+    updatedModes: number;
+    gaps: Array<{ code: string; severity: 'Blocking' | 'Major' | 'Minor'; subsystemId?: string; modeId?: string; text: string }>;
+  };
   /** Set after a successful publish to the SharePoint RCM register. */
   rcmRegister?: {
     rcmInternalNumber: string;
