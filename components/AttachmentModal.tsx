@@ -361,7 +361,8 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                                     {confirmDelete === f.name ? (
                                         <div className="flex items-center gap-2 shrink-0">
                                             <span className="text-xs text-slate-500">Delete?</span>
-                                            <button onClick={()=>handleDelete(f.name)} className="text-xs bg-red-600 text-white px-2 py-1 rounded font-bold">Yes</button>
+                                            {/* Focused so Space/Enter confirms without the mouse. */}
+                                            <button autoFocus onClick={()=>handleDelete(f.name)} className="text-xs bg-red-600 text-white px-2 py-1 rounded font-bold focus:outline-none focus:ring-2 focus:ring-red-400">Yes</button>
                                             <button onClick={()=>setConfirmDelete(null)} className="text-xs border px-2 py-1 rounded font-bold">No</button>
                                         </div>
                                     ) : (

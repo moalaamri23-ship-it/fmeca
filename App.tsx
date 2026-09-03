@@ -176,6 +176,30 @@ const App = () => {
     const [confirmBox, setConfirmBox] = useState<{ msg: string; run: null | (() => void); okLabel?: string }>({ msg: "", run: null });
     const ask = (msg: string, run: () => void, okLabel?: string) => setConfirmBox({ msg, run, okLabel });
     const closeAsk = () => setConfirmBox({ msg: "", run: null });
+    const confirmBtnRef = useRef<HTMLButtonElement>(null);
+    // Space/Enter confirms without reaching for the mouse; Esc cancels. The button is focused too,
+    // but the key handler is what actually fires so it works wherever focus happens to sit.
+    useEffect(() => {
+        const run = confirmBox.run;
+        if (!run) return;
+        confirmBtnRef.current?.focus();
+        let fired = false;
+        const onKey = (e: KeyboardEvent) => {
+            if (fired) return;
+            if (e.key === 'Escape') { e.preventDefault(); fired = true; closeAsk(); return; }
+            if (e.key !== ' ' && e.key !== 'Spacebar' && e.key !== 'Enter') return;
+            const t = e.target as HTMLElement | null;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+            // Cancel keeps its own keyboard activation when it is the focused button.
+            if (t && t.tagName === 'BUTTON' && t !== confirmBtnRef.current) return;
+            e.preventDefault();
+            fired = true;
+            closeAsk();
+            run();
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [confirmBox.run]);
     // Map-tree state + handlers
     const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
     const [treeSelected, setTreeSelected] = useState<string | null>(null);
@@ -2153,7 +2177,7 @@ render();
       <div className="text-sm text-slate-700">{confirmBox.msg}</div>
       <div className="mt-4 flex justify-end gap-2">
         <button className="px-3 py-2 text-sm border rounded-lg" onClick={closeAsk}>Cancel</button>
-        <button className="px-3 py-2 text-sm bg-red-600 text-white rounded-lg"
+        <button ref={confirmBtnRef} autoFocus className="px-3 py-2 text-sm bg-red-600 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-1"
           onClick={() => { const fn = confirmBox.run; closeAsk(); fn?.(); }}>
           {confirmBox.okLabel || 'Delete'}
         </button>
