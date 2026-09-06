@@ -1,118 +1,19 @@
-import React, { useMemo, useState, useRef, useLayoutEffect } from 'react';
+import React, { useMemo, useState, useRef, useLayoutEffect, useEffect } from 'react';
 import ReactDOM from 'react-dom';
 import { Project, Subsystem, Failure, Mode } from '../types';
 import { combineControlsAndMitigation } from './MitigationBuilder';
+import {
+  computeLayout, NodeLayout,
+  SYS_W, SYS_H, SUB_W, SUB_H, FF_W, FF_H, FM_W, FM_H,
+  H_GAP, PADDING, CONN_COLOR, CONN_W,
+} from '../services/MapLayout';
 
-// ── Layout constants ──────────────────────────────────────────────────────────
-const SYS_W = 320;
-const SYS_H = 72;
-const SUB_W = 200;
-const SUB_H = 90;
-const FF_W  = 190;
-const FF_H  = 62;
-const FM_W  = 215;
-const FM_H  = 136;
-const H_GAP = 32;      // horizontal gap between card columns within a sub
-const V_GAP = 24;      // vertical gap between FF rows
-const FM_V_GAP = 16;   // vertical gap between FM cards within one FF row
-const COL_GAP = 40;    // horizontal gap between sub columns
-const SYS_BOTTOM_TO_BUS = 28;
-const BUS_TO_SUB = 28;
-const PADDING = 56;
-const CONN_COLOR = '#cbd5e1';
-const CONN_W = 2;
 const HOVER_DELAY = 500;   // ms before a hover tooltip appears
 const TIP_W = 300;         // tooltip max width
 const GAP = 10;            // gap between the hovered card and its tooltip
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-interface NodeLayout { x: number; y: number; w: number; h: number; }
-type LayoutMap = Record<string, NodeLayout>;
 interface TooltipState { type: 'sys' | 'sub' | 'ff' | 'fm'; rect: DOMRect; data: Project | Subsystem | Failure | Mode; }
 interface TooltipPos { top: number; left: number; maxH: number; scroll: boolean; }
-
-// ── Height helpers ────────────────────────────────────────────────────────────
-function ffRowHeight(fail: Failure, expanded: Set<string>): number {
-  if (!expanded.has(fail.id) || fail.modes.length === 0) return FF_H;
-  return Math.max(FF_H, fail.modes.length * FM_H + (fail.modes.length - 1) * FM_V_GAP);
-}
-
-function groupHeight(sub: Subsystem, expanded: Set<string>): number {
-  if (!expanded.has(sub.id) || sub.failures.length === 0) return SUB_H;
-  let total = 0;
-  sub.failures.forEach((f, fi) => {
-    total += ffRowHeight(f, expanded);
-    if (fi < sub.failures.length - 1) total += V_GAP;
-  });
-  return Math.max(SUB_H, total);
-}
-
-/** Width of one sub column — compact when collapsed, full when expanded. */
-function colWidth(sub: Subsystem, expanded: Set<string>): number {
-  if (!expanded.has(sub.id)) return SUB_W;
-  return SUB_W + H_GAP + FF_W + H_GAP + FM_W;
-}
-
-// ── Layout computation ────────────────────────────────────────────────────────
-function computeLayout(
-  project: Project,
-  expanded: Set<string>
-): { map: LayoutMap; canvasW: number; canvasH: number; busY: number; colXs: number[] } {
-  const subs = project.subsystems;
-  const n = subs.length;
-
-  // Dynamic per-column X positions
-  const colXs: number[] = [];
-  let curX = PADDING;
-  subs.forEach((sub) => {
-    colXs.push(curX);
-    curX += colWidth(sub, expanded) + COL_GAP;
-  });
-  const contentRight = n > 0 ? curX - COL_GAP : PADDING;
-  const canvasW = Math.max(SYS_W + PADDING * 2, contentRight + PADDING);
-
-  const sysX  = (canvasW - SYS_W) / 2;
-  const sysY  = PADDING;
-  const busY  = sysY + SYS_H + SYS_BOTTOM_TO_BUS;
-  const subRowY = busY + BUS_TO_SUB;
-
-  let maxGroupH = SUB_H;
-  subs.forEach(s => { maxGroupH = Math.max(maxGroupH, groupHeight(s, expanded)); });
-
-  const canvasH = subRowY + maxGroupH + PADDING;
-
-  const map: LayoutMap = {};
-  map[project.id] = { x: sysX, y: sysY, w: SYS_W, h: SYS_H };
-
-  subs.forEach((sub, i) => {
-    const gh   = groupHeight(sub, expanded);
-    const colX = colXs[i];
-    const subY = subRowY + Math.max(0, (gh - SUB_H) / 2);
-    map[sub.id] = { x: colX, y: subY, w: SUB_W, h: SUB_H };
-
-    if (!expanded.has(sub.id)) return;
-
-    let cursor = subRowY;
-    const ffX  = colX + SUB_W + H_GAP;
-    const fmX  = ffX  + FF_W  + H_GAP;
-
-    sub.failures.forEach((fail, fi) => {
-      const rh  = ffRowHeight(fail, expanded);
-      const ffY = cursor + Math.max(0, (rh - FF_H) / 2);
-      map[fail.id] = { x: ffX, y: ffY, w: FF_W, h: FF_H };
-
-      if (expanded.has(fail.id)) {
-        fail.modes.forEach((mode, mi) => {
-          map[mode.id] = { x: fmX, y: cursor + mi * (FM_H + FM_V_GAP), w: FM_W, h: FM_H };
-        });
-      }
-      cursor += rh;
-      if (fi < sub.failures.length - 1) cursor += V_GAP;
-    });
-  });
-
-  return { map, canvasW, canvasH, busY, colXs };
-}
 
 // ── Connector helpers (div-based — html2canvas safe) ──────────────────────────
 let _k = 0;
@@ -173,10 +74,12 @@ interface HybridMapViewProps {
   treeSelected: string | null;
   onToggle: (id: string) => void;
   onSelect: (id: string) => void;
+  /** Natural canvas size, reported on every layout change so the view above can auto fit. */
+  onCanvasSize?: (width: number, height: number) => void;
 }
 
 export const HybridMapView: React.FC<HybridMapViewProps> = ({
-  project, treeExpanded, treeSelected, onToggle, onSelect,
+  project, treeExpanded, treeSelected, onToggle, onSelect, onCanvasSize,
 }) => {
   _k = 0;
 
@@ -184,6 +87,18 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
     () => computeLayout(project, treeExpanded),
     [project, treeExpanded]
   );
+
+  useEffect(() => { onCanvasSize?.(canvasW, canvasH); }, [canvasW, canvasH, onCanvasSize]);
+
+  // Full screen hides every sibling of the full-screen element, so a tooltip
+  // portalled into document.body would simply not paint. Follow the element.
+  const [fsRoot, setFsRoot] = useState<Element | null>(null);
+  useEffect(() => {
+    const sync = () => setFsRoot(document.fullscreenElement);
+    sync();
+    document.addEventListener('fullscreenchange', sync);
+    return () => document.removeEventListener('fullscreenchange', sync);
+  }, []);
 
   // ── Tooltip ───────────────────────────────────────────────────────────────
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
@@ -392,7 +307,7 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
         </>;
       })()}
     </div>,
-    document.body
+    (fsRoot as HTMLElement | null) ?? document.body
   );
 
   // ── Render ────────────────────────────────────────────────────────────────

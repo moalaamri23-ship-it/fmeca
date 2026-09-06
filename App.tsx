@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { toPng, toJpeg } from 'html-to-image';
 import XLSX from 'xlsx-js-style';
 import { Icon } from './components/Icon';
@@ -9,6 +9,7 @@ import { OperatingContextModal, hasOperatingContext } from './components/Operati
 import { applyRcmFeedback, countMatchingSubsystems, isRcmFeedback, type RcmFeedback } from './services/RcmFeedbackService';
 import { TreeNode } from './components/TreeNode';
 import { HybridMapView } from './components/HybridMapView';
+import { buildMapSvg } from './services/MapSvg';
 import { AttachmentModal } from './components/AttachmentModal';
 import { CitationModal, type CitationGroup } from './components/CitationModal';
 import { BulkCiteButton, type CiteState } from './components/CiteButton';
@@ -204,6 +205,14 @@ const App = () => {
     const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
     const [treeSelected, setTreeSelected] = useState<string | null>(null);
     const [mapZoom, setMapZoom] = useState(1.0);
+    // Auto fit is on until the user zooms by hand; Fit view is how they ask for
+    // it back. Without that handshake every expand would yank the zoom out from
+    // under someone who had deliberately zoomed in on one branch.
+    const [mapAutoFit, setMapAutoFit] = useState(true);
+    const [mapCanvas, setMapCanvas] = useState({ w: 0, h: 0 });
+    const [mapFullscreen, setMapFullscreen] = useState(false);
+    const mapViewportRef = useRef<HTMLDivElement | null>(null);
+    const editorPaneRef = useRef<HTMLDivElement | null>(null);
     const [mapHiddenSubs, setMapHiddenSubs] = useState<Set<string>>(new Set());
     const [showSubFilter, setShowSubFilter] = useState(false);
 
@@ -333,6 +342,75 @@ const collapseAllTree = () => {
 
     const toggleSubVisibility = (id: string) =>
         setMapHiddenSubs(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+    // ── Map auto fit / full screen ────────────────────────────────────────────
+    // The frame the map has to fit into: the editor's scroll pane normally, the
+    // map itself once it is the full-screen element (everything else is hidden
+    // then, so the pane's box no longer describes what the user can see).
+    const mapFrame = () => {
+        const el = document.fullscreenElement === mapViewportRef.current
+            ? mapViewportRef.current
+            : editorPaneRef.current;
+        if (!el) return null;
+        const cs = getComputedStyle(el);
+        const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+        const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+        return { w: Math.max(0, el.clientWidth - padX), h: Math.max(0, el.clientHeight - padY) };
+    };
+
+    // Never magnifies: a small map stays at 100% rather than being blown up to
+    // fill the pane, which is what "fit" means for a diagram made of cards.
+    const applyMapFit = useCallback(() => {
+        const frame = mapFrame();
+        if (!frame || !mapCanvas.w || !mapCanvas.h || !frame.w || !frame.h) return;
+        const z = Math.min(1, Math.max(0.25, Math.min(frame.w / mapCanvas.w, frame.h / mapCanvas.h)));
+        setMapZoom(+z.toFixed(2));
+    }, [mapCanvas.w, mapCanvas.h]);
+
+    const fitMapToView = () => { setMapAutoFit(true); applyMapFit(); };
+    const zoomMap = (delta: number) => {
+        // A deliberate zoom means the user is driving: stop refitting until they
+        // press Fit view again.
+        setMapAutoFit(false);
+        setMapZoom(z => +Math.min(2, Math.max(0.25, z + delta)).toFixed(2));
+    };
+
+    // Refit on anything that changes either side of the ratio: the layout
+    // (expand/collapse, subsystem filter), the pane, or full screen.
+    useEffect(() => {
+        if (tab !== 'map' || !mapAutoFit) return;
+        applyMapFit();
+    }, [tab, mapAutoFit, mapFullscreen, applyMapFit]);
+
+    useEffect(() => {
+        if (tab !== 'map' || !mapAutoFit) return;
+        const el = editorPaneRef.current;
+        if (!el || typeof ResizeObserver === 'undefined') return;
+        const ro = new ResizeObserver(() => applyMapFit());
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, [tab, mapAutoFit, applyMapFit]);
+
+    useEffect(() => {
+        const sync = () => setMapFullscreen(document.fullscreenElement === mapViewportRef.current);
+        document.addEventListener('fullscreenchange', sync);
+        return () => document.removeEventListener('fullscreenchange', sync);
+    }, []);
+
+    const toggleMapFullscreen = async () => {
+        const el = mapViewportRef.current;
+        if (!el) return;
+        try {
+            if (document.fullscreenElement === el) await document.exitFullscreen();
+            else await el.requestFullscreen();
+        } catch {
+            alert('Full screen is unavailable in this browser.');
+        }
+    };
+
+    const reportMapCanvas = useCallback((w: number, h: number) => {
+        setMapCanvas(prev => (prev.w === w && prev.h === h ? prev : { w, h }));
+    }, []);
 
 // Validates that parsed JSON is actually an FMECA project (guards against white-screen on wrong file)
 const isFmecaProject = (p: any): boolean =>
@@ -1176,6 +1254,21 @@ setProjects(
         } catch { alert('PDF export failed.'); } finally { setLoadingExport(false); }
     };
 
+    const downloadMapSvg = () => {
+        if (!activeProject) return;
+        setShowDownloadOptions(false);
+        try {
+            // Vector, so it stays sharp at any print size and the card text stays
+            // selectable — which the PNG exports cannot offer.
+            const { svg } = buildMapSvg(filteredProject!, treeExpanded);
+            const link = document.createElement('a');
+            link.download = `FMECA_Map_${activeProject.name.replace(/ /g, '_')}.svg`;
+            link.href = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
+            link.click();
+            URL.revokeObjectURL(link.href);
+        } catch { alert('SVG export failed.'); }
+    };
+
     const downloadInteractiveMap = () => {
         if (!activeProject) return;
         setShowDownloadOptions(false);
@@ -1217,6 +1310,9 @@ body{margin:0;padding:0;background:#f8fafc;font-family:Inter,system-ui,sans-seri
     <span id="zoom-label" class="text-xs font-bold text-slate-600 w-10 text-center select-none">100%</span>
     <button onclick="zoomIn()" class="w-6 h-6 flex items-center justify-center text-slate-600 hover:bg-slate-100 rounded font-bold text-base leading-none" title="Zoom in">+</button>
   </div>
+  <button id="fit-btn" onclick="fitView()" class="border px-3 py-1.5 rounded text-xs font-bold shadow-sm" title="Fit the whole map in view and turn auto fit back on">Fit View</button>
+  <button id="fs-btn" onclick="toggleFullScreen()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm">Full Screen</button>
+  <button onclick="downloadSvg()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm" title="Download this map as a vector SVG">SVG</button>
 </div>
 <div id="wrap"><div id="map"></div></div>
 <div id="tip"></div>
@@ -1228,9 +1324,42 @@ const H_GAP=32,V_GAP=24,FM_V_GAP=16,COL_GAP=40;
 const SYS_BOTTOM_TO_BUS=28,BUS_TO_SUB=28,PADDING=56,CONN_W=2;
 let expanded=new Set(INIT_EXP);
 let mapZoom=1.0;
-function zoomIn(){mapZoom=+Math.min(2,mapZoom+0.1).toFixed(2);applyZoom();}
-function zoomOut(){mapZoom=+Math.max(0.25,mapZoom-0.1).toFixed(2);applyZoom();}
+// Auto fit is on until the user zooms by hand; Fit View is how they ask for it
+// back. Without that handshake every expand would yank the zoom out from under
+// someone who had deliberately zoomed in on one branch.
+let autoFit=true;
+const FIT_ON='border px-3 py-1.5 rounded text-xs font-bold shadow-sm bg-blue-600 text-white border-blue-600';
+const FIT_OFF='border px-3 py-1.5 rounded text-xs font-bold shadow-sm bg-white text-slate-600 border-slate-200 hover:bg-slate-50';
+function syncFitBtn(){const b=document.getElementById('fit-btn');if(b)b.className=autoFit?FIT_ON:FIT_OFF;}
+// The frame is the window minus the fixed toolbar and the wrapper's padding.
+function fitFrame(){return{w:Math.max(0,window.innerWidth-48),h:Math.max(0,window.innerHeight-96)};}
+// Never magnifies: a small map stays at 100% rather than being blown up.
+function applyFit(){
+  const m=document.getElementById('map');
+  const cw=parseFloat(m.style.width)||0,ch=parseFloat(m.style.height)||0;
+  if(!cw||!ch)return;
+  const f=fitFrame();if(!f.w||!f.h)return;
+  mapZoom=+Math.min(1,Math.max(0.25,Math.min(f.w/cw,f.h/ch))).toFixed(2);
+  applyZoom();
+}
+function fitView(){autoFit=true;syncFitBtn();applyFit();}
+// A deliberate zoom means the user is driving: stop refitting until Fit View.
+function zoomIn(){autoFit=false;syncFitBtn();mapZoom=+Math.min(2,mapZoom+0.1).toFixed(2);applyZoom();}
+function zoomOut(){autoFit=false;syncFitBtn();mapZoom=+Math.max(0.25,mapZoom-0.1).toFixed(2);applyZoom();}
 function applyZoom(){document.getElementById('map').style.zoom=mapZoom;document.getElementById('zoom-label').textContent=Math.round(mapZoom*100)+'%';}
+function toggleFullScreen(){
+  const done=()=>{};
+  try{
+    if(document.fullscreenElement)document.exitFullscreen().then(done,done);
+    else document.documentElement.requestFullscreen().then(done,done);
+  }catch(e){alert('Full screen is unavailable in this browser.');}
+}
+document.addEventListener('fullscreenchange',()=>{
+  const b=document.getElementById('fs-btn');
+  if(b)b.textContent=document.fullscreenElement?'Exit Full Screen':'Full Screen';
+  if(autoFit)applyFit();
+});
+window.addEventListener('resize',()=>{if(autoFit)applyFit();});
 function colW(sub){return expanded.has(sub.id)?SUB_W+H_GAP+FF_W+H_GAP+FM_W:SUB_W;}
 function ffRowH(fail){if(!expanded.has(fail.id)||!fail.modes.length)return FF_H;return Math.max(FF_H,fail.modes.length*FM_H+(fail.modes.length-1)*FM_V_GAP);}
 function groupH(sub){if(!expanded.has(sub.id)||!sub.failures.length)return SUB_H;let t=0;sub.failures.forEach((f,i)=>{t+=ffRowH(f);if(i<sub.failures.length-1)t+=V_GAP;});return Math.max(SUB_H,t);}
@@ -1462,11 +1591,134 @@ function render(){
       });
     });
   });
+  if(autoFit)applyFit();
 }
 function toggle(id){if(expanded.has(id))expanded.delete(id);else expanded.add(id);render();}
 function expandAll(){expanded=new Set([DATA.id]);DATA.subsystems.forEach(s=>{expanded.add(s.id);s.failures.forEach(f=>{expanded.add(f.id);f.modes.forEach(m=>expanded.add(m.id));});});render();}
 function collapseAll(){expanded=new Set([DATA.id]);render();}
+// ── Vector export ───────────────────────────────────────────────────────────
+// Mirrors services/MapSvg.ts in the app: same layout, same colours, text as
+// real text so it stays sharp and selectable at any print size.
+function svgEsc(t){return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+// SVG has no line box, so the cards' line-clamp has to be reproduced by hand.
+function wrapLines(text,widthPx,fontPx,maxLines,bold){
+  const clean=String(text==null?'':text).replace(/\\s+/g,' ').trim();
+  if(!clean)return [];
+  const maxChars=Math.max(4,Math.floor(widthPx/(fontPx*(bold?0.55:0.52))));
+  const lines=[];let line='';
+  clean.split(' ').forEach(function(word){
+    const next=line?line+' '+word:word;
+    if(next.length<=maxChars){line=next;return;}
+    if(line)lines.push(line);
+    let rest=word;
+    while(rest.length>maxChars){lines.push(rest.slice(0,maxChars));rest=rest.slice(maxChars);}
+    line=rest;
+  });
+  if(line)lines.push(line);
+  if(lines.length<=maxLines)return lines;
+  const kept=lines.slice(0,maxLines);
+  kept[maxLines-1]=kept[maxLines-1].slice(0,-1).replace(/\\s+$/,'')+'…';
+  return kept;
+}
+function svgText(lines,x,y,fontPx,lineH,fill,bold,italic){
+  if(!lines.length)return '';
+  const sp=lines.map(function(l,i){return '<tspan x="'+x+'" dy="'+(i?lineH:0)+'">'+svgEsc(l)+'</tspan>';}).join('');
+  return '<text x="'+x+'" y="'+y+'" font-size="'+fontPx+'" fill="'+fill+'"'+(bold?' font-weight="700"':'')+(italic?' font-style="italic"':'')+'>'+sp+'</text>';
+}
+let svgClip=0;
+function svgCard(l,w,h,accent,body){
+  const id='mc'+(svgClip++);
+  return '<g transform="translate('+l.x+','+l.y+')">'
+    +'<clipPath id="'+id+'"><rect width="'+w+'" height="'+h+'" rx="8"/></clipPath>'
+    +'<rect width="'+w+'" height="'+h+'" rx="8" fill="#ffffff"/>'
+    +'<rect width="5" height="'+h+'" fill="'+accent+'" clip-path="url(#'+id+')"/>'
+    +'<rect width="'+w+'" height="'+h+'" rx="8" fill="none" stroke="#e2e8f0"/>'
+    +body+'</g>';
+}
+function svgLine(x,y,w,h){return '<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+h+'" fill="#cbd5e1"/>';}
+function svgH(x1,y,x2){const w=Math.abs(x2-x1);return w<1?'':svgLine(Math.min(x1,x2),Math.round(y)-1,w,CONN_W);}
+function svgV(x,y1,y2){const h=Math.abs(y2-y1);return h<1?'':svgLine(Math.round(x)-1,Math.min(y1,y2),CONN_W,h);}
+function buildSvg(){
+  const L=layout(),map=L.map,cW=L.cW,cH=L.cH,busY=L.busY,colXs=L.colXs;
+  const out=[];svgClip=0;
+  const sys=map[DATA.id];
+  if(sys&&DATA.subsystems.length){
+    const sysCx=sys.x+SYS_W/2;
+    out.push(svgV(sysCx,sys.y+SYS_H,busY));
+    const subCxs=DATA.subsystems.map(function(_,i){return colXs[i]+SUB_W/2;});
+    const bl=Math.min.apply(null,subCxs.concat([sysCx])),br=Math.max.apply(null,subCxs.concat([sysCx]));
+    if(bl<br)out.push(svgH(bl,busY,br));
+  }
+  DATA.subsystems.forEach(function(sub){
+    const s=map[sub.id];if(!s)return;
+    const isExp=expanded.has(sub.id);
+    out.push(svgV(s.x+SUB_W/2,busY,s.y));
+    let body=svgText(wrapLines(sub.name,SUB_W-24,14,1,true),14,26,14,17,'#334155',true,false)
+      +svgText(wrapLines(sub.func||'',SUB_W-24,12,2,false),14,46,12,15,'#64748b',false,false)
+      +'<text x="14" y="'+(SUB_H-12)+'" font-size="10" fill="#94a3b8">'+sub.failures.length+' FF '+(isExp?'▲':'▼')+'</text>';
+    out.push(svgCard(s,SUB_W,SUB_H,'#3b82f6',body));
+    if(!isExp||!sub.failures.length)return;
+    const subMY=s.y+SUB_H/2,ffBX=s.x+SUB_W+H_GAP/2;
+    const ffL=sub.failures.map(function(f){return map[f.id];}).filter(Boolean);
+    if(!ffL.length)return;
+    out.push(svgH(s.x+SUB_W,subMY,ffBX));
+    const vt=Math.min(subMY,ffL[0].y+FF_H/2),vb=Math.max(subMY,ffL[ffL.length-1].y+FF_H/2);
+    if(vt<vb)out.push(svgV(ffBX,vt,vb));
+    sub.failures.forEach(function(fail){
+      const f=map[fail.id];if(!f)return;
+      const fExp=expanded.has(fail.id),ffMY=f.y+FF_H/2;
+      out.push(svgH(ffBX,ffMY,f.x));
+      let fb=svgText(wrapLines(fail.desc||'Unnamed',FF_W-20,12,2,true),12,22,12,15,'#334155',true,false)
+        +'<text x="12" y="'+(FF_H-10)+'" font-size="10" fill="#94a3b8">'+fail.modes.length+' FM '+(fExp?'▲':'▼')+'</text>';
+      out.push(svgCard(f,FF_W,FF_H,'#f59e0b',fb));
+      if(!fExp||!fail.modes.length)return;
+      const fmBX=f.x+FF_W+H_GAP/2;
+      const fmL=fail.modes.map(function(m){return map[m.id];}).filter(Boolean);
+      if(!fmL.length)return;
+      out.push(svgH(f.x+FF_W,ffMY,fmBX));
+      const ft=Math.min(ffMY,fmL[0].y+FM_H/2),fbm=Math.max(ffMY,fmL[fmL.length-1].y+FM_H/2);
+      if(ft<fbm)out.push(svgV(fmBX,ft,fbm));
+      fail.modes.forEach(function(mode){
+        const m=map[mode.id];if(!m)return;
+        out.push(svgH(fmBX,m.y+FM_H/2,m.x));
+        let y=22;
+        const ml=wrapLines(mode.mode||'Unnamed',FM_W-20,12,2,true);
+        let mb=svgText(ml,12,y,12,14,'#334155',true,false);y+=ml.length*14;
+        const ef=wrapLines(mode.effect||'',FM_W-20,10,1,true);
+        if(ef.length){mb+=svgText(ef,12,y+10,10,12,'#ef4444',true,false);y+=14;}
+        const ca=wrapLines(mode.cause||'',FM_W-20,10,1,false);
+        if(ca.length){mb+=svgText(ca,12,y+10,10,12,'#64748b',false,true);y+=14;}
+        const ac=wrapLines(combineMit(mode),FM_W-32,10,2,true);
+        if(ac.length){
+          const bh=ac.length*12+8;
+          mb+='<rect x="10" y="'+(y+2)+'" width="'+(FM_W-22)+'" height="'+bh+'" rx="4" fill="#f0fdf4" stroke="#bbf7d0"/>'
+            +svgText(ac,16,y+13,10,12,'#15803d',true,false);
+          y+=bh+4;
+        }
+        const rv=rpnVal(mode);
+        if(rv)mb+='<text x="12" y="'+Math.min(y+12,FM_H-8)+'" font-size="10" fill="#94a3b8">RPN: <tspan font-weight="700" fill="#475569">'+svgEsc(rv)+'</tspan></text>';
+        out.push(svgCard(m,FM_W,FM_H,'#ef4444',mb));
+      });
+    });
+  });
+  const sysName=wrapLines(DATA.name,SYS_W-48,16,1,true),sysDesc=wrapLines(DATA.desc||'',SYS_W-48,12,2,false);
+  const nameY=sysDesc.length?30:42;
+  if(sys)out.push('<g transform="translate('+sys.x+','+sys.y+')"><rect width="'+SYS_W+'" height="'+SYS_H+'" rx="12" fill="#0f172a" stroke="#1e293b"/>'
+    +sysName.map(function(l){return '<text x="'+(SYS_W/2)+'" y="'+nameY+'" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">'+svgEsc(l)+'</text>';}).join('')
+    +sysDesc.map(function(l,i){return '<text x="'+(SYS_W/2)+'" y="'+(nameY+18+i*15)+'" font-size="12" fill="#94a3b8" text-anchor="middle">'+svgEsc(l)+'</text>';}).join('')
+    +'</g>');
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="'+cW+'" height="'+cH+'" viewBox="0 0 '+cW+' '+cH+'" font-family="Inter, system-ui, -apple-system, sans-serif"><rect width="100%" height="100%" fill="#f8fafc"/>'+out.join('')+'</svg>';
+}
+function downloadSvg(){
+  const blob=new Blob([buildSvg()],{type:'image/svg+xml;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=(DATA.name||'FMECA_Map').replace(/ /g,'_')+'_Map.svg';
+  a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);},1000);
+}
 render();
+syncFitBtn();
 <\/script>
 </body>
 </html>`;
@@ -2445,7 +2697,7 @@ render();
             )}
             {view === 'editor' && activeProject && (
                 <div className="flex-1 flex overflow-hidden relative">
-                    <div className="flex-1 bg-slate-100 overflow-y-auto scroll-thin p-8">
+                    <div ref={editorPaneRef} className="flex-1 bg-slate-100 overflow-y-auto scroll-thin p-8">
                         {tab === 'build' ? (
                             <div className="max-w-7xl mx-auto pb-40">
                                 {activeProject.rcmFeedback && (
@@ -2690,8 +2942,8 @@ render();
                                 </div>
                             </div>
                         ) : (
-                            <div className="tree-viewport">
-  <div className="fixed top-20 right-10 z-50 map-export-hide">
+                            <div ref={mapViewportRef} className="tree-viewport">
+  <div className={`fixed ${mapFullscreen ? 'top-4 right-4' : 'top-20 right-10'} z-50 map-export-hide`}>
     <div className="relative flex items-center gap-2">
 
       {/* Subsystem filter */}
@@ -2750,17 +3002,35 @@ render();
       {/* Zoom controls */}
       <div className="flex items-center gap-1 bg-white border rounded shadow px-1 py-1">
         <button
-          onClick={() => setMapZoom(z => +Math.max(0.25, z - 0.1).toFixed(2))}
+          onClick={() => zoomMap(-0.1)}
           className="w-6 h-6 flex items-center justify-center text-slate-600 hover:bg-slate-100 rounded font-bold text-base leading-none"
           title="Zoom out"
         >−</button>
         <span className="text-[11px] font-bold w-10 text-center select-none">{Math.round(mapZoom * 100)}%</span>
         <button
-          onClick={() => setMapZoom(z => +Math.min(2, z + 0.1).toFixed(2))}
+          onClick={() => zoomMap(0.1)}
           className="w-6 h-6 flex items-center justify-center text-slate-600 hover:bg-slate-100 rounded font-bold text-base leading-none"
           title="Zoom in"
         >+</button>
       </div>
+
+      {/* Fit view — also re-arms auto fit after a manual zoom */}
+      <button
+        onClick={fitMapToView}
+        className={`border px-2 py-2 rounded shadow text-[11px] font-bold ${mapAutoFit ? 'bg-brand-600 text-white border-brand-600' : 'bg-white text-slate-600 hover:bg-brand-50'}`}
+        title={mapAutoFit ? 'Auto fit is on — the map refits itself as it changes' : 'Fit the whole map in view and turn auto fit back on'}
+      >
+        Fit view
+      </button>
+
+      {/* Full screen */}
+      <button
+        onClick={toggleMapFullscreen}
+        className="bg-white border px-2 py-2 rounded shadow text-[11px] font-bold hover:bg-brand-50"
+        title={mapFullscreen ? 'Exit full screen' : 'Full screen'}
+      >
+        {mapFullscreen ? 'Exit full' : 'Full screen'}
+      </button>
 
       {/* Download */}
       <div className="relative">
@@ -2797,6 +3067,12 @@ render();
             >
               <span>🖼️</span> High Resolution IMG
             </button>
+            <button
+              onClick={downloadMapSvg}
+              className="text-left px-4 py-2 hover:bg-slate-50 text-xs font-medium border-t flex items-center gap-2"
+            >
+              <span>📐</span> Vector SVG
+            </button>
           </div>
         )}
       </div>
@@ -2810,6 +3086,7 @@ render();
                                     treeSelected={treeSelected}
                                     onToggle={toggleTree}
                                     onSelect={selectTree}
+                                    onCanvasSize={reportMapCanvas}
                                 />
                                 </div>
 
