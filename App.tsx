@@ -212,7 +212,19 @@ const App = () => {
     const [mapAutoFit, setMapAutoFit] = useState(true);
     const [mapCanvas, setMapCanvas] = useState({ w: 0, h: 0 });
     const [mapFullscreen, setMapFullscreen] = useState(false);
+    // Fit and the +/- buttons glide; the wheel and the grab hand must not. A
+    // 220ms tween on a wheel notch reads as lag, and it leaves the scroll
+    // extent mid-animation when we go to re-anchor the point under the cursor.
+    const [mapEased, setMapEased] = useState(true);
     const mapViewportRef = useRef<HTMLDivElement | null>(null);
+    const mapWindowRef = useRef<HTMLDivElement | null>(null);
+    // Wheel events outrun React's commits, so the zoom the next notch reads has
+    // to come from a ref rather than from state.
+    const mapZoomRef = useRef(1.0);
+    // Where the canvas sits inside its window, in window pixels.
+    const [mapOffset, setMapOffset] = useState({ x: 0, y: 0 });
+    const mapDrag = useRef<{ x: number; y: number; ox: number; oy: number; moved: boolean } | null>(null);
+    const mapDragged = useRef(false);
     const editorPaneRef = useRef<HTMLDivElement | null>(null);
     const [mapHiddenSubs, setMapHiddenSubs] = useState<Set<string>>(new Set());
     const [showSubFilter, setShowSubFilter] = useState(false);
@@ -345,44 +357,104 @@ const collapseAllTree = () => {
         setMapHiddenSubs(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
     // ── Map auto fit / full screen ────────────────────────────────────────────
-    // The frame the map has to fit into: the editor's scroll pane normally, the
-    // map itself once it is the full-screen element (everything else is hidden
-    // then, so the pane's box no longer describes what the user can see).
-    const mapFrame = () => {
-        const vp = mapViewportRef.current;
-        const el = document.fullscreenElement === vp ? vp : editorPaneRef.current;
-        if (!el || !vp) return null;
-        const padding = (node: HTMLElement) => {
-            const cs = getComputedStyle(node);
-            return {
-                x: parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight),
-                y: parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom),
-            };
-        };
-        const p = padding(el);
-        let w = el.clientWidth - p.x, h = el.clientHeight - p.y;
-        // The map holder carries the clearance that keeps the system card out
-        // from under the floating toolbar; that band is not room the map can
-        // fit into, so take it off before working out the ratio.
-        if (el !== vp) { const q = padding(vp); w -= q.x; h -= q.y; }
-        return { w: Math.max(0, w), h: Math.max(0, h) };
-    };
-
     // Never magnifies: a small map stays at 100% rather than being blown up to
-    // fill the pane, which is what "fit" means for a diagram made of cards.
+    // fill the window, which is what "fit" means for a diagram made of cards.
+    // Fit also recentres, since the canvas is free-floating rather than pinned
+    // to a scroll origin.
     const applyMapFit = useCallback(() => {
-        const frame = mapFrame();
-        if (!frame || !mapCanvas.w || !mapCanvas.h || !frame.w || !frame.h) return;
-        const z = Math.min(1, Math.max(0.25, Math.min(frame.w / mapCanvas.w, frame.h / mapCanvas.h)));
-        setMapZoom(+z.toFixed(2));
+        const box = mapWindowRef.current;
+        if (!box || !mapCanvas.w || !mapCanvas.h) return;
+        const w = box.clientWidth, h = box.clientHeight;
+        if (!w || !h) return;
+        const z = +Math.min(1, Math.max(0.25, Math.min(w / mapCanvas.w, h / mapCanvas.h))).toFixed(3);
+        mapZoomRef.current = z;
+        setMapZoom(z);
+        setMapOffset({ x: Math.max(0, (w - mapCanvas.w * z) / 2), y: Math.max(0, (h - mapCanvas.h * z) / 2) });
     }, [mapCanvas.w, mapCanvas.h]);
 
-    const fitMapToView = () => { setMapAutoFit(true); applyMapFit(); };
-    const zoomMap = (delta: number) => {
+    const fitMapToView = () => { setMapEased(true); setMapAutoFit(true); applyMapFit(); };
+
+    // Zoom about a screen point rather than about the top-left corner: whatever
+    // sits under that point stays under it, which is what makes the wheel read
+    // as a magnifier instead of a slider. Wheel events outrun React's commits,
+    // so the zoom each notch works from comes off a ref, not off state.
+    const zoomMapAbout = useCallback((next: number, clientX: number, clientY: number) => {
+        const box = mapWindowRef.current;
+        const z = mapZoomRef.current;
+        if (!box || next === z) return;
+        const r = box.getBoundingClientRect();
+        const px = clientX - r.left, py = clientY - r.top;
+        mapZoomRef.current = next;
         // A deliberate zoom means the user is driving: stop refitting until they
         // press Fit view again.
         setMapAutoFit(false);
-        setMapZoom(z => +Math.min(2, Math.max(0.25, z + delta)).toFixed(2));
+        setMapZoom(next);
+        setMapOffset(o => ({ x: px - (px - o.x) * next / z, y: py - (py - o.y) * next / z }));
+    }, []);
+
+    const clampMapZoom = (z: number) => +Math.min(2, Math.max(0.25, z)).toFixed(3);
+
+    const zoomMapAt = useCallback((factor: number, clientX: number, clientY: number) => {
+        setMapEased(false);
+        zoomMapAbout(clampMapZoom(mapZoomRef.current * factor), clientX, clientY);
+    }, [zoomMapAbout]);
+
+    // The buttons zoom about the middle of the window — the closest thing to a
+    // cursor when there isn't one.
+    const zoomMap = (delta: number) => {
+        const box = mapWindowRef.current;
+        if (!box) return;
+        const r = box.getBoundingClientRect();
+        setMapEased(true);
+        zoomMapAbout(clampMapZoom(mapZoomRef.current + delta), r.left + r.width / 2, r.top + r.height / 2);
+    };
+
+    // Non-passive so the wheel zooms the map instead of scrolling the page.
+    useEffect(() => {
+        if (tab !== 'map') return;
+        const el = mapViewportRef.current;
+        if (!el) return;
+        const onWheel = (e: WheelEvent) => {
+            // Hover cards scroll their own overflow; leave those alone. The
+            // editor pane outside the map is scroll-thin too, so only a
+            // scroller *inside* the map counts.
+            const inner = (e.target as HTMLElement).closest?.('.scroll-thin');
+            if (inner && inner !== el && el.contains(inner)) return;
+            e.preventDefault();
+            zoomMapAt(Math.exp(-e.deltaY * 0.002), e.clientX, e.clientY);
+        };
+        el.addEventListener('wheel', onWheel, { passive: false });
+        return () => el.removeEventListener('wheel', onWheel);
+    }, [tab, zoomMapAt]);
+
+    // Drag anywhere to pan. Cards carry their own cursor, so the grab hand only
+    // shows over the background, and a drag that actually moved swallows the
+    // click it would otherwise end in — otherwise every pan that started on a
+    // card would also select it.
+    const onMapPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+        if (e.button !== 0 || (e.target as HTMLElement).closest('button, input, select, textarea, a')) return;
+        const vp = mapViewportRef.current;
+        if (!vp) return;
+        mapDrag.current = { x: e.clientX, y: e.clientY, ox: mapOffset.x, oy: mapOffset.y, moved: false };
+        mapDragged.current = false;
+        vp.setPointerCapture(e.pointerId);
+    };
+    const onMapPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+        const drag = mapDrag.current, vp = mapViewportRef.current;
+        if (!drag || !vp) return;
+        const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+        if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+        drag.moved = true;
+        mapDragged.current = true;
+        vp.style.cursor = 'grabbing';
+        setMapEased(false);
+        setMapAutoFit(false);
+        setMapOffset({ x: drag.ox + dx, y: drag.oy + dy });
+    };
+    const endMapPan = (e: React.PointerEvent<HTMLDivElement>) => {
+        const vp = mapViewportRef.current;
+        if (vp) { vp.style.cursor = ''; if (vp.hasPointerCapture(e.pointerId)) vp.releasePointerCapture(e.pointerId); }
+        mapDrag.current = null;
     };
 
     // Refit on anything that changes either side of the ratio: the layout
@@ -2966,7 +3038,15 @@ syncFitBtn();
                                 </div>
                             </div>
                         ) : (
-                            <div ref={mapViewportRef} className="tree-viewport">
+                            <div
+                                ref={mapViewportRef}
+                                className="tree-viewport cursor-grab"
+                                onPointerDown={onMapPointerDown}
+                                onPointerMove={onMapPointerMove}
+                                onPointerUp={endMapPan}
+                                onPointerCancel={endMapPan}
+                                onClickCapture={e => { if (mapDragged.current) { mapDragged.current = false; e.stopPropagation(); } }}
+                            >
   <div className={`fixed ${mapFullscreen ? 'top-4 right-4' : 'top-20 right-10'} z-50 map-export-hide`}>
     <div className="relative flex items-center gap-2">
 
@@ -3107,17 +3187,20 @@ syncFitBtn();
                                     whole point here is that a refit glides. The outer
                                     box carries the scaled size so the pane still
                                     scrolls to the right extent. */}
+                                {/* The window the map is panned inside; its box is
+                                    the origin every pan and zoom offset is measured
+                                    from. Scaled rather than zoomed: `zoom` snaps, and
+                                    the whole point here is that a refit glides. */}
+                                <div ref={mapWindowRef} className="relative w-full h-full">
                                 <div style={{
-                                    width:  mapCanvas.w ? mapCanvas.w * mapZoom : undefined,
-                                    height: mapCanvas.h ? mapCanvas.h * mapZoom : undefined,
-                                    transition: 'width 220ms ease, height 220ms ease',
-                                }}>
-                                <div style={{
+                                    position: 'absolute',
+                                    left: 0,
+                                    top: 0,
                                     width:  mapCanvas.w || undefined,
                                     height: mapCanvas.h || undefined,
-                                    transform: `scale(${mapZoom})`,
+                                    transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${mapZoom})`,
                                     transformOrigin: 'top left',
-                                    transition: 'transform 220ms ease',
+                                    transition: mapEased ? 'transform 220ms ease' : undefined,
                                 }}>
                                 <HybridMapView
                                     project={filteredProject!}
