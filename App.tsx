@@ -221,10 +221,34 @@ const App = () => {
     // Wheel events outrun React's commits, so the zoom the next notch reads has
     // to come from a ref rather than from state.
     const mapZoomRef = useRef(1.0);
-    // Where the canvas sits inside its window, in window pixels.
+    // Where the canvas sits inside its window, in window pixels. A drag writes
+    // the transform straight to the node and only tells React once the hand
+    // lets go: re-rendering this component on every pointermove is what made
+    // panning stutter, and none of the rest of the app cares where the map sits
+    // mid-gesture.
     const [mapOffset, setMapOffset] = useState({ x: 0, y: 0 });
+    const mapOffsetRef = useRef({ x: 0, y: 0 });
+    const mapContentRef = useRef<HTMLDivElement | null>(null);
+    const mapPaintFrame = useRef(0);
     const mapDrag = useRef<{ x: number; y: number; ox: number; oy: number; moved: boolean } | null>(null);
     const mapDragged = useRef(false);
+
+    // The refs are what the map is actually drawn from; state follows so that
+    // React re-renders land on the same place the hand left it.
+    const paintMap = useCallback(() => {
+        mapPaintFrame.current = 0;
+        const el = mapContentRef.current;
+        if (!el) return;
+        const { x, y } = mapOffsetRef.current;
+        el.style.transform = `translate(${x}px, ${y}px) scale(${mapZoomRef.current})`;
+    }, []);
+    const schedulePaintMap = useCallback(() => {
+        if (mapPaintFrame.current) return;
+        mapPaintFrame.current = requestAnimationFrame(paintMap);
+    }, [paintMap]);
+    // Runs after every render, so a re-render for any other reason cannot snap
+    // the map back to a stale offset mid-drag.
+    useLayoutEffect(paintMap);
     const editorPaneRef = useRef<HTMLDivElement | null>(null);
     const [mapHiddenSubs, setMapHiddenSubs] = useState<Set<string>>(new Set());
     const [showSubFilter, setShowSubFilter] = useState(false);
@@ -367,9 +391,11 @@ const collapseAllTree = () => {
         const w = box.clientWidth, h = box.clientHeight;
         if (!w || !h) return;
         const z = +Math.min(1, Math.max(0.25, Math.min(w / mapCanvas.w, h / mapCanvas.h))).toFixed(3);
+        const offset = { x: Math.max(0, (w - mapCanvas.w * z) / 2), y: Math.max(0, (h - mapCanvas.h * z) / 2) };
         mapZoomRef.current = z;
+        mapOffsetRef.current = offset;
         setMapZoom(z);
-        setMapOffset({ x: Math.max(0, (w - mapCanvas.w * z) / 2), y: Math.max(0, (h - mapCanvas.h * z) / 2) });
+        setMapOffset(offset);
     }, [mapCanvas.w, mapCanvas.h]);
 
     const fitMapToView = () => { setMapEased(true); setMapAutoFit(true); applyMapFit(); };
@@ -384,13 +410,16 @@ const collapseAllTree = () => {
         if (!box || next === z) return;
         const r = box.getBoundingClientRect();
         const px = clientX - r.left, py = clientY - r.top;
+        const o = mapOffsetRef.current;
         mapZoomRef.current = next;
+        mapOffsetRef.current = { x: px - (px - o.x) * next / z, y: py - (py - o.y) * next / z };
+        paintMap();
         // A deliberate zoom means the user is driving: stop refitting until they
         // press Fit view again.
         setMapAutoFit(false);
         setMapZoom(next);
-        setMapOffset(o => ({ x: px - (px - o.x) * next / z, y: py - (py - o.y) * next / z }));
-    }, []);
+        setMapOffset(mapOffsetRef.current);
+    }, [paintMap]);
 
     const clampMapZoom = (z: number) => +Math.min(2, Math.max(0.25, z)).toFixed(3);
 
@@ -431,30 +460,42 @@ const collapseAllTree = () => {
     // shows over the background, and a drag that actually moved swallows the
     // click it would otherwise end in — otherwise every pan that started on a
     // card would also select it.
+    //
+    // The pointer is captured only once the drag passes the threshold, never on
+    // press. Capturing on press retargets the whole gesture to the viewport, so
+    // mouseup lands there instead of on the card and the browser fires the
+    // click at their common ancestor — the card's own onClick never runs, which
+    // is exactly how expand/collapse went dead.
     const onMapPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-        if (e.button !== 0 || (e.target as HTMLElement).closest('button, input, select, textarea, a')) return;
-        const vp = mapViewportRef.current;
-        if (!vp) return;
-        mapDrag.current = { x: e.clientX, y: e.clientY, ox: mapOffset.x, oy: mapOffset.y, moved: false };
         mapDragged.current = false;
-        vp.setPointerCapture(e.pointerId);
+        mapDrag.current = null;
+        if (e.button !== 0 || (e.target as HTMLElement).closest('button, input, select, textarea, a')) return;
+        mapDrag.current = { x: e.clientX, y: e.clientY, ox: mapOffsetRef.current.x, oy: mapOffsetRef.current.y, moved: false };
     };
     const onMapPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
         const drag = mapDrag.current, vp = mapViewportRef.current;
         if (!drag || !vp) return;
         const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-        if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
-        drag.moved = true;
-        mapDragged.current = true;
-        vp.style.cursor = 'grabbing';
-        setMapEased(false);
-        setMapAutoFit(false);
-        setMapOffset({ x: drag.ox + dx, y: drag.oy + dy });
+        if (!drag.moved) {
+            if (Math.abs(dx) + Math.abs(dy) < 4) return;
+            drag.moved = true;
+            mapDragged.current = true;
+            vp.style.cursor = 'grabbing';
+            // Now that this is a pan and not a click, keep the pointer even if
+            // it runs off the window or over a card.
+            try { vp.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
+            if (mapAutoFit) setMapAutoFit(false);
+            if (mapEased) setMapEased(false);
+        }
+        mapOffsetRef.current = { x: drag.ox + dx, y: drag.oy + dy };
+        schedulePaintMap();
     };
     const endMapPan = (e: React.PointerEvent<HTMLDivElement>) => {
-        const vp = mapViewportRef.current;
-        if (vp) { vp.style.cursor = ''; if (vp.hasPointerCapture(e.pointerId)) vp.releasePointerCapture(e.pointerId); }
+        const vp = mapViewportRef.current, drag = mapDrag.current;
         mapDrag.current = null;
+        if (vp) { vp.style.cursor = ''; if (vp.hasPointerCapture(e.pointerId)) vp.releasePointerCapture(e.pointerId); }
+        // One render at the end of the gesture, to put React back in step.
+        if (drag?.moved) setMapOffset(mapOffsetRef.current);
     };
 
     // Refit on anything that changes either side of the ratio: the layout
@@ -3040,7 +3081,7 @@ syncFitBtn();
                         ) : (
                             <div
                                 ref={mapViewportRef}
-                                className="tree-viewport cursor-grab"
+                                className="tree-viewport cursor-grab select-none"
                                 onPointerDown={onMapPointerDown}
                                 onPointerMove={onMapPointerMove}
                                 onPointerUp={endMapPan}
@@ -3192,7 +3233,7 @@ syncFitBtn();
                                     from. Scaled rather than zoomed: `zoom` snaps, and
                                     the whole point here is that a refit glides. */}
                                 <div ref={mapWindowRef} className="relative w-full h-full">
-                                <div style={{
+                                <div ref={mapContentRef} style={{
                                     position: 'absolute',
                                     left: 0,
                                     top: 0,
@@ -3201,6 +3242,7 @@ syncFitBtn();
                                     transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${mapZoom})`,
                                     transformOrigin: 'top left',
                                     transition: mapEased ? 'transform 220ms ease' : undefined,
+                                    willChange: 'transform',
                                 }}>
                                 <HybridMapView
                                     project={filteredProject!}
