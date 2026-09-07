@@ -17,6 +17,7 @@ import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
 import { LocalFileSystemProvider, sanitizeName, isCancellation } from './services/FileSystem';
+import { requestFullscreenViaHost, notifyHostFullscreenReleased } from './services/ShellFullscreen';
 import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch, SendFilesMode, FieldCitations } from './types';
 import { collectCiteSources, rehydrateSources, sourcesForField, type CiteSource, type CorpusRequest } from './services/CitationCorpus';
@@ -401,7 +402,11 @@ const collapseAllTree = () => {
     }, [tab, mapAutoFit, applyMapFit]);
 
     useEffect(() => {
-        const sync = () => setMapFullscreen(document.fullscreenElement === mapViewportRef.current);
+        const sync = () => {
+            setMapFullscreen(document.fullscreenElement === mapViewportRef.current);
+            // Leaving fullscreen lets an embedding shell restore its own.
+            if (!document.fullscreenElement) notifyHostFullscreenReleased();
+        };
         document.addEventListener('fullscreenchange', sync);
         return () => document.removeEventListener('fullscreenchange', sync);
     }, []);
@@ -411,7 +416,7 @@ const collapseAllTree = () => {
         if (!el) return;
         try {
             if (document.fullscreenElement === el) await document.exitFullscreen();
-            else await el.requestFullscreen();
+            else await requestFullscreenViaHost(el);
         } catch {
             alert('Full screen is unavailable in this browser.');
         }
