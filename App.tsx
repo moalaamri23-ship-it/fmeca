@@ -231,7 +231,6 @@ const App = () => {
     const mapContentRef = useRef<HTMLDivElement | null>(null);
     const mapPaintFrame = useRef(0);
     const mapDrag = useRef<{ x: number; y: number; ox: number; oy: number; moved: boolean } | null>(null);
-    const mapDragged = useRef(false);
 
     // The refs are what the map is actually drawn from; state follows so that
     // React re-renders land on the same place the hand left it.
@@ -246,6 +245,34 @@ const App = () => {
         if (mapPaintFrame.current) return;
         mapPaintFrame.current = requestAnimationFrame(paintMap);
     }, [paintMap]);
+
+    // `will-change: transform` while the hand or the wheel is moving, and never
+    // once it stops. Left on permanently it pins the map to a composited layer
+    // that was rasterised at one scale and is then stretched by the GPU, so
+    // every card goes soft — worst on a Windows laptop at 125% display scaling,
+    // invisible on a 2x Mac screen. Dropping it lets the browser re-rasterise
+    // the text at the scale it ended on.
+    const mapSettleTimer = useRef(0);
+    const settleMap = useCallback(() => {
+        mapSettleTimer.current = 0;
+        const el = mapContentRef.current;
+        if (!el) return;
+        // Land the canvas on whole device pixels too: a half-pixel origin
+        // blurs text just as reliably as a stale raster does.
+        const dpr = window.devicePixelRatio || 1;
+        const { x, y } = mapOffsetRef.current;
+        mapOffsetRef.current = { x: Math.round(x * dpr) / dpr, y: Math.round(y * dpr) / dpr };
+        el.style.willChange = '';
+        paintMap();
+        setMapOffset(mapOffsetRef.current);
+    }, [paintMap]);
+    const markMapMoving = useCallback((settleAfter: number) => {
+        const el = mapContentRef.current;
+        if (el) el.style.willChange = 'transform';
+        if (mapSettleTimer.current) clearTimeout(mapSettleTimer.current);
+        if (settleAfter) mapSettleTimer.current = window.setTimeout(settleMap, settleAfter);
+    }, [settleMap]);
+    useEffect(() => () => { if (mapSettleTimer.current) clearTimeout(mapSettleTimer.current); }, []);
     // Runs after every render, so a re-render for any other reason cannot snap
     // the map back to a stale offset mid-drag.
     useLayoutEffect(paintMap);
@@ -421,12 +448,17 @@ const collapseAllTree = () => {
         setMapOffset(mapOffsetRef.current);
     }, [paintMap]);
 
-    const clampMapZoom = (z: number) => +Math.min(2, Math.max(0.25, z)).toFixed(3);
+    // Full precision on purpose. Rounding the zoom here used to swallow small
+    // wheel steps whole: a notch that moved the zoom by less than a thousandth
+    // rounded back onto the value it started from, `next === z` bailed out, and
+    // the wheel looked broken rather than slow. Only the % label rounds.
+    const clampMapZoom = (z: number) => Math.min(2, Math.max(0.25, z));
 
     const zoomMapAt = useCallback((factor: number, clientX: number, clientY: number) => {
         setMapEased(false);
+        markMapMoving(200);
         zoomMapAbout(clampMapZoom(mapZoomRef.current * factor), clientX, clientY);
-    }, [zoomMapAbout]);
+    }, [zoomMapAbout, markMapMoving]);
 
     // The buttons zoom about the middle of the window — the closest thing to a
     // cursor when there isn't one.
@@ -450,7 +482,16 @@ const collapseAllTree = () => {
             const inner = (e.target as HTMLElement).closest?.('.scroll-thin');
             if (inner && inner !== el && el.contains(inner)) return;
             e.preventDefault();
-            zoomMapAt(Math.exp(-e.deltaY * 0.002), e.clientX, e.clientY);
+            // deltaY is only in pixels when deltaMode says so. Firefox, and
+            // plenty of Windows mice, report lines (3 per notch) or pages, and
+            // reading those as pixels makes a notch worth half a percent of
+            // zoom — which is why the wheel did nothing on a Windows laptop and
+            // everything on this Mac. Normalise first, then cap, so one violent
+            // notch cannot swallow the whole range.
+            const perLine = 16, perPage = el.clientHeight || 400;
+            const raw = e.deltaY * (e.deltaMode === 1 ? perLine : e.deltaMode === 2 ? perPage : 1);
+            const dy = Math.max(-240, Math.min(240, raw));
+            zoomMapAt(Math.exp(-dy * 0.002), e.clientX, e.clientY);
         };
         el.addEventListener('wheel', onWheel, { passive: false });
         return () => el.removeEventListener('wheel', onWheel);
@@ -467,7 +508,6 @@ const collapseAllTree = () => {
     // click at their common ancestor — the card's own onClick never runs, which
     // is exactly how expand/collapse went dead.
     const onMapPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-        mapDragged.current = false;
         mapDrag.current = null;
         if (e.button !== 0 || (e.target as HTMLElement).closest('button, input, select, textarea, a')) return;
         mapDrag.current = { x: e.clientX, y: e.clientY, ox: mapOffsetRef.current.x, oy: mapOffsetRef.current.y, moved: false };
@@ -479,11 +519,11 @@ const collapseAllTree = () => {
         if (!drag.moved) {
             if (Math.abs(dx) + Math.abs(dy) < 4) return;
             drag.moved = true;
-            mapDragged.current = true;
             vp.style.cursor = 'grabbing';
             // Now that this is a pan and not a click, keep the pointer even if
             // it runs off the window or over a card.
             try { vp.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
+            markMapMoving(0);
             if (mapAutoFit) setMapAutoFit(false);
             if (mapEased) setMapEased(false);
         }
@@ -494,8 +534,17 @@ const collapseAllTree = () => {
         const vp = mapViewportRef.current, drag = mapDrag.current;
         mapDrag.current = null;
         if (vp) { vp.style.cursor = ''; if (vp.hasPointerCapture(e.pointerId)) vp.releasePointerCapture(e.pointerId); }
-        // One render at the end of the gesture, to put React back in step.
-        if (drag?.moved) setMapOffset(mapOffsetRef.current);
+        if (!drag?.moved) return;
+        // Swallow only the click this drag is about to turn into, and only that
+        // one. A flag that says "we dragged" outlives the gesture whenever the
+        // click never arrives, and then eats the user's next real click —
+        // panning the map and then pressing Fit view did nothing at all.
+        const swallow = (ev: MouseEvent) => { ev.stopPropagation(); ev.preventDefault(); };
+        window.addEventListener('click', swallow, true);
+        setTimeout(() => window.removeEventListener('click', swallow, true), 0);
+        // One render at the end of the gesture, to put React back in step —
+        // and drop the compositing hint so the cards sharpen up again.
+        settleMap();
     };
 
     // Refit on anything that changes either side of the ratio: the layout
@@ -3086,7 +3135,6 @@ syncFitBtn();
                                 onPointerMove={onMapPointerMove}
                                 onPointerUp={endMapPan}
                                 onPointerCancel={endMapPan}
-                                onClickCapture={e => { if (mapDragged.current) { mapDragged.current = false; e.stopPropagation(); } }}
                             >
   <div className={`fixed ${mapFullscreen ? 'top-4 right-4' : 'top-20 right-10'} z-50 map-export-hide`}>
     <div className="relative flex items-center gap-2">
@@ -3242,7 +3290,6 @@ syncFitBtn();
                                     transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${mapZoom})`,
                                     transformOrigin: 'top left',
                                     transition: mapEased ? 'transform 220ms ease' : undefined,
-                                    willChange: 'transform',
                                 }}>
                                 <HybridMapView
                                     project={filteredProject!}
