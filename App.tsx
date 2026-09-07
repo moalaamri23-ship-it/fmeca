@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { toPng, toJpeg } from 'html-to-image';
 import XLSX from 'xlsx-js-style';
 import { Icon } from './components/Icon';
@@ -348,14 +348,23 @@ const collapseAllTree = () => {
     // map itself once it is the full-screen element (everything else is hidden
     // then, so the pane's box no longer describes what the user can see).
     const mapFrame = () => {
-        const el = document.fullscreenElement === mapViewportRef.current
-            ? mapViewportRef.current
-            : editorPaneRef.current;
-        if (!el) return null;
-        const cs = getComputedStyle(el);
-        const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
-        const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
-        return { w: Math.max(0, el.clientWidth - padX), h: Math.max(0, el.clientHeight - padY) };
+        const vp = mapViewportRef.current;
+        const el = document.fullscreenElement === vp ? vp : editorPaneRef.current;
+        if (!el || !vp) return null;
+        const padding = (node: HTMLElement) => {
+            const cs = getComputedStyle(node);
+            return {
+                x: parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight),
+                y: parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom),
+            };
+        };
+        const p = padding(el);
+        let w = el.clientWidth - p.x, h = el.clientHeight - p.y;
+        // The map holder carries the clearance that keeps the system card out
+        // from under the floating toolbar; that band is not room the map can
+        // fit into, so take it off before working out the ratio.
+        if (el !== vp) { const q = padding(vp); w -= q.x; h -= q.y; }
+        return { w: Math.max(0, w), h: Math.max(0, h) };
     };
 
     // Never magnifies: a small map stays at 100% rather than being blown up to
@@ -377,7 +386,7 @@ const collapseAllTree = () => {
 
     // Refit on anything that changes either side of the ratio: the layout
     // (expand/collapse, subsystem filter), the pane, or full screen.
-    useEffect(() => {
+    useLayoutEffect(() => {
         if (tab !== 'map' || !mapAutoFit) return;
         applyMapFit();
     }, [tab, mapAutoFit, mapFullscreen, applyMapFit]);
@@ -1291,7 +1300,10 @@ tailwind.config={theme:{extend:{colors:{'brand':{500:'#6366f1',600:'#4f46e5',700
 *{box-sizing:border-box}
 body{margin:0;padding:0;background:#f8fafc;font-family:Inter,system-ui,sans-serif}
 #wrap{overflow:auto;padding:24px;padding-top:72px}
-#map{position:relative}
+/* Scaled rather than zoomed: CSS zoom snaps, and the whole point is that a
+   refit glides. #sizer carries the scaled box so the page still scrolls right. */
+#sizer{transition:width .22s ease,height .22s ease}
+#map{position:relative;transform-origin:top left;transition:transform .22s ease}
 .c{position:absolute;overflow:hidden;cursor:pointer;user-select:none;transition:transform .12s,box-shadow .12s;box-sizing:border-box}
 .c:hover{transform:scale(1.04);z-index:200!important}
 .clamp1{display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
@@ -1314,7 +1326,7 @@ body{margin:0;padding:0;background:#f8fafc;font-family:Inter,system-ui,sans-seri
   <button id="fs-btn" onclick="toggleFullScreen()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm">Full Screen</button>
   <button onclick="downloadSvg()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm" title="Download this map as a vector SVG">SVG</button>
 </div>
-<div id="wrap"><div id="map"></div></div>
+<div id="wrap"><div id="sizer"><div id="map"></div></div></div>
 <div id="tip"></div>
 <script>
 const DATA=${projectJson};
@@ -1346,7 +1358,14 @@ function fitView(){autoFit=true;syncFitBtn();applyFit();}
 // A deliberate zoom means the user is driving: stop refitting until Fit View.
 function zoomIn(){autoFit=false;syncFitBtn();mapZoom=+Math.min(2,mapZoom+0.1).toFixed(2);applyZoom();}
 function zoomOut(){autoFit=false;syncFitBtn();mapZoom=+Math.max(0.25,mapZoom-0.1).toFixed(2);applyZoom();}
-function applyZoom(){document.getElementById('map').style.zoom=mapZoom;document.getElementById('zoom-label').textContent=Math.round(mapZoom*100)+'%';}
+function applyZoom(){
+  const m=document.getElementById('map');
+  m.style.transform='scale('+mapZoom+')';
+  const cw=parseFloat(m.style.width)||0,ch=parseFloat(m.style.height)||0;
+  const sz=document.getElementById('sizer');
+  sz.style.width=(cw*mapZoom)+'px';sz.style.height=(ch*mapZoom)+'px';
+  document.getElementById('zoom-label').textContent=Math.round(mapZoom*100)+'%';
+}
 function toggleFullScreen(){
   const done=()=>{};
   try{
@@ -1591,7 +1610,7 @@ function render(){
       });
     });
   });
-  if(autoFit)applyFit();
+  if(autoFit)applyFit();else applyZoom();
 }
 function toggle(id){if(expanded.has(id))expanded.delete(id);else expanded.add(id);render();}
 function expandAll(){expanded=new Set([DATA.id]);DATA.subsystems.forEach(s=>{expanded.add(s.id);s.failures.forEach(f=>{expanded.add(f.id);f.modes.forEach(m=>expanded.add(m.id));});});render();}
@@ -3079,7 +3098,22 @@ syncFitBtn();
 
     </div>
   </div>
-                                <div style={{ zoom: mapZoom }}>
+                                {/* Scaled rather than zoomed: `zoom` snaps, and the
+                                    whole point here is that a refit glides. The outer
+                                    box carries the scaled size so the pane still
+                                    scrolls to the right extent. */}
+                                <div style={{
+                                    width:  mapCanvas.w ? mapCanvas.w * mapZoom : undefined,
+                                    height: mapCanvas.h ? mapCanvas.h * mapZoom : undefined,
+                                    transition: 'width 220ms ease, height 220ms ease',
+                                }}>
+                                <div style={{
+                                    width:  mapCanvas.w || undefined,
+                                    height: mapCanvas.h || undefined,
+                                    transform: `scale(${mapZoom})`,
+                                    transformOrigin: 'top left',
+                                    transition: 'transform 220ms ease',
+                                }}>
                                 <HybridMapView
                                     project={filteredProject!}
                                     treeExpanded={treeExpanded}
@@ -3088,6 +3122,7 @@ syncFitBtn();
                                     onSelect={selectTree}
                                     onCanvasSize={reportMapCanvas}
                                 />
+                                </div>
                                 </div>
 
                             </div>

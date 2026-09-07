@@ -88,7 +88,9 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
     [project, treeExpanded]
   );
 
-  useEffect(() => { onCanvasSize?.(canvasW, canvasH); }, [canvasW, canvasH, onCanvasSize]);
+  // Before paint, not after: the view above refits from this, and a passive
+  // effect would let one frame of the new layout land at the old zoom.
+  useLayoutEffect(() => { onCanvasSize?.(canvasW, canvasH); }, [canvasW, canvasH, onCanvasSize]);
 
   // Full screen hides every sibling of the full-screen element, so a tooltip
   // portalled into document.body would simply not paint. Follow the element.

@@ -38,13 +38,15 @@
       @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
       
       /* ── Tree viewport ── */
-      .tree-viewport { width: 100%; min-height: 300px; padding-bottom: 60px; overflow: auto; }
+      /* padding-top clears the floating map toolbar: the system card sits at the
+         top centre of the canvas and would otherwise slide under it. */
+      .tree-viewport { width: 100%; min-height: 300px; padding-top: 56px; padding-bottom: 60px; overflow: auto; }
 
       /* Full-screen map: the viewport becomes the scroll container itself, so it
          needs a real height — without one it grows to the content and nothing
          scrolls. */
-      .tree-viewport:fullscreen { height: 100vh; padding: 24px; background: #f8fafc; overflow: auto; }
-      .tree-viewport:-webkit-full-screen { height: 100vh; padding: 24px; background: #f8fafc; overflow: auto; }
+      .tree-viewport:fullscreen { height: 100vh; padding: 56px 24px 24px; background: #f8fafc; overflow: auto; }
+      .tree-viewport:-webkit-full-screen { height: 100vh; padding: 56px 24px 24px; background: #f8fafc; overflow: auto; }
 
       /* ══════════════════════════════════════════════════════════════
          TOP-DOWN TREE  —  root at top, siblings spread horizontally.
