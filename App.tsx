@@ -1481,14 +1481,14 @@ tailwind.config={theme:{extend:{colors:{'brand':{500:'#6366f1',600:'#4f46e5',700
 <\/script>
 <style>
 *{box-sizing:border-box}
-body{margin:0;padding:0;background:#f8fafc;font-family:Inter,system-ui,sans-serif}
-#wrap{overflow:auto;padding:24px;padding-top:72px}
-/* Scaled rather than zoomed: CSS zoom snaps, and the whole point is that a
-   refit glides. #sizer carries the scaled box so the page still scrolls right. */
-#sizer{transition:width .22s ease,height .22s ease}
+body{margin:0;padding:0;overflow:hidden;background:#f8fafc;font-family:Inter,system-ui,sans-serif}
+#wrap{height:100vh;overflow:auto;padding:24px;padding-top:72px}
+/* Scaled rather than zoomed: CSS zoom snaps. #sizer carries final scaled bounds
+   immediately, while visible map transform and scroll position glide. */
 #map{position:relative;transform-origin:top left;transition:transform .22s ease}
 .c{position:absolute;overflow:hidden;cursor:pointer;user-select:none;transition:transform .12s,box-shadow .12s;box-sizing:border-box}
 .c:hover{transform:scale(1.04);z-index:200!important}
+.c.focused{outline:3px solid #3b82f6;outline-offset:2px}
 .clamp1{display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
 .clamp2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ln{position:absolute;background:#cbd5e1;pointer-events:none}
@@ -1508,6 +1508,7 @@ body{margin:0;padding:0;background:#f8fafc;font-family:Inter,system-ui,sans-seri
   <button id="fit-btn" onclick="fitView()" class="border px-3 py-1.5 rounded text-xs font-bold shadow-sm" title="Fit the whole map in view and turn auto fit back on">Fit View</button>
   <button id="fs-btn" onclick="toggleFullScreen()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm">Full Screen</button>
   <button onclick="downloadSvg()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm" title="Download this map as a vector SVG">SVG</button>
+  <span class="hidden md:inline text-[10px] text-slate-400">Ctrl/⌘ + click a card to focus</span>
 </div>
 <div id="wrap"><div id="sizer"><div id="map"></div></div></div>
 <div id="tip"></div>
@@ -1548,6 +1549,37 @@ function applyZoom(){
   const sz=document.getElementById('sizer');
   sz.style.width=(cw*mapZoom)+'px';sz.style.height=(ch*mapZoom)+'px';
   document.getElementById('zoom-label').textContent=Math.round(mapZoom*100)+'%';
+}
+// Focus only what is visible now. A collapsed card therefore behaves like a
+// leaf even when the underlying data contains children. Readability wins over
+// fitting every visible child: focus never shrinks below 70%.
+function focusCard(e,id,childIds){
+  if(!e.ctrlKey&&!e.metaKey)return false;
+  e.preventDefault();
+  clearTimeout(hoverTimer);clearTimeout(hideTimer);
+  document.getElementById('tip').style.display='none';
+  const L=layout(),family=[id].concat(childIds).map(function(n){return L.map[n];}).filter(Boolean);
+  if(!family.length)return true;
+  const left=Math.min.apply(null,family.map(function(n){return n.x;}));
+  const top=Math.min.apply(null,family.map(function(n){return n.y;}));
+  const right=Math.max.apply(null,family.map(function(n){return n.x+n.w;}));
+  const bottom=Math.max.apply(null,family.map(function(n){return n.y+n.h;}));
+  const f=fitFrame(),margin=24,w=right-left,h=bottom-top;
+  mapZoom=Math.min(2,Math.max(.7,Math.min(Math.max(1,f.w-margin*2)/w,Math.max(1,f.h-margin*2)/h)));
+  autoFit=false;syncFitBtn();
+  document.querySelectorAll('.c.focused').forEach(function(card){card.classList.remove('focused');});
+  const focused=document.querySelector('.c[data-node-id="'+CSS.escape(id)+'"]');
+  if(focused)focused.classList.add('focused');
+  applyZoom();
+  const wrap=document.getElementById('wrap');
+  requestAnimationFrame(function(){
+    wrap.scrollTo({
+      left:Math.max(0,(left+w/2)*mapZoom-wrap.clientWidth/2+24),
+      top:Math.max(0,(top+h/2)*mapZoom-wrap.clientHeight/2+72),
+      behavior:'smooth'
+    });
+  });
+  return true;
 }
 function toggleFullScreen(){
   const done=()=>{};
@@ -1723,10 +1755,12 @@ function render(){
   const sl=map[DATA.id];
   // System card
   const sc=mk('c bg-slate-900 text-white border border-slate-800 rounded-xl px-6 py-4 shadow-lg text-center',
-    {left:sl.x+'px',top:sl.y+'px',width:SYS_W+'px',height:SYS_H+'px',zIndex:20,cursor:'default'},
+    {left:sl.x+'px',top:sl.y+'px',width:SYS_W+'px',height:SYS_H+'px',zIndex:20},
     '<div class="font-bold text-base leading-tight clamp1">'+esc(DATA.name)+'</div>'+(DATA.desc?'<div class="text-xs text-slate-400 mt-1 clamp2">'+esc(DATA.desc)+'</div>':''));
   sc.addEventListener('mouseenter',e=>startHover(e,'sys',DATA));
   sc.addEventListener('mouseleave',()=>endHover('sys'));
+  sc.dataset.nodeId=DATA.id;
+  sc.addEventListener('click',e=>focusCard(e,DATA.id,DATA.subsystems.map(function(sub){return sub.id;})));
   mel.appendChild(sc);
   // Sys→bus connector
   const sysCx=sl.x+SYS_W/2,sysBot=sl.y+SYS_H;
@@ -1743,7 +1777,8 @@ function render(){
       '<div class="font-bold text-sm text-slate-700 leading-tight clamp1">'+esc(sub.name)+'</div>'+
       (sub.func?'<div class="text-xs text-slate-500 mt-1 leading-tight clamp2">'+esc(sub.func)+'</div>':'')+
       '<div class="text-slate-400 mt-1 flex items-center gap-1" style="font-size:10px"><span>'+sub.failures.length+' FF</span><span>'+(isExp?'▲':'▼')+'</span></div>');
-    card.addEventListener('click',()=>toggle(sub.id));
+    card.dataset.nodeId=sub.id;
+    card.addEventListener('click',e=>{if(!focusCard(e,sub.id,isExp?sub.failures.map(function(f){return f.id;}):[]))toggle(sub.id);});
     card.addEventListener('mouseenter',e=>startHover(e,'sub',sub));
     card.addEventListener('mouseleave',endHover);
     mel.appendChild(card);
@@ -1763,7 +1798,8 @@ function render(){
         {left:f.x+'px',top:f.y+'px',width:FF_W+'px',height:FF_H+'px',zIndex:20},
         '<div class="font-bold text-xs text-slate-700 leading-tight clamp2">'+esc(fail.desc||'Unnamed')+'</div>'+
         '<div class="text-slate-400 mt-1 flex items-center gap-1" style="font-size:10px"><span>'+fail.modes.length+' FM</span><span>'+(fExp?'▲':'▼')+'</span></div>');
-      fc.addEventListener('click',()=>toggle(fail.id));
+      fc.dataset.nodeId=fail.id;
+      fc.addEventListener('click',e=>{if(!focusCard(e,fail.id,fExp?fail.modes.map(function(m){return m.id;}):[]))toggle(fail.id);});
       fc.addEventListener('mouseenter',e=>startHover(e,'ff',fail));
       fc.addEventListener('mouseleave',endHover);
       mel.appendChild(fc);
@@ -1787,6 +1823,8 @@ function render(){
           (mode.cause?'<div class="italic mb-1 leading-tight clamp1" style="font-size:10px;color:#64748b">'+esc(mode.cause)+'</div>':'')+
           (cm?'<div class="font-bold leading-tight clamp2" style="font-size:10px;background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:3px 6px;border-radius:4px;margin-top:3px;white-space:pre-line">'+esc(cm)+'</div>':'')+
           (rv?'<div style="font-size:10px;color:#94a3b8;margin-top:4px">RPN: <span style="font-weight:700;color:#475569">'+rv+'</span></div>':''));
+        mcard.dataset.nodeId=mode.id;
+        mcard.addEventListener('click',e=>focusCard(e,mode.id,[]));
         mcard.addEventListener('mouseenter',e=>startHover(e,'fm',mode));
         mcard.addEventListener('mouseleave',endHover);
         mel.appendChild(mcard);
