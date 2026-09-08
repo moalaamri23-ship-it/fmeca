@@ -9,6 +9,7 @@ import { OperatingContextModal, hasOperatingContext } from './components/Operati
 import { applyRcmFeedback, countMatchingSubsystems, isRcmFeedback, type RcmFeedback } from './services/RcmFeedbackService';
 import { TreeNode } from './components/TreeNode';
 import { HybridMapView } from './components/HybridMapView';
+import { computeMapFocusView } from './services/MapLayout';
 import { buildMapSvg } from './services/MapSvg';
 import { AttachmentModal } from './components/AttachmentModal';
 import { CitationModal, type CitationGroup } from './components/CitationModal';
@@ -406,6 +407,21 @@ const collapseAllTree = () => {
 
     const toggleSubVisibility = (id: string) =>
         setMapHiddenSubs(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+    const focusMapCard = (id: string) => {
+        const box = mapWindowRef.current;
+        if (!box || !filteredProject) return;
+        const focus = computeMapFocusView(filteredProject, treeExpanded, id, box.clientWidth, box.clientHeight);
+        if (!focus) return;
+        setMapEased(true);
+        setMapAutoFit(false);
+        setTreeSelected(id);
+        setTreeExpanded(focus.expanded);
+        mapZoomRef.current = focus.zoom;
+        mapOffsetRef.current = focus.offset;
+        setMapZoom(focus.zoom);
+        setMapOffset(focus.offset);
+    };
 
     // ── Map auto fit / full screen ────────────────────────────────────────────
     // Never magnifies: a small map stays at 100% rather than being blown up to
@@ -3297,6 +3313,7 @@ syncFitBtn();
                                     treeSelected={treeSelected}
                                     onToggle={toggleTree}
                                     onSelect={selectTree}
+                                    onFocus={focusMapCard}
                                     onCanvasSize={reportMapCanvas}
                                 />
                                 </div>

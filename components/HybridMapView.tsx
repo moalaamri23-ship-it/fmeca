@@ -74,12 +74,13 @@ interface HybridMapViewProps {
   treeSelected: string | null;
   onToggle: (id: string) => void;
   onSelect: (id: string) => void;
+  onFocus: (id: string) => void;
   /** Natural canvas size, reported on every layout change so the view above can auto fit. */
   onCanvasSize?: (width: number, height: number) => void;
 }
 
 export const HybridMapView: React.FC<HybridMapViewProps> = ({
-  project, treeExpanded, treeSelected, onToggle, onSelect, onCanvasSize,
+  project, treeExpanded, treeSelected, onToggle, onSelect, onFocus, onCanvasSize,
 }) => {
   _k = 0;
 
@@ -187,6 +188,12 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
   }, [tooltip]);
 
   const sysLayout = map[project.id];
+  const focusGesture = (e: React.MouseEvent, id: string): boolean => {
+    if (!e.ctrlKey && !e.metaKey) return false;
+    e.preventDefault();
+    onFocus(id);
+    return true;
+  };
 
   // ── Connectors ────────────────────────────────────────────────────────────
   const connectors: React.ReactNode[] = [];
@@ -320,7 +327,8 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
       {/* System card */}
       {sysLayout && (
         <div style={{ position:'absolute', left:sysLayout.x, top:sysLayout.y, width:SYS_W, zIndex:20 }}
-          className="bg-slate-900 text-white border border-slate-800 rounded-xl px-6 py-4 shadow-lg text-center select-none cursor-default transition-all hover:scale-[1.02] hover:shadow-2xl hover:z-50"
+          className="bg-slate-900 text-white border border-slate-800 rounded-xl px-6 py-4 shadow-lg text-center select-none cursor-pointer transition-all hover:scale-[1.02] hover:shadow-2xl hover:z-50"
+          onClick={e => { focusGesture(e, project.id); }}
           onMouseEnter={e => startHover(e, 'sys', project)}
           onMouseLeave={() => endHover('sys')}
         >
@@ -338,7 +346,7 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
           <div key={sub.id}
             style={{ position:'absolute', left:sl.x, top:sl.y, width:SUB_W, height:SUB_H, zIndex:20 }}
             className={`bg-white border border-slate-200 border-l-[5px] border-l-brand-500 rounded-lg p-3 shadow-sm cursor-pointer select-none transition-all hover:scale-105 hover:shadow-lg hover:z-50${isSel?' ring-2 ring-brand-500':''}`}
-            onClick={() => { onToggle(sub.id); onSelect(sub.id); }}
+            onClick={e => { if (!focusGesture(e, sub.id)) { onToggle(sub.id); onSelect(sub.id); } }}
             onMouseEnter={e => startHover(e, 'sub', sub)}
             onMouseLeave={endHover}
           >
@@ -361,7 +369,7 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
             <div key={fail.id}
               style={{ position:'absolute', left:fl.x, top:fl.y, width:FF_W, height:FF_H, zIndex:20 }}
               className={`bg-white border border-slate-200 border-l-[5px] border-l-amber-500 rounded-lg p-2 shadow-sm cursor-pointer select-none transition-all hover:scale-105 hover:shadow-lg hover:z-50 overflow-hidden${isSel?' ring-2 ring-amber-400':''}`}
-              onClick={() => { onToggle(fail.id); onSelect(fail.id); }}
+              onClick={e => { if (!focusGesture(e, fail.id)) { onToggle(fail.id); onSelect(fail.id); } }}
               onMouseEnter={e => startHover(e, 'ff', fail)}
               onMouseLeave={endHover}
             >
@@ -389,7 +397,7 @@ export const HybridMapView: React.FC<HybridMapViewProps> = ({
               <div key={mode.id}
                 style={{ position:'absolute', left:ml.x, top:ml.y, width:FM_W, height:FM_H, zIndex:20 }}
                 className={`bg-white border border-slate-200 border-l-[5px] border-l-red-500 rounded-lg p-2 shadow-sm cursor-pointer select-none transition-all hover:scale-105 hover:shadow-lg hover:z-50 overflow-hidden${isSel?' ring-2 ring-red-400':''}`}
-                onClick={() => onSelect(mode.id)}
+                onClick={e => { if (!focusGesture(e, mode.id)) onSelect(mode.id); }}
                 onMouseEnter={e => startHover(e, 'fm', mode)}
                 onMouseLeave={endHover}
               >

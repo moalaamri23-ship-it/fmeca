@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildMapSvg } from '../MapSvg';
-import { computeLayout } from '../MapLayout';
+import { computeLayout, computeMapFocusView } from '../MapLayout';
 import type { Project } from '../../types';
 
 const mode = (id: string) => ({
@@ -48,6 +48,28 @@ describe('buildMapSvg', () => {
     expect(svg).toContain('Compressor Element');
     expect(svg).not.toContain('Unable to deliver rated');
     expect(svg).not.toContain('Mode m1');
+  });
+
+  it('focuses one card and direct children without shrinking below clarity floor', () => {
+    const p = project();
+    p.subsystems[0].failures[0].modes = Array.from({ length: 12 }, (_, i) => mode(`m${i}`));
+    const focus = computeMapFocusView(p, new Set(['s1', 'f1']), 'f1', 900, 500)!;
+    expect(focus.expanded.has('f1')).toBe(true);
+    expect(focus.zoom).toBe(0.7);
+    expect(focus.offset.x).toBeTypeOf('number');
+    expect(focus.offset.y).toBeTypeOf('number');
+  });
+
+  it('treats a collapsed card as childless and leaves it collapsed', () => {
+    const focus = computeMapFocusView(project(), new Set(), 's1', 900, 500)!;
+    expect(focus.zoom).toBe(2);
+    expect(focus.expanded.has('s1')).toBe(false);
+  });
+
+  it('focuses a leaf card by itself', () => {
+    const focus = computeMapFocusView(project(), expandedAll, 'm1', 900, 500)!;
+    expect(focus.zoom).toBe(2);
+    expect(focus.expanded).toEqual(expandedAll);
   });
 
   it('escapes markup in project text instead of emitting it', () => {

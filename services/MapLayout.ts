@@ -33,6 +33,62 @@ export interface MapLayout {
   colXs: number[];
 }
 
+export interface MapFocusView {
+  expanded: Set<string>;
+  zoom: number;
+  offset: { x: number; y: number };
+}
+
+/**
+ * Focus one card and its currently visible immediate children. A collapsed card
+ * behaves like a leaf. Readability wins over fitting every visible child: once
+ * the fit would shrink below minZoom, overflow is intentional.
+ */
+export function computeMapFocusView(
+  project: Project,
+  expanded: Set<string>,
+  nodeId: string,
+  viewportW: number,
+  viewportH: number,
+  minZoom = 0.7,
+  margin = 24,
+): MapFocusView | null {
+  const availableChildIds = nodeId === project.id
+    ? project.subsystems.map(sub => sub.id)
+    : project.subsystems.flatMap(sub => {
+        if (sub.id === nodeId) return sub.failures.map(fail => fail.id);
+        return sub.failures.flatMap(fail => fail.id === nodeId ? fail.modes.map(mode => mode.id) : []);
+      });
+  // System children are always visible; every other branch exposes children
+  // only while its card is expanded.
+  const childIds = nodeId === project.id || expanded.has(nodeId) ? availableChildIds : [];
+  const nextExpanded = new Set(expanded);
+
+  const layout = computeLayout(project, nextExpanded);
+  const family = [nodeId, ...childIds].map(id => layout.map[id]).filter((node): node is NodeLayout => !!node);
+  if (!family.length || viewportW <= 0 || viewportH <= 0) return null;
+
+  const left = Math.min(...family.map(node => node.x));
+  const top = Math.min(...family.map(node => node.y));
+  const right = Math.max(...family.map(node => node.x + node.w));
+  const bottom = Math.max(...family.map(node => node.y + node.h));
+  const width = right - left;
+  const height = bottom - top;
+  const availableW = Math.max(1, viewportW - margin * 2);
+  const availableH = Math.max(1, viewportH - margin * 2);
+  const fitZoom = Math.min(availableW / width, availableH / height);
+  const zoom = Math.min(2, Math.max(minZoom, fitZoom));
+
+  return {
+    expanded: nextExpanded,
+    zoom,
+    offset: {
+      x: (viewportW - width * zoom) / 2 - left * zoom,
+      y: (viewportH - height * zoom) / 2 - top * zoom,
+    },
+  };
+}
+
 // ── Height helpers ────────────────────────────────────────────────────────────
 export function ffRowHeight(fail: Failure, expanded: Set<string>): number {
   if (!expanded.has(fail.id) || fail.modes.length === 0) return FF_H;
