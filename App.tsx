@@ -1484,10 +1484,15 @@ tailwind.config={theme:{extend:{colors:{'brand':{500:'#6366f1',600:'#4f46e5',700
 <style>
 *{box-sizing:border-box}
 body{margin:0;padding:0;overflow:hidden;background:#f8fafc;font-family:Inter,system-ui,sans-serif}
-#wrap{height:100vh;overflow:auto;padding:24px;padding-top:72px}
-/* Scaled rather than zoomed: CSS zoom snaps. #sizer carries final scaled bounds
-   immediately, while visible map transform and scroll position glide. */
-#map{position:relative;transform-origin:top left;transition:transform .22s ease}
+/* The map is panned by transform inside a fixed window, not scrolled. A scroll
+   box cannot hold the point under the cursor once an axis runs out of scroll
+   range, and it cannot be dragged past its own content — same reasoning as the
+   Map view in the app, and the same behaviour. */
+#wrap{height:100vh;overflow:hidden;padding:24px;padding-top:72px;cursor:grab;user-select:none;touch-action:none}
+#win{position:relative;width:100%;height:100%}
+/* Scaled rather than zoomed: CSS zoom snaps. The glide is switched off from JS
+   while the wheel or the hand is driving. */
+#map{position:absolute;left:0;top:0;transform-origin:top left}
 .c{position:absolute;overflow:hidden;cursor:pointer;user-select:none;transition:transform .12s,box-shadow .12s;box-sizing:border-box}
 .c:hover{transform:scale(1.04);z-index:200!important}
 .c.focused{outline:3px solid #3b82f6;outline-offset:2px}
@@ -1512,7 +1517,7 @@ body{margin:0;padding:0;overflow:hidden;background:#f8fafc;font-family:Inter,sys
   <button onclick="downloadSvg()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm" title="Download this map as a vector SVG">SVG</button>
   <span class="hidden md:inline text-[10px] text-slate-400">Ctrl/⌘ + click a card to focus</span>
 </div>
-<div id="wrap"><div id="sizer"><div id="map"></div></div></div>
+<div id="wrap"><div id="win"><div id="map"></div></div></div>
 <div id="tip"></div>
 <script>
 const DATA=${projectJson};
@@ -1529,28 +1534,122 @@ let autoFit=true;
 const FIT_ON='border px-3 py-1.5 rounded text-xs font-bold shadow-sm bg-blue-600 text-white border-blue-600';
 const FIT_OFF='border px-3 py-1.5 rounded text-xs font-bold shadow-sm bg-white text-slate-600 border-slate-200 hover:bg-slate-50';
 function syncFitBtn(){const b=document.getElementById('fit-btn');if(b)b.className=autoFit?FIT_ON:FIT_OFF;}
-// The frame is the window minus the fixed toolbar and the wrapper's padding.
-function fitFrame(){return{w:Math.max(0,window.innerWidth-48),h:Math.max(0,window.innerHeight-96)};}
-// Never magnifies: a small map stays at 100% rather than being blown up.
-function applyFit(){
+// Where the canvas sits inside its window, in window pixels.
+let panX=0,panY=0,eased=true,settleTimer=0;
+// The frame is the window the map is panned inside: the page minus the fixed
+// toolbar and the wrapper's padding, which is exactly #win's own box.
+function fitFrame(){const w=document.getElementById('win');return{w:w.clientWidth,h:w.clientHeight};}
+function mapSize(){const m=document.getElementById('map');return{w:parseFloat(m.style.width)||0,h:parseFloat(m.style.height)||0};}
+function paint(){
   const m=document.getElementById('map');
-  const cw=parseFloat(m.style.width)||0,ch=parseFloat(m.style.height)||0;
-  if(!cw||!ch)return;
-  const f=fitFrame();if(!f.w||!f.h)return;
-  mapZoom=+Math.min(1,Math.max(0.25,Math.min(f.w/cw,f.h/ch))).toFixed(2);
-  applyZoom();
+  m.style.transition=eased?'transform .22s ease':'none';
+  m.style.transform='translate('+panX+'px,'+panY+'px) scale('+mapZoom+')';
+  document.getElementById('zoom-label').textContent=Math.round(mapZoom*100)+'%';
+}
+// Kept under the old name because render() calls it after every expand.
+function applyZoom(){paint();}
+// Never magnifies: a small map stays at 100% rather than being blown up. Fit
+// recentres as well, since the canvas has no scroll origin to sit against.
+function applyFit(){
+  const c=mapSize(),f=fitFrame();
+  if(!c.w||!c.h||!f.w||!f.h)return;
+  mapZoom=Math.min(1,Math.max(0.25,Math.min(f.w/c.w,f.h/c.h)));
+  panX=Math.max(0,(f.w-c.w*mapZoom)/2);
+  panY=Math.max(0,(f.h-c.h*mapZoom)/2);
+  eased=true;paint();
 }
 function fitView(){autoFit=true;syncFitBtn();applyFit();}
-// A deliberate zoom means the user is driving: stop refitting until Fit View.
-function zoomIn(){autoFit=false;syncFitBtn();mapZoom=+Math.min(2,mapZoom+0.1).toFixed(2);applyZoom();}
-function zoomOut(){autoFit=false;syncFitBtn();mapZoom=+Math.max(0.25,mapZoom-0.1).toFixed(2);applyZoom();}
-function applyZoom(){
-  const m=document.getElementById('map');
-  m.style.transform='scale('+mapZoom+')';
-  const cw=parseFloat(m.style.width)||0,ch=parseFloat(m.style.height)||0;
-  const sz=document.getElementById('sizer');
-  sz.style.width=(cw*mapZoom)+'px';sz.style.height=(ch*mapZoom)+'px';
-  document.getElementById('zoom-label').textContent=Math.round(mapZoom*100)+'%';
+// Zoom about a screen point rather than the top-left corner: whatever sits
+// under that point stays under it, which is what makes the wheel read as a
+// magnifier instead of a slider. Full precision on purpose — rounding the zoom
+// swallows small wheel steps whole.
+function zoomAbout(next,clientX,clientY){
+  next=Math.min(2,Math.max(0.25,next));
+  if(next===mapZoom)return;
+  const r=document.getElementById('win').getBoundingClientRect();
+  const px=clientX-r.left,py=clientY-r.top;
+  panX=px-(px-panX)*next/mapZoom;
+  panY=py-(py-panY)*next/mapZoom;
+  mapZoom=next;
+  // A deliberate zoom means the user is driving: stop refitting until Fit View.
+  autoFit=false;syncFitBtn();
+  paint();
+}
+// The buttons zoom about the middle of the window, the nearest thing to a
+// cursor when there isn't one.
+function zoomBy(d){const r=document.getElementById('win').getBoundingClientRect();eased=true;zoomAbout(mapZoom+d,r.left+r.width/2,r.top+r.height/2);}
+function zoomIn(){zoomBy(0.1);}
+function zoomOut(){zoomBy(-0.1);}
+// will-change only while something is moving. Left on permanently it pins the
+// map to a composited layer rasterised at one scale and then stretched by the
+// GPU, so every card goes soft — worst on a Windows laptop at 125% display
+// scaling, invisible on a 2x screen.
+function markMoving(settleAfter){
+  document.getElementById('map').style.willChange='transform';
+  clearTimeout(settleTimer);
+  if(settleAfter)settleTimer=setTimeout(settle,settleAfter);
+}
+function settle(){
+  settleTimer=0;
+  // Land on whole device pixels: a half-pixel origin blurs text just as
+  // reliably as a stale raster does.
+  const dpr=window.devicePixelRatio||1;
+  panX=Math.round(panX*dpr)/dpr;panY=Math.round(panY*dpr)/dpr;
+  document.getElementById('map').style.willChange='';
+  paint();
+}
+// Wheel zooms to the cursor, the empty canvas drags to pan.
+function bindMapNavigation(){
+  const wrap=document.getElementById('wrap');
+  wrap.addEventListener('wheel',function(e){
+    const tip=document.getElementById('tip');
+    if(tip&&tip.contains(e.target))return;
+    e.preventDefault();
+    // deltaY is only in pixels when deltaMode says so. Firefox and plenty of
+    // Windows mice report lines (3 per notch), and reading those as pixels
+    // makes a notch worth half a percent of zoom.
+    const perLine=16,perPage=wrap.clientHeight||400;
+    const raw=e.deltaY*(e.deltaMode===1?perLine:e.deltaMode===2?perPage:1);
+    const dy=Math.max(-240,Math.min(240,raw));
+    eased=false;markMoving(200);
+    zoomAbout(mapZoom*Math.exp(-dy*0.002),e.clientX,e.clientY);
+  },{passive:false});
+  let drag=null;
+  wrap.addEventListener('pointerdown',function(e){
+    drag=null;
+    if(e.button!==0||(e.target.closest&&e.target.closest('button,input,select,textarea,a')))return;
+    drag={x:e.clientX,y:e.clientY,ox:panX,oy:panY,moved:false};
+  });
+  wrap.addEventListener('pointermove',function(e){
+    if(!drag)return;
+    const dx=e.clientX-drag.x,dy=e.clientY-drag.y;
+    if(!drag.moved){
+      if(Math.abs(dx)+Math.abs(dy)<4)return;
+      drag.moved=true;wrap.style.cursor='grabbing';eased=false;
+      // Capture only once this is a pan. Capturing on press retargets the
+      // whole gesture to the wrapper, so mouseup lands there instead of on the
+      // card and the card's own click — expand, collapse, focus — never fires.
+      try{wrap.setPointerCapture(e.pointerId);}catch(err){}
+      markMoving(0);
+    }
+    panX=drag.ox+dx;panY=drag.oy+dy;
+    paint();
+  });
+  function endPan(e){
+    const d=drag;drag=null;
+    wrap.style.cursor='';
+    try{if(wrap.hasPointerCapture(e.pointerId))wrap.releasePointerCapture(e.pointerId);}catch(err){}
+    if(!d||!d.moved)return;
+    // Swallow only the click this drag is about to turn into. A flag that says
+    // "we dragged" outlives the gesture whenever the click never arrives, and
+    // then eats the user's next real click.
+    const swallow=function(ev){ev.stopPropagation();ev.preventDefault();};
+    window.addEventListener('click',swallow,true);
+    setTimeout(function(){window.removeEventListener('click',swallow,true);},0);
+    settle();
+  }
+  wrap.addEventListener('pointerup',endPan);
+  wrap.addEventListener('pointercancel',endPan);
 }
 // Focus only what is visible now. A collapsed card therefore behaves like a
 // leaf even when the underlying data contains children. Readability wins over
@@ -1572,15 +1671,11 @@ function focusCard(e,id,childIds){
   document.querySelectorAll('.c.focused').forEach(function(card){card.classList.remove('focused');});
   const focused=document.querySelector('.c[data-node-id="'+CSS.escape(id)+'"]');
   if(focused)focused.classList.add('focused');
-  applyZoom();
-  const wrap=document.getElementById('wrap');
-  requestAnimationFrame(function(){
-    wrap.scrollTo({
-      left:Math.max(0,(left+w/2)*mapZoom-wrap.clientWidth/2+24),
-      top:Math.max(0,(top+h/2)*mapZoom-wrap.clientHeight/2+72),
-      behavior:'smooth'
-    });
-  });
+  // Centre the family in the window. The canvas is positioned, not scrolled,
+  // so the glide is the transform's own transition rather than a smooth scroll.
+  panX=f.w/2-(left+w/2)*mapZoom;
+  panY=f.h/2-(top+h/2)*mapZoom;
+  eased=true;paint();
   return true;
 }
 function toggleFullScreen(){
@@ -1596,6 +1691,7 @@ document.addEventListener('fullscreenchange',()=>{
   if(autoFit)applyFit();
 });
 window.addEventListener('resize',()=>{if(autoFit)applyFit();});
+bindMapNavigation();
 function colW(sub){return expanded.has(sub.id)?SUB_W+H_GAP+FF_W+H_GAP+FM_W:SUB_W;}
 function ffRowH(fail){if(!expanded.has(fail.id)||!fail.modes.length)return FF_H;return Math.max(FF_H,fail.modes.length*FM_H+(fail.modes.length-1)*FM_V_GAP);}
 function groupH(sub){if(!expanded.has(sub.id)||!sub.failures.length)return SUB_H;let t=0;sub.failures.forEach((f,i)=>{t+=ffRowH(f);if(i<sub.failures.length-1)t+=V_GAP;});return Math.max(SUB_H,t);}
