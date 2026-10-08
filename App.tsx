@@ -30,7 +30,7 @@ import { RcmRegisterModal, type RcmRegisterSubmit } from './components/RcmRegist
 import { ImportProjectModal } from './components/ImportProjectModal';
 import { RpnScoreInput, RpnTotalBadge } from './components/RpnHoverCard';
 import { hasCompleteRpn, normalizeProjectDates, nowIso, rpnTotal } from './services/ProjectUtils';
-import { buildActionsInput, buildProjectJsonBase64, buildRegisterPayload, buildSummaryPrompt, fetchRegisterProjectJson, publishToRcmRegister, type RcmRegisterRow } from './services/RcmRegisterService';
+import { buildActionsInput, buildEvidenceAttachments, buildProjectJsonBase64, buildRegisterPayload, buildSummaryPrompt, fetchRegisterProjectJson, publishToRcmRegister, type RcmRegisterRow, type RegistryAttachment } from './services/RcmRegisterService';
 import {
     buildComponentCatalogContext,
     buildFullSystemModesContext,
@@ -1325,7 +1325,7 @@ setProjects(
 
     /* RCM REGISTER */
     const [showRegisterModal, setShowRegisterModal] = useState(false);
-    const [registerAttachment, setRegisterAttachment] = useState<{ fileName: string; base64: string; jsonFileName: string; jsonBase64: string } | null>(null);
+    const [registerAttachment, setRegisterAttachment] = useState<{ fileName: string; base64: string; jsonFileName: string; jsonBase64: string; extra: RegistryAttachment[] } | null>(null);
 
     const openRegisterModal = () => {
         if(!activeProject) return;
@@ -1339,6 +1339,7 @@ setProjects(
                 base64,
                 jsonFileName: `FMECA_${activeProject.name.replace(/ /g, "_")}.json`,
                 jsonBase64: buildProjectJsonBase64(activeProject),
+                extra: buildEvidenceAttachments({ knowledgeFileName: globalFileName, knowledgeText: globalFileText, checklistFileName, checklistText }),
             });
             setShowRegisterModal(true);
         };
@@ -1380,10 +1381,7 @@ setProjects(
             fileContentBase64: registerAttachment.base64,
             jsonFileName: registerAttachment.jsonFileName,
             jsonContentBase64: registerAttachment.jsonBase64,
-            knowledgeFileName: globalFileName,
-            knowledgeText: globalFileText,
-            checklistFileName: checklistFileName,
-            checklistText: checklistText,
+            extraAttachments: registerAttachment.extra,
         });
         const result = await publishToRcmRegister(rcmRegisterUrl, payload);
         setActiveProject(prev => prev ? { ...prev, rcmRegister: { ...result, publishedAt: nowIso(), status: values.status } } : prev);
@@ -3454,6 +3452,7 @@ syncFitBtn();
                     attachments={[
                         { fileName: registerAttachment.fileName, sizeBytes: Math.round(registerAttachment.base64.length * 3 / 4) },
                         { fileName: registerAttachment.jsonFileName, sizeBytes: Math.round(registerAttachment.jsonBase64.length * 3 / 4) },
+                        ...registerAttachment.extra.map(a => ({ fileName: a.name, sizeBytes: Math.round(a.contentBase64.length * 3 / 4) })),
                     ]}
                     onPublish={publishRegister}
                     onGenerateSummary={generateRegisterSummary}

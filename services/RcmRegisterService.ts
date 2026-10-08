@@ -90,12 +90,8 @@ export interface BuildRegisterPayloadOptions {
     fileContentBase64: string;
     jsonFileName: string;
     jsonContentBase64: string;
-    /** Reference Knowledge from Settings — attached so a reopened study keeps its sources. */
-    knowledgeFileName?: string;
-    knowledgeText?: string;
-    /** Checklist Knowledge from Settings. */
-    checklistFileName?: string;
-    checklistText?: string;
+    /** Evidence files from Settings, already named by buildEvidenceAttachments. */
+    extraAttachments?: RegistryAttachment[];
 }
 
 /** Creation date of a project as ISO 8601 UTC, tolerating the `created`/`createdAt` split. */
@@ -245,7 +241,38 @@ function evidenceAttachment(prefix: string, fileName: string, text: string): Reg
     if (!text.trim()) return null;
     const base = sanitizeAttachmentName(fileName) || `${prefix}.txt`;
     const named = base.toLowerCase().endsWith('.txt') ? base : `${base}.txt`;
-    return { name: `${prefix}-${named}`, contentBase64: toBase64Utf8(text) };
+    // A file already named for its role would otherwise become checklist-checklist-….
+    const name = named.toLowerCase().startsWith(`${prefix}-`) || named.toLowerCase().startsWith(`${prefix}_`)
+        ? named
+        : `${prefix}-${named}`;
+    return { name, contentBase64: toBase64Utf8(text) };
+}
+
+/**
+ * The Settings evidence files as attachments. Exported so the publish modal lists exactly
+ * what will be uploaded — building them twice is how the count and the payload drift apart.
+ */
+export function buildEvidenceAttachments(input: {
+    knowledgeFileName?: string;
+    knowledgeText?: string;
+    checklistFileName?: string;
+    checklistText?: string;
+}): RegistryAttachment[] {
+    return [
+        evidenceAttachment('reference', input.knowledgeFileName || '', input.knowledgeText || ''),
+        evidenceAttachment('checklist', input.checklistFileName || '', input.checklistText || ''),
+    ].filter((a): a is RegistryAttachment => a !== null);
+}
+
+/**
+ * A date-only value parses as UTC midnight, which SharePoint then renders in the site's own
+ * timezone — anywhere behind UTC shows the previous day. Anchoring at midday keeps the
+ * calendar date intact on either side of the boundary.
+ */
+function calendarDateIso(iso: string): string {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 0, 0)).toISOString();
 }
 
 /** Pure mapping from FMECA project + form values to the registry flow payload. */
@@ -256,9 +283,8 @@ export function buildRegisterPayload(project: Project, opts: BuildRegisterPayloa
     const attachments: RegistryAttachment[] = [
         { name: sanitizeAttachmentName(opts.fileName), contentBase64: opts.fileContentBase64 },
         { name: sanitizeAttachmentName(opts.jsonFileName), contentBase64: opts.jsonContentBase64 },
-        evidenceAttachment('reference', opts.knowledgeFileName || '', opts.knowledgeText || ''),
-        evidenceAttachment('checklist', opts.checklistFileName || '', opts.checklistText || ''),
-    ].filter((a): a is RegistryAttachment => a !== null && !!a.name && !!a.contentBase64);
+        ...(opts.extraAttachments || []),
+    ].filter(a => !!a.name && !!a.contentBase64);
 
     const seen = new Set<string>();
     const unique = attachments.filter(a => {
@@ -275,7 +301,7 @@ export function buildRegisterPayload(project: Project, opts: BuildRegisterPayloa
         fields: {
             [cols.system]: project.name || '',
             [cols.subSystems]: buildSubSystemsList(project),
-            [cols.startDate]: tryIso(opts.startDate) || projectStartIso(project),
+            [cols.startDate]: calendarDateIso(tryIso(opts.startDate) || projectStartIso(project)),
             [cols.status]: opts.status,
             [cols.summaryOfActions]: capText(summary, SUMMARY_MAX_CHARS),
         },
