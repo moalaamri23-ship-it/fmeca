@@ -15,18 +15,30 @@ export const RCM_STATUS_OPTIONS = [
 const SUMMARY_MAX_CHARS = 60000;
 const TRUNCATION_SUFFIX = '…(truncated)';
 
+/** One file to attach to the new row. The flow loops over these, type-agnostic. */
+export interface RegistryAttachment {
+    name: string;               // attachment file name, unique within the row
+    contentBase64: string;      // raw base64, no data: prefix
+}
+
+/**
+ * Payload for the generic "SharePoint Registry" flow. The flow is list-agnostic: the site,
+ * the list and the column names all travel in the request, so this mapping belongs to the
+ * app. `fields` keys are SharePoint internal names (see REGISTER_LIST.columns).
+ *
+ * The flow generates the RCM internal number itself — it reads the last one matching
+ * `autoNumber` and increments — because two engineers publishing at once would otherwise
+ * both read the same value. It resolves `person.email` to a site-user id, since a Person
+ * column cannot be set from an email over REST.
+ */
 export interface RcmRegisterPayload {
-    action: 'create';           // flow switches on this; absent means "create" for older flows
-    system: string;             // list column: System
-    subSystems: string;         // multiline, one per line
-    startDate: string;          // ISO 8601 UTC
-    engineerName: string;       // email / UPN (Person column needs this, not a display name)
-    status: string;             // must match a list Choice value exactly
-    summaryOfActions: string;
-    fileName: string;
-    fileContentBase64: string;  // raw base64, no data: prefix
-    jsonFileName: string;
-    jsonContentBase64: string;  // raw base64, no data: prefix
+    v: 1;
+    site: string;
+    list: string;
+    fields: Record<string, string>;
+    person?: { column: string; email: string };
+    autoNumber?: { column: string; prefix: string };
+    attachments: RegistryAttachment[];
 }
 
 export interface RcmRegisterResult {
@@ -78,6 +90,12 @@ export interface BuildRegisterPayloadOptions {
     fileContentBase64: string;
     jsonFileName: string;
     jsonContentBase64: string;
+    /** Reference Knowledge from Settings — attached so a reopened study keeps its sources. */
+    knowledgeFileName?: string;
+    knowledgeText?: string;
+    /** Checklist Knowledge from Settings. */
+    checklistFileName?: string;
+    checklistText?: string;
 }
 
 /** Creation date of a project as ISO 8601 UTC, tolerating the `created`/`createdAt` split. */
@@ -210,21 +228,60 @@ function capText(text: string, max: number): string {
     return text.slice(0, Math.max(0, max - TRUNCATION_SUFFIX.length)) + TRUNCATION_SUFFIX;
 }
 
-/** Pure mapping from FMECA project + form values to the flow payload. */
+/**
+ * SharePoint rejects these in an attachment name, and a duplicate name on one item is an
+ * error rather than a replace — so names are sanitized and deduped before they are sent.
+ */
+function sanitizeAttachmentName(name: string): string {
+    return (name || '').trim().replace(/[~"#%&*:<>?/\\{|}]/g, '-').replace(/\s+/g, ' ');
+}
+
+/**
+ * Evidence files are stored as plain list attachments alongside the workbook, so the role
+ * has to live in the name — `reference-` and `checklist-` are what tells them apart when
+ * they are read back. Both kinds are .txt; the extension alone says nothing.
+ */
+function evidenceAttachment(prefix: string, fileName: string, text: string): RegistryAttachment | null {
+    if (!text.trim()) return null;
+    const base = sanitizeAttachmentName(fileName) || `${prefix}.txt`;
+    const named = base.toLowerCase().endsWith('.txt') ? base : `${base}.txt`;
+    return { name: `${prefix}-${named}`, contentBase64: toBase64Utf8(text) };
+}
+
+/** Pure mapping from FMECA project + form values to the registry flow payload. */
 export function buildRegisterPayload(project: Project, opts: BuildRegisterPayloadOptions): RcmRegisterPayload {
     const summary = opts.summaryOfActions.trim() || buildSummaryOfActions(project);
+    const cols = REGISTER_LIST.columns;
+
+    const attachments: RegistryAttachment[] = [
+        { name: sanitizeAttachmentName(opts.fileName), contentBase64: opts.fileContentBase64 },
+        { name: sanitizeAttachmentName(opts.jsonFileName), contentBase64: opts.jsonContentBase64 },
+        evidenceAttachment('reference', opts.knowledgeFileName || '', opts.knowledgeText || ''),
+        evidenceAttachment('checklist', opts.checklistFileName || '', opts.checklistText || ''),
+    ].filter((a): a is RegistryAttachment => a !== null && !!a.name && !!a.contentBase64);
+
+    const seen = new Set<string>();
+    const unique = attachments.filter(a => {
+        const key = a.name.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+
     return {
-        action: 'create',
-        system: project.name || '',
-        subSystems: buildSubSystemsList(project),
-        startDate: tryIso(opts.startDate) || projectStartIso(project),
-        engineerName: opts.engineerEmail.trim(),
-        status: opts.status,
-        summaryOfActions: capText(summary, SUMMARY_MAX_CHARS),
-        fileName: opts.fileName,
-        fileContentBase64: opts.fileContentBase64,
-        jsonFileName: opts.jsonFileName,
-        jsonContentBase64: opts.jsonContentBase64,
+        v: 1,
+        site: REGISTER_LIST.site,
+        list: REGISTER_LIST.list,
+        fields: {
+            [cols.system]: project.name || '',
+            [cols.subSystems]: buildSubSystemsList(project),
+            [cols.startDate]: tryIso(opts.startDate) || projectStartIso(project),
+            [cols.status]: opts.status,
+            [cols.summaryOfActions]: capText(summary, SUMMARY_MAX_CHARS),
+        },
+        person: opts.engineerEmail.trim() ? { column: cols.engineerName, email: opts.engineerEmail.trim() } : undefined,
+        autoNumber: { column: cols.rcmInternalNumber, prefix: 'RCM' },
+        attachments: unique,
     };
 }
 
@@ -263,12 +320,16 @@ async function postToFlow(flowUrl: string, body: unknown): Promise<any> {
  */
 export async function publishToRcmRegister(flowUrl: string, payload: RcmRegisterPayload): Promise<RcmRegisterResult> {
     const parsed = await postToFlow(flowUrl, payload);
-    const rcmInternalNumber = String(parsed?.rcmInternalNumber ?? '').trim();
+    // `number` is what the registry flow returns; `rcmInternalNumber` was the older flow's name.
+    const rcmInternalNumber = String(parsed?.number ?? parsed?.rcmInternalNumber ?? '').trim();
     const itemId = Number(parsed?.itemId);
     if (!rcmInternalNumber || !Number.isFinite(itemId)) {
-        throw new Error(`RCM Register error: flow reply missing rcmInternalNumber or itemId. Raw response: ${JSON.stringify(parsed)}`);
+        throw new Error(`RCM Register error: flow reply missing number or itemId. Raw response: ${JSON.stringify(parsed)}`);
     }
-    return { rcmInternalNumber, itemId, itemLink: String(parsed?.itemLink ?? '') };
+    // The registry flow is list-agnostic and returns no link, so build the row URL here.
+    const itemLink = String(parsed?.itemLink ?? '')
+        || `${payload.site}/Lists/${encodeURIComponent(payload.list)}/DispForm.aspx?ID=${itemId}`;
+    return { rcmInternalNumber, itemId, itemLink };
 }
 
 const C = REGISTER_LIST.columns;

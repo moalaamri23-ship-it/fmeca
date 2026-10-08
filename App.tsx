@@ -1380,6 +1380,10 @@ setProjects(
             fileContentBase64: registerAttachment.base64,
             jsonFileName: registerAttachment.jsonFileName,
             jsonContentBase64: registerAttachment.jsonBase64,
+            knowledgeFileName: globalFileName,
+            knowledgeText: globalFileText,
+            checklistFileName: checklistFileName,
+            checklistText: checklistText,
         });
         const result = await publishToRcmRegister(rcmRegisterUrl, payload);
         setActiveProject(prev => prev ? { ...prev, rcmRegister: { ...result, publishedAt: nowIso(), status: values.status } } : prev);
