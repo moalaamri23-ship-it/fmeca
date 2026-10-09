@@ -11,6 +11,7 @@ import { TreeNode } from './components/TreeNode';
 import { HybridMapView } from './components/HybridMapView';
 import { computeMapFocusView } from './services/MapLayout';
 import { buildMapSvg } from './services/MapSvg';
+import { REVIEW_NOTES_CSS, REVIEW_NOTES_JS } from './services/InteractiveMapReview';
 import { AttachmentModal } from './components/AttachmentModal';
 import { CitationModal, type CitationGroup } from './components/CitationModal';
 import { BulkCiteButton, type CiteState } from './components/CiteButton';
@@ -173,6 +174,10 @@ const App = () => {
     const [activeSubId, setActiveSubId] = useState<string | null>(null);
     const [library, setLibrary] = useState<RichLibrary>(RICH_LIBRARY);
     const [showDownloadOptions, setShowDownloadOptions] = useState(false);
+    // Interactive map download asks first, so the reviewer-notes option has
+    // somewhere to live.
+    const [mapExportAsk, setMapExportAsk] = useState<{ open: boolean; reviewNotes: boolean }>({ open: false, reviewNotes: false });
+    const mapExportGoRef = useRef<HTMLButtonElement>(null);
     const [dragId, setDragId] = useState<number | null>(null);
     const [dragAllowed, setDragAllowed] = useState<number | null>(null);
     // Delete Helper
@@ -203,6 +208,21 @@ const App = () => {
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
     }, [confirmBox.run]);
+    useEffect(() => {
+        if (!mapExportAsk.open) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') { e.preventDefault(); setMapExportAsk(a => ({ ...a, open: false })); }
+            if (e.key !== 'Enter') return;
+            const t = e.target as HTMLElement | null;
+            // Cancel keeps its own Enter. The checkbox does not need to: Space
+            // toggles it, and Enter there means "go", as it does anywhere else.
+            if (t && t.tagName === 'BUTTON' && !t.dataset.mapExportGo) return;
+            e.preventDefault();
+            mapExportGoRef.current?.click();
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [mapExportAsk.open]);
     // Map-tree state + handlers
     const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
     const [treeSelected, setTreeSelected] = useState<string | null>(null);
@@ -1463,9 +1483,13 @@ setProjects(
         } catch { alert('SVG export failed.'); }
     };
 
-    const downloadInteractiveMap = () => {
+    const downloadInteractiveMap = (reviewNotes: boolean) => {
         if (!activeProject) return;
         setShowDownloadOptions(false);
+        const fileBase = `FMECA_Map_${activeProject.name.replace(/ /g, '_')}`;
+        // A fresh id per download, so two exports of the same project never
+        // share stored notes in a reviewer's browser.
+        const exportId = `${activeProject.id}~${Date.now().toString(36)}`.replace(/[^A-Za-z0-9_~-]/g, '');
         const expandedIds = JSON.stringify([...treeExpanded]);
         const projectForExport = mapHiddenSubs.size > 0
             ? { ...activeProject, subsystems: activeProject.subsystems.filter(s => !mapHiddenSubs.has(s.id)) }
@@ -1481,7 +1505,7 @@ setProjects(
 <script>
 tailwind.config={theme:{extend:{colors:{'brand':{500:'#6366f1',600:'#4f46e5',700:'#4338ca'},'slate':{850:'#1a2234',900:'#0f172a'}}}}}
 <\/script>
-<style>
+<style data-own>
 *{box-sizing:border-box}
 body{margin:0;padding:0;overflow:hidden;background:#f8fafc;font-family:Inter,system-ui,sans-serif}
 /* The map is panned by transform inside a fixed window, not scrolled. A scroll
@@ -1499,6 +1523,7 @@ body{margin:0;padding:0;overflow:hidden;background:#f8fafc;font-family:Inter,sys
 .clamp1{display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
 .clamp2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ln{position:absolute;background:#cbd5e1;pointer-events:none}
+${reviewNotes ? REVIEW_NOTES_CSS : ''}
 #tip{display:none;position:fixed;z-index:9999;max-width:300px;background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.2);padding:16px;pointer-events:none;font-family:Inter,system-ui,sans-serif}
 </style>
 </head>
@@ -1515,10 +1540,12 @@ body{margin:0;padding:0;overflow:hidden;background:#f8fafc;font-family:Inter,sys
   <button id="fit-btn" onclick="fitView()" class="border px-3 py-1.5 rounded text-xs font-bold shadow-sm" title="Fit the whole map in view and turn auto fit back on">Fit View</button>
   <button id="fs-btn" onclick="toggleFullScreen()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm">Full Screen</button>
   <button onclick="downloadSvg()" class="bg-white border border-slate-200 px-3 py-1.5 rounded text-xs font-bold text-slate-600 hover:bg-slate-50 shadow-sm" title="Download this map as a vector SVG">SVG</button>
-  <span class="hidden md:inline text-[10px] text-slate-400">Ctrl/⌘ + click a card to focus</span>
+  ${reviewNotes ? '<button onclick="saveWithNotes()" class="bg-amber-50 border border-amber-300 px-3 py-1.5 rounded text-xs font-bold text-amber-800 hover:bg-amber-100 shadow-sm" title="Download a copy of this map with your review notes inside it">Save with notes <span id="notes-count"></span></button>' : ''}
+  <span class="hidden md:inline text-[10px] text-slate-400">Ctrl/⌘ + click a card to focus${reviewNotes ? ' · note icon on a card to review it' : ''}</span>
 </div>
 <div id="wrap"><div id="win"><div id="map"></div></div></div>
 <div id="tip"></div>
+${reviewNotes ? `<script id="review-notes" type="application/json" data-export-id="${exportId}">%7B%7D<\/script>` : ''}
 <script>
 const DATA=${projectJson};
 const INIT_EXP=new Set(${expandedIds});
@@ -1526,6 +1553,9 @@ const SYS_W=320,SYS_H=72,SUB_W=200,SUB_H=90,FF_W=190,FF_H=62,FM_W=215,FM_H=136;
 const H_GAP=32,V_GAP=24,FM_V_GAP=16,COL_GAP=40;
 const SYS_BOTTOM_TO_BUS=28,BUS_TO_SUB=28,PADDING=56,CONN_W=2;
 let expanded=new Set(INIT_EXP);
+const REVIEW=${reviewNotes ? 'true' : 'false'};
+${reviewNotes ? `const FILE_BASE=${JSON.stringify(fileBase).replace(/</g, '\\u003c')};
+${REVIEW_NOTES_JS}` : ''}
 let mapZoom=1.0;
 // Auto fit is on until the user zooms by hand; Fit View is how they ask for it
 // back. Without that handshake every expand would yank the zoom out from under
@@ -1545,6 +1575,7 @@ function paint(){
   m.style.transition=eased?'transform .22s ease':'none';
   m.style.transform='translate('+panX+'px,'+panY+'px) scale('+mapZoom+')';
   document.getElementById('zoom-label').textContent=Math.round(mapZoom*100)+'%';
+  if(REVIEW)placeNote(false);
 }
 // Kept under the old name because render() calls it after every expand.
 function applyZoom(){paint();}
@@ -1604,6 +1635,7 @@ function bindMapNavigation(){
   wrap.addEventListener('wheel',function(e){
     const tip=document.getElementById('tip');
     if(tip&&tip.contains(e.target))return;
+    if(e.target.closest&&e.target.closest('.note'))return;
     e.preventDefault();
     // deltaY is only in pixels when deltaMode says so. Firefox and plenty of
     // Windows mice report lines (3 per notch), and reading those as pixels
@@ -1617,7 +1649,7 @@ function bindMapNavigation(){
   let drag=null;
   wrap.addEventListener('pointerdown',function(e){
     drag=null;
-    if(e.button!==0||(e.target.closest&&e.target.closest('button,input,select,textarea,a')))return;
+    if(e.button!==0||(e.target.closest&&e.target.closest('button,input,select,textarea,a,.note')))return;
     drag={x:e.clientX,y:e.clientY,ox:panX,oy:panY,moved:false};
   });
   wrap.addEventListener('pointermove',function(e){
@@ -1929,6 +1961,7 @@ function render(){
       });
     });
   });
+  if(REVIEW)decorateNotes(mel);
   if(autoFit)applyFit();else applyZoom();
 }
 function toggle(id){if(expanded.has(id))expanded.delete(id);else expanded.add(id);render();}
@@ -2062,7 +2095,7 @@ syncFitBtn();
 </html>`;
         const blob = new Blob([html], { type: 'text/html' });
         const link = document.createElement('a');
-        link.download = `FMECA_Map_${activeProject.name.replace(/ /g, '_')}.html`;
+        link.download = `${fileBase}.html`;
         link.href = URL.createObjectURL(blob);
         link.click();
         URL.revokeObjectURL(link.href);
@@ -2775,6 +2808,37 @@ syncFitBtn();
     </div>
   </div>
 )}    
+            {mapExportAsk.open && (
+  <div className="fixed inset-0 z-[9999] bg-black/40 grid place-items-center" onMouseDown={() => setMapExportAsk(a => ({ ...a, open: false }))}>
+    <div role="dialog" aria-modal="true" aria-labelledby="map-export-title" className="bg-white rounded-xl p-4 w-[92vw] max-w-sm border" onMouseDown={(e)=>e.stopPropagation()}>
+      <div id="map-export-title" className="text-sm font-semibold text-slate-900">Download interactive map</div>
+      <div className="text-sm text-slate-700 mt-1">Saves the map as a standalone HTML file that opens in any browser.</div>
+      <label className="mt-4 flex items-start gap-2 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          className="mt-0.5 w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+          checked={mapExportAsk.reviewNotes}
+          onChange={e => setMapExportAsk(a => ({ ...a, reviewNotes: e.target.checked }))}
+        />
+        <span>
+          <span className="block text-sm font-medium text-slate-700">Add review notes</span>
+          <span className="block text-xs text-slate-400 mt-0.5">Puts a note icon on every card. Reviewers can pin a sticky note to any card and save a copy with their notes.</span>
+        </span>
+      </label>
+      <div className="mt-4 flex justify-end gap-2">
+        <button className="px-3 py-2 text-sm border rounded-lg" onClick={() => setMapExportAsk(a => ({ ...a, open: false }))}>Cancel</button>
+        <button
+          ref={mapExportGoRef}
+          data-map-export-go="1"
+          autoFocus
+          className="px-3 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-1"
+          onClick={() => { const notes = mapExportAsk.reviewNotes; setMapExportAsk({ open: false, reviewNotes: notes }); downloadInteractiveMap(notes); }}>
+          Download
+        </button>
+      </div>
+    </div>
+  </div>
+)}
             {activeProject && enableChatbot && view === 'editor' && (
   <Chatbot
     activeProject={activeProject}
@@ -3395,7 +3459,7 @@ syncFitBtn();
               <span>📄</span> PDF
             </button>
             <button
-              onClick={downloadInteractiveMap}
+              onClick={() => { setShowDownloadOptions(false); setMapExportAsk({ open: true, reviewNotes: false }); }}
               className="text-left px-4 py-2 hover:bg-slate-50 text-xs font-medium border-t flex items-center gap-2"
             >
               <span>🗺️</span> Interactive Map
