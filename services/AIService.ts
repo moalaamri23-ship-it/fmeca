@@ -380,6 +380,63 @@ const buildSiblingFailureModeBlock = (siblings: any): string => {
     return `\nSibling failure modes in the same analysis context (exclude barriers that fit these better):\n${rows}`;
 };
 
+// One owner rule set for every place a control or mitigation line is written.
+// It used to exist twice with different wording, and the current-controls wand
+// had a third ("use (Instrument team) for instrument controls"), so the same
+// alarm got an owner in one field and not in the other.
+//
+// A stand-alone alarm, trip, interlock or safety device acts automatically:
+// nobody performs a task, so no team owns the line. A team owns a line only
+// when someone has to do something -- including react to the alarm.
+export const OWNER_ASSIGNMENT_RULES = `Owner assignment (team in parentheses at the end of the line; the first matching rule wins):
+1. Vibration analysis (route survey, spectrum or trend review, online vibration data analysis) → (Condition Monitoring Team)
+2. Oil analysis or oil sampling for analysis → (Operations Team)
+3. An alarm, trip, interlock, shutdown or safety device listed on its own -- the device acts automatically and nobody performs a task → NO owner. Write it with no parentheses: "1- [Tag: TAGNO (Hi-Hi: X unit)]" or "1- High temperature trip [Tag: TAGNO (Hi-Hi: X unit)]".
+4. A task someone performs in response to an alarm or reading ("Clean suction filter when differential pressure reaches Hi-Hi [Tag: TAGNO (Hi-Hi: X unit)]") → the team that performs the task, by the rules below.
+5. Calibration, loop check, proof test or repair of a sensor, transmitter, switch or safety device → (Instrument team)
+6. Lubrication, alignment, bearing, seal, coupling, mechanical inspection → (Mechanical team)
+7. Control system, PLC, SCADA, interlock logic, delay, communication changes → (Automation team)
+8. Operational round, manual monitoring, log, operator check → (Operations Team)
+Rules 1-3 override checklist section names; otherwise use the checklist section name as owner when the task comes from the checklist.`;
+
+const VIBRATION_ANALYSIS_TASK = /\bvibration\s+(?:analysis|analyses|survey|spectrum|spectra|trend|trending|data\s+analysis)\b/i;
+const OIL_ANALYSIS_TASK = /\b(?:oil|lube|lubricant)\s+(?:analysis|analyses|sampling|sample)\b/i;
+const OWNER_SUFFIX = /\s*\(([^()]*)\)\s*$/;
+const LOOKS_LIKE_TEAM = /\b(team|crew|dept|department|section|group|operations?|mechanical|instrument|automation|electrical|condition monitoring)\b/i;
+const STANDALONE_DEVICE = /\b(alarm|trip|interlock|shutdown|shut-down|esd|psv|prv|relief valve|safety valve|rupture dis[ck]|bursting dis[ck]|switch|permissive)\b/i;
+// A task line names something someone does; a device line names only the device
+// and the variable it watches. Only a device line loses its owner. Ambiguous
+// words ("set point", "stops the pump") are deliberately not in the list.
+const ACTION_WORD = /\b(?:verify|check|clean|replace|inspect|calibrate|test|proof|perform|carry out|conduct|sample|analy[sz]e|lubricate|grease|align|tighten|record|log|review|install|add|implement|respond|react|drain|change|adjust|monitor|measure|repair|overhaul|reset|investigate|isolate|confirm|ensure|walk|patrol|refill|flush|purge|blow down|torque|retighten|survey|modify|update|configure|train|apply|raise|initiate)\b/i;
+
+/**
+ * Enforce the owner rules that can be decided from the line itself: vibration
+ * analysis to Condition Monitoring, oil analysis to Operations, and no owner on
+ * a stand-alone alarm/trip/safety device. Everything else is left as written.
+ */
+export function applyOwnerRules(text: string): string {
+    if (!text) return text;
+    return text.split('\n').map(line => {
+        const m = line.match(/^(\s*\d+\s*[-–.)]\s*)(.*)$/);
+        const prefix = m ? m[1] : '';
+        let body = (m ? m[2] : line).trimEnd();
+        if (!body.trim()) return line;
+        const ownerMatch = body.match(OWNER_SUFFIX);
+        const hasOwner = Boolean(ownerMatch && LOOKS_LIKE_TEAM.test(ownerMatch[1]));
+        const withoutOwner = hasOwner ? body.slice(0, ownerMatch!.index).trimEnd() : body;
+        const setOwner = (team: string) => `${prefix}${withoutOwner} (${team})`;
+        if (VIBRATION_ANALYSIS_TASK.test(withoutOwner)) return setOwner('Condition Monitoring Team');
+        if (OIL_ANALYSIS_TASK.test(withoutOwner)) return setOwner('Operations Team');
+        if (hasOwner) {
+            const words = withoutOwner.replace(/\[Tag:[^\]]*\]/gi, ' ').trim();
+            const tagOnly = !words;
+            const deviceOnly = STANDALONE_DEVICE.test(words) && !ACTION_WORD.test(words) && !/\b(when|on alarm|upon|if)\b/i.test(words);
+            if (tagOnly || deviceOnly) return `${prefix}${withoutOwner}`;
+        }
+        return line;
+    }).join('\n');
+}
+
 const buildModeFieldRules = (controlsKnowledgeAvailable: boolean, generatedLabel = 'THIS generated failure mode'): string => `Field rules per mode:
 - Apply these shared rules to every generated row:
 ${FMECA_HIERARCHY_RULES}
@@ -395,14 +452,19 @@ ${controlsKnowledgeAvailable
 ${LIBRARY_EXAMPLES}`;
 
 const MODE_ACTION_FORMAT_RULES = `Current controls format — return as a numbered string per mode without the words "Existing control":
-"1- [Tag: TAGNO (limit if stated)] (Owner)" or "1- Action [Tag: TAGNO (limit if stated)] (Owner)\\n2- ..."
+"1- [Tag: TAGNO (limit if stated)]" for a stand-alone device, or "1- Action [Tag: TAGNO (limit if stated)] (Owner)\\n2- ..."
 Mitigation format — return as a numbered string per mode:
 "1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."
-Owner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)
+${OWNER_ASSIGNMENT_RULES}
 Use checklist knowledge for PM tasks and reference data for instrument tags and limits only when they pass the failure-mode-specific barrier filter.
 ${FAILURE_MODE_BARRIER_FILTER}`;
 
 const blankGeneratedRpn = () => ({ s: "", o: "", d: "" });
+
+const applyModeOwnerRules = (m: any) => {
+    if (typeof m?.currentControls === 'string') m.currentControls = applyOwnerRules(m.currentControls);
+    if (typeof m?.mitigation === 'string') m.mitigation = applyOwnerRules(m.mitigation);
+};
 
 export interface AIMessage {
     role: string;
@@ -714,6 +776,45 @@ export function buildBreakdownRows(
         );
     }
     return rows.slice(0, maxRows);
+}
+
+// A driver and the machine it drives fail differently -- windings, insulation
+// and motor bearings against seals, rotors and wear parts -- and are maintained
+// by different trades, so JA1011 analysis keeps them apart. The structure prompt
+// says so; this is the backstop for a model that still returns "Pump and Motor".
+// The driver must be the head noun of its part: "Drive Motor" and "Gas Turbine"
+// are drivers, "Motor Control Center" and "Engine Cooling" are not.
+const DRIVER_TERMS = /\b(motor|turbine|engine|driver)s?(?:\s+(?:assembly|unit))?$/i;
+const DRIVER_SPEC_KEY = /\b(motor|voltage|current|frequency|insulation|enclosure|ip|poles?|starter|starting|vfd|winding|frame size|service factor|efficiency class)\b/i;
+const COMBINED_NAME_SPLIT = /\s+(?:and|&|\+|with)\s+|\s*\/\s*/i;
+
+/**
+ * Split any subsystem whose name joins a driver to the machine it drives
+ * ("Pump and Motor", "Compressor & Drive Motor") into one subsystem each.
+ * Spec pairs whose key belongs to the driver move with it; the rest stay with
+ * the driven machine. Any other subsystem passes through untouched.
+ */
+export function splitCombinedDriverSubsystems<T extends { name?: string; specs?: string }>(subsystems: T[]): T[] {
+    const out: T[] = [];
+    for (const sub of subsystems || []) {
+        const name = String(sub?.name || '').trim();
+        const parts = name.split(COMBINED_NAME_SPLIT).map(p => p.trim()).filter(Boolean);
+        const driverParts = parts.filter(p => DRIVER_TERMS.test(p));
+        const drivenParts = parts.filter(p => !DRIVER_TERMS.test(p));
+        if (parts.length < 2 || !driverParts.length || !drivenParts.length) {
+            out.push(sub);
+            continue;
+        }
+        const pairs = String(sub?.specs || '').split(/,(?![^()]*\))/).map(p => p.trim()).filter(Boolean);
+        const isDriverPair = (pair: string) => DRIVER_SPEC_KEY.test(pair.split(':')[0] || '');
+        const driverSpecs = pairs.filter(isDriverPair).join(', ');
+        const drivenSpecs = pairs.filter(p => !isDriverPair(p)).join(', ');
+        // A bare "Motor" says nothing about what it drives; name it for its duty.
+        const nameDriver = (p: string) => /^(motor|electric motor|e-motor)$/i.test(p) ? `${drivenParts.join(' and ')} Drive Motor` : p;
+        out.push({ ...sub, name: drivenParts.join(' and '), specs: drivenSpecs });
+        for (const d of driverParts) out.push({ ...sub, name: nameDriver(d), specs: driverSpecs, func: '' } as T);
+    }
+    return out;
 }
 
 export const AIService = {
@@ -1381,7 +1482,7 @@ export const AIService = {
                 .replace(/^(?:existing|current)\s+controls?\s*[:\-]?\s*/i, '')
                 .replace(/\s+/g, ' ')
                 .trim();
-            return `${i + 1}- ${cleaned}`;
+            return applyOwnerRules(`${i + 1}- ${cleaned}`);
         }).join('\n');
     },
 
@@ -1460,8 +1561,9 @@ ${existingNote}Task: List ONLY existing controls that are currently deployed for
 ${FMECA_HIERARCHY_RULES}
 ${FMECA_CONCISE_WORDING_RULES}
 Include:
-- Relevant PM/checklist tasks that directly prevent the stated cause, detect the stated cause, detect this mode's specific failure signature, or limit the stated effect. Use the checklist section name as owner.
-- Deployed instrument/protection controls from the reference data, such as temperature, pressure, level, flow, vibration, speed, differential pressure, alarms, trips, interlocks, shutdowns, transmitters, switches, or monitoring points. Include tag numbers and alarm/trip limits when stated. Use (Instrument team) for instrument controls unless the source states another owner.
+- Relevant PM/checklist tasks that directly prevent the stated cause, detect the stated cause, detect this mode's specific failure signature, or limit the stated effect.
+- Deployed instrument/protection controls from the reference data, such as temperature, pressure, level, flow, vibration, speed, differential pressure, alarms, trips, interlocks, shutdowns, transmitters, switches, or monitoring points. Include tag numbers and alarm/trip limits when stated.
+${OWNER_ASSIGNMENT_RULES}
 Rules:
 - Match controls to THIS Functional Failure + Failure Mode + Cause + Effect only.
 - Do NOT include tasks for sibling failure modes in the checklist.
@@ -1470,11 +1572,11 @@ Rules:
 - If nothing is evidenced for this failure mode, reply with exactly <no_evidence/> and nothing else. Do not describe the absence in words.
 ${FAILURE_MODE_BARRIER_FILTER}
 Output contract:
-- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
+- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)]" (no owner) for a stand-alone device, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when someone performs a task.
 - Never write the words "Existing control".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const controlsOutputContract = `FINAL OUTPUT CONTRACT:
-- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
+- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)]" (no owner) for a stand-alone device, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when someone performs a task.
 - Never write the words "Existing control".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const controlsContent = controlsPrompt + '\n\n' + controlsOutputContract;
@@ -1519,9 +1621,9 @@ Output contract:
                 : d <= 3
                 ? `Detection is already good (D=${d}/10). Focus on preventive maintenance actions.`
                 : `Detection score is moderate (D=${d}/10). Balance preventive tasks with detection controls.`;
-            const ownerRules = `Owner assignment (add team in parentheses after each action):\n- Sensor, transmitter, switch, monitor, level/pressure/vibration/flow tag → (Instrument team)\n- Lubrication, alignment, bearing, seal, coupling, mechanical inspection → (Mechanical team)\n- Control system, PLC, SCADA, interlock, delay, communication → (Automation team)\n- Operational round, manual monitoring, log, operator check → (Operation team)`;
+            const ownerRules = OWNER_ASSIGNMENT_RULES;
             const formatRule = `Output contract:
-- Return ONLY numbered lines in this exact form: "1- Action description [Tag: TAGNO (Hi: X unit, Hi-Hi: Y unit) if applicable] (Owner)".
+- Return ONLY numbered lines in this exact form: "1- Action description [Tag: TAGNO (Hi: X unit, Hi-Hi: Y unit) if applicable] (Owner)". Omit "(Owner)" only for a stand-alone alarm, trip or safety device, per the owner rules.
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const existingNote = currentText?.trim() ? `Existing mitigations to enhance and expand:\n"""${currentText}"""\n` : '';
             const controlsCovered = (contextData.currentControls as string)?.trim()
@@ -1752,6 +1854,7 @@ ${formatRule}`;
         ${FMECA_HIERARCHY_RULES}
         ${FMECA_CONCISE_WORDING_RULES}
         Identify the critical Subsystems for a formal FMECA. Scale the count to the system's complexity and criticality (simple package: 3-4, complex train: up to 8).
+        Every driver -- electric motor, turbine, engine -- is a subsystem of its own, separate from the machine it drives. Never combine a driver with the driven machine in one subsystem (not "Pump and Motor", not "Compressor and Drive Motor"); they fail differently and are maintained by different trades.
         For each subsystem, generate 'specs' using format "Key: Value Unit, Key: Value Unit" only when exact specs are present in the system description or reference data. Do not invent realistic values. If no exact specs are available for a subsystem, return an empty string for specs.
         Output strictly valid JSON object:
         { "subsystems": [ {
@@ -1778,7 +1881,7 @@ ${formatRule}`;
                 responseFormat: 'json'
             });
             const parsed = this.extractJSON(res);
-            return parsed.subsystems || [];
+            return splitCombinedDriverSubsystems(parsed.subsystems || []);
         } catch(e) { return []; }
     },
 
@@ -1827,7 +1930,7 @@ ${formatRule}`;
                 if (!modes.length) throw new Error('mode-generation: empty result');
                 // currentControls require checklist/reference evidence — forced empty otherwise.
                 if (!controlsKnowledgeAvailable) modes.forEach((m: any) => { m.currentControls = ''; });
-                modes.forEach((m: any) => { m.rpn = blankGeneratedRpn(); m.rpnStatus = 'unscored'; });
+                modes.forEach((m: any) => { m.rpn = blankGeneratedRpn(); m.rpnStatus = 'unscored'; applyModeOwnerRules(m); });
                 return modes;
             } catch(e) {
                 lastErr = e;
@@ -2110,6 +2213,7 @@ Return ONLY strict JSON:
                             if (!controlsKnowledgeAvailable) m.currentControls = '';
                             m.rpn = blankGeneratedRpn();
                             m.rpnStatus = 'unscored';
+                            applyModeOwnerRules(m);
                         });
                         return { failureId, modes };
                     })
