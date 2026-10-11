@@ -122,26 +122,66 @@ const buildSiblingSubsystemBlock = (siblings?: string[], noun: string = 'specifi
 const buildSystemDescriptionBlock = (desc?: string): string => {
     const text = (desc || '').trim();
     if (!text) return '';
-    return `\nSYSTEM CONTEXT (operating philosophy, configuration, redundancy and duty of the parent system — use it to establish this subsystem's duty and protective role, not to describe other subsystems):\n"""\n${text}\n"""\n`;
+    return `\nSYSTEM CONTEXT (operating philosophy, configuration, redundancy and duty of the parent system — it describes the whole package; use it only to decide which of its duties THIS subsystem's own hardware performs, never as a list of duties to repeat):\n"""\n${text}\n"""\n`;
+};
+
+// Ownership decides which subsystem a shared duty is written in.
+//
+// A package's control philosophy -- load/unload, duty/standby changeover,
+// start/stop sequencing -- is performed by ONE subsystem's sensors, logic and
+// final elements, but the system context is fed to every subsystem. Without an
+// ownership rule each subsystem restated it as its own: one control loop became
+// functional failures in the driven machine, its driver, every vessel and the
+// panel, and the standby takeover became a hidden function once per subsystem.
+// Passive vessels picked up feedback and buffering duties they have no hardware
+// to perform.
+//
+// The patterns name CLASSES of subsystem, not equipment instances.
+export const CONTROL_OWNER_PATTERN = /\b(control|controls|controller|panel|ucp|plc|dcs|pcs|logic|instrumentation|automation|sgs|esd)\b/i;
+export const PASSIVE_EQUIPMENT_PATTERN = /\b(receiver|vessel|tank|drum|accumulator|reservoir|bottle|piping|pipework|pipeline|header|manifold)\b/i;
+
+/**
+ * Tell the model which subsystem owns the package's shared control and
+ * changeover duties, and that every other subsystem leaves them out.
+ */
+export const buildControlOwnershipBlock = (subsystem?: string, siblings?: string[]): string => {
+    const self = (subsystem || '').trim();
+    if (!self) return '';
+    const names = (siblings || []).map(n => (n || '').trim()).filter(Boolean);
+    const lines: string[] = [];
+    if (CONTROL_OWNER_PATTERN.test(self)) {
+        lines.push(`"${self}" holds the control hardware (sensing, logic, command outputs). The package's control, sequencing, load/unload and standby changeover duties that the system context describes are performed here: state each of them ONCE, in this subsystem.`);
+    } else {
+        const owners = names.filter(n => CONTROL_OWNER_PATTERN.test(n));
+        lines.push(owners.length
+            ? `The package's control, sequencing, load/unload and standby changeover duties are most likely owned by: ${owners.map(n => `"${n}"`).join(', ')}. Leave those duties out of "${self}" -- it only experiences them.`
+            : `No sibling is identifiable as the control subsystem. Include a control, sequencing or changeover duty in "${self}" only if its own hardware performs it.`);
+        if (PASSIVE_EQUIPMENT_PATTERN.test(self)) {
+            lines.push(`"${self}" is passive equipment. Its duties are to store, contain, separate or drain; it has no control duty and provides no feedback or buffering function for a control loop.`);
+        }
+    }
+    return `\nDUTY OWNERSHIP:\n${lines.map(l => `- ${l}`).join('\n')}\n`;
 };
 
 // The function description is the seed for every functional failure, and
-// decomposeFunction mines it for five separate dimensions. A single sentence
-// carries the primary duty only, so containment, protection and standby duties
-// -- where the high-severity functional failures live -- were unrecoverable
-// downstream. The checklist below is a coverage list, not a menu.
-const FUNCTION_DESCRIPTION_TECHNICAL_RULES = `Function description rules:
-- Describe intended operation only. Cover each dimension below that the available context supports, and stay silent on the ones it does not:
-  1. Mission: the value, service, conversion, movement, or storage the subsystem must provide, with its performance standard.
-  2. Controlled performance: variables, setpoints, sequences, or demand response it must maintain.
-  3. Operating envelope: measurable ranges, design ratings, or limits within which operation must stay acceptable.
-  4. Containment: what the subsystem must hold in or keep separated — process fluid, lubricant, pressure, heat.
-  5. Protection and duty: protective functions it must perform, and its operating duty (continuous, standby, lead/lag, load/unload, intermittent) when the system context states one. State the duty as a condition on what the subsystem must deliver — "maintains supply when the duty unit fails", "holds discharge pressure by loading and unloading" — never as a bare arrangement. The duty exists here so a later step can tell which functions are hidden and what their performance standard is; an arrangement written as a deliverable becomes a function that only restates itself.
+// decomposeFunction mines it for functions. It used to demand coverage of five
+// dimensions for every subsystem, including "controlled performance" and
+// "duty (standby, lead/lag, load/unload)" whenever the system context stated
+// one -- which made every subsystem restate the package's control philosophy.
+// Coverage now follows ownership: a subsystem states only what its own
+// hardware does, one sentence per duty.
+export const FUNCTION_DESCRIPTION_TECHNICAL_RULES = `Function description rules:
+- Describe intended operation only, and ONLY the duties this subsystem's own hardware performs.
+- Ownership: a control, sequence, setpoint, load/unload, start/stop, standby or changeover duty belongs to the subsystem that holds the sensing, the logic and the final element that perform it -- usually the control panel, PLC or instrumentation subsystem. Write a shared duty once, in that owner, never in a subsystem that merely experiences its effect.
+- Passive equipment (vessels, receivers, tanks, piping) has no control duty. Its duties are to store, contain, separate or drain; it does not maintain a setpoint, provide feedback, or buffer a control loop.
+- A driven machine that is one unit of a duty/standby pair states its own duty -- its output at rated performance when it runs. The changeover, and maintaining the service when the duty unit fails, belong to the subsystem that commands the start.
+- The system context describes the whole package. Use it to decide which of its duties this subsystem owns; do not repeat the package's operating philosophy.
+- Choose what to state from what this subsystem owns: its mission with performance standard; what it must contain; protective duties its own devices perform; control it performs with its own sensing and logic. Silence on anything it does not own is correct.
 - Write the performance standard as an exact value whenever Specs provides one. If Specs is empty or generic, do not invent numbers; use "required", "specified", or "operating range".
-- Absorbed power, design pressure, design temperature, and set points are ratings, limits, or protection thresholds — never deliverables. Do not write them as something the subsystem "delivers" or "provides".
+- Absorbed power, design pressure, design temperature, and set points are ratings, limits, or protection thresholds -- never deliverables. Do not write them as something the subsystem "delivers" or "provides".
 - Do not include model numbers, serial numbers, or equipment identifiers; they are identity, not function.
 - Do not include functional failures, failure modes, causes, effects, alarms, trips, inspections, PM tasks, controls, mitigations, recommendations, or maintenance wording. A protective function is what the subsystem must do; a trip setting or inspection task is not.
-- Output 2 to 4 plain sentences, no list formatting. Use one sentence per dimension and merge dimensions that read naturally together. Never pad to reach four.`;
+- Output 1 to 3 plain sentences, one per duty the subsystem actually owns, no list formatting. Never pad.`;
 
 // SAE JA1011 5.1 requires every function to be identified, primary and
 // secondary alike, with performance standards quantified where practicable.
@@ -150,7 +190,7 @@ const FUNCTION_DESCRIPTION_TECHNICAL_RULES = `Function description rules:
 // operating envelope -- a performance standard, not a function -- to its own
 // row. Containment and protection carry the highest-severity failures in RCM,
 // so their absence was the single largest coverage gap in the analysis.
-const FUNCTION_BREAKDOWN_TECHNICAL_RULES = `Function breakdown rules (SAE JA1011 5.1):
+export const FUNCTION_BREAKDOWN_TECHNICAL_RULES = `Function breakdown rules (SAE JA1011 5.1):
 - Identify every function the subsystem must perform, primary and secondary alike. Classify each into exactly one class:
   - "primary": the reason the subsystem exists — the value, service, conversion, movement, or storage it delivers.
   - "containment": what it must hold in or keep separated — process fluid, lubricant, pressure, heat.
@@ -162,11 +202,12 @@ const FUNCTION_BREAKDOWN_TECHNICAL_RULES = `Function breakdown rules (SAE JA1011
 - The operating envelope is NOT a function. Put measurable ranges, ratings, and limits in the row's "standard" field, which is where JA1011 puts a performance standard.
 - Equipment condition and integrity expectations are NOT functions. Do not create rows for vibration, wear, corrosion, or overheating — those are failure modes and belong to a later step.
 - A design arrangement is NOT a function. "2 x 100%", duty/standby, lead/lag, N+1, parallel trains, and installed spares describe HOW a duty is met, not what the subsystem does. Write the outcome the arrangement exists to deliver as the function — for a duty/standby pair that outcome is maintaining the service when the duty unit fails — and put the arrangement wording in "standard". A function written as an arrangement produces a functional failure that is only the arrangement restated.
-- Installed standby and redundancy are PROTECTION, not primary. A standby unit exists to take over when the duty unit fails, which is a protective duty on the duty unit's failure and is hidden by nature: nobody finds out it will not start until it is asked to. Class it "protection", mark it hidden, and phrase it as the capability — "be able to maintain supply when the duty unit is unavailable".
+- Installed standby and redundancy are PROTECTION, not primary, and belong ONLY to the subsystem that commands the changeover. A driven unit of a duty/standby pair states its own duty when running; the takeover is not its row. A standby unit exists to take over when the duty unit fails, which is a protective duty on the duty unit's failure and is hidden by nature: nobody finds out it will not start until it is asked to. Class it "protection", mark it hidden, and phrase it as the capability — "be able to maintain supply when the duty unit is unavailable".
 - Duty rotation, wear equalisation, and run-hour balancing are operating strategies, NOT functions. Their failure accelerates wear, which is a cause of other failure modes; it is not a functional failure. Do not create a row for them.
 - A duty that limits, caps, relieves, isolates, or trips is "protection", even when the description states it only as a bare maximum. Control holds a variable at a setpoint during normal running; protection stops an excursion. Classify by what the duty does, not by the grammar of the sentence it appears in, and mark a protective duty hidden when it is exercised only once the process reaches it.
 - A protective function's performance standard is its TRIP or SET POINT, not a design rating and not a performance-table maximum. Where the context offers both a rating and an instrumented setpoint for the same quantity, the setpoint is the standard: it is the value the protective device actually acts on. Take the trip.
 - Include only functions inside the subsystem boundary and supported by the function description, specs, or system context.
+- Ownership: create a control, sequencing, load/unload, standby or changeover row ONLY in the subsystem whose own hardware (sensing, logic, final element) performs it -- usually the control panel, PLC or instrumentation subsystem. Where the description mentions such a duty but a sibling subsystem owns it, the subsystem only experiences it: create no row, even if the description says otherwise. Passive equipment (vessels, receivers, tanks, piping) gets no control row at all.
 - Do not create rows from causes, effects, alarms, inspections, repairs, tests, tags, personnel instructions, or maintenance tasks.
 - Cap the row count by function, not by failure. A function that yields several failed states is still one row.
 
@@ -464,8 +505,20 @@ export function buildBreakdownRows(
     subsystemName: string,
     projectName: string,
     detailLevel: 'normal' | 'detailed' = 'detailed',
+    siblingSubsystems: string[] = [],
 ): RawBreakdownRow[] {
-    const isControlSubsystem = /transmitter|sensor|instrument|control|panel|plc|ucp|pcs|sgs|logic|controller/i.test(`${subsystemName} ${projectName}`);
+    // Tested on the subsystem name alone. It used to include the project name,
+    // so any project whose name contained "instrument", "control" or "panel"
+    // made EVERY subsystem a control subsystem and the monitoring filter below
+    // never fired: passive equipment kept feedback rows it has no hardware for.
+    const isControlSubsystem = /transmitter|sensor|instrument|control|panel|plc|ucp|pcs|sgs|logic|controller/i.test(subsystemName);
+    // Duty ownership (see CONTROL_OWNER_PATTERN). The prompt asks the model to
+    // leave shared control and changeover duties to the subsystem that performs
+    // them; this is the backstop for a description written before that rule,
+    // which still mentions the package's load/unload and standby philosophy.
+    const ownsControl = CONTROL_OWNER_PATTERN.test(subsystemName);
+    const isPassive = !ownsControl && PASSIVE_EQUIPMENT_PATTERN.test(subsystemName);
+    const controlOwnerExists = ownsControl || siblingSubsystems.some(n => CONTROL_OWNER_PATTERN.test(n || ''));
     const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     const textOf = (r: RawBreakdownRow) => compact(`${r.function} ${r.standard} ${r.snippet}`);
     const includesAny = (text: string, terms: RegExp[]) => terms.some(re => re.test(text));
@@ -549,8 +602,19 @@ export function buildBreakdownRows(
         /\b(operate|run|maintain|deliver|supply|provide|contain|control|regulate|protect|store|transfer|generate)\b/.test(compact(fn));
     const isProtectiveFunction = (fn: string) =>
         /\b(protect|limit|relieve|contain|isolate|prevent|restrict|shut|trip|stop)\b/.test(compact(fn));
+    // Duties a package performs once, through its control hardware. Deliberately
+    // excludes setpoint/trip wording: a machine's own protective trip is its duty.
+    const sharedDutyTerms = [/\b(load|unload|loading|unloading|lead lag|standby|stand by|changeover|change over|duty unit|duty standby|auto start|auto restart|sequence|sequencing|cut in|cut out)\b/];
+    const isUnownedDuty = (row: RawBreakdownRow) => {
+        if (ownsControl) return false;
+        if (row.functionClass !== 'control' && row.functionClass !== 'protection') return false;
+        const text = textOf(row);
+        if (isPassive && (row.functionClass === 'control' || includesAny(text, controlTerms))) return true;
+        return (controlOwnerExists || isPassive) && includesAny(text, sharedDutyTerms);
+    };
     const shouldSkip = (row: RawBreakdownRow) => {
         const text = textOf(row);
+        if (isUnownedDuty(row)) return true;
         if (weakOnly.test(row.standard.trim())) return true;
         if (includesAny(text, ppeTerms)) return true;
         if (!/noise|sound|acoustic/i.test(`${subsystemName} ${projectName}`) && isNoiseExposureOnly(text)) return true;
@@ -1518,12 +1582,13 @@ ${formatRule}`;
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
                 ${buildSystemDescriptionBlock((contextData as any).projectDescription)}
                 ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
+                ${buildControlOwnershipBlock(contextData.subsystem, (contextData as any).siblingSubsystems)}
                 The user wrote this Function Description: """${currentText}"""
                 Task: Rewrite and enhance it as a proper Function Description.
                 ${FMECA_HIERARCHY_RULES}
                 ${FMECA_CONCISE_WORDING_RULES}
                 ${FUNCTION_DESCRIPTION_TECHNICAL_RULES}
-                Preserve the user's core meaning and any specific values they provided.
+                Preserve the user's core meaning and any specific values they provided, except duties the ownership rules assign to another subsystem: drop those.
                 Output strictly the description text only.`;
             } else if (isFunctionalFailureField) {
                 corePrompt = `${failureContext}
@@ -1585,6 +1650,7 @@ ${formatRule}`;
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
                 ${buildSystemDescriptionBlock((contextData as any).projectDescription)}
                 ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
+                ${buildControlOwnershipBlock(contextData.subsystem, (contextData as any).siblingSubsystems)}
                 Task: Write a Function Description for the subsystem "${contextData.subsystem}".
                 ${FMECA_HIERARCHY_RULES}
                 ${FMECA_CONCISE_WORDING_RULES}
@@ -3227,7 +3293,8 @@ Return ONLY strict JSON: { "desc": "...", "parameter": "the standardParameters e
         // did not, so a duty delivered through a neighbouring subsystem's hardware
         // (a standby start through the MCC, a changeover through the control system)
         // had nothing to check itself against and became a row here.
-        const siblingBlock = buildSiblingSubsystemBlock(siblingSubsystems, 'functions');
+        const siblingBlock = buildSiblingSubsystemBlock(siblingSubsystems, 'functions')
+            + buildControlOwnershipBlock(subsystemName, siblingSubsystems);
 
         // Without specs the breakdown can only quantify what survived into the
         // function prose, so every standard degraded to "within operating range".
@@ -3257,7 +3324,7 @@ Use this method silently:
 5. Split each standard into its separate measurable requirements. Ask what the standard is really requiring: a flow AND a pressure AND a temperature AND a quality grade are four requirements that fail independently, not one. Record each as a parameter with its bound.
 6. Decide whether each function is evident or hidden. A function is hidden when its failure would not be apparent to operating staff under normal circumstances — standby duties, protective duties, and anything demanded only intermittently.
 7. Treat monitoring references, control architecture, locations, identifiers, and personnel instructions as supporting context, not functions. A protective DUTY is a function; the device performing it is not.
-8. Where the description states a redundancy or duty arrangement, write the OUTCOME it delivers as the function and move the arrangement into the standard. "2 x 100%, one duty one standby, lead/lag" is not a function; "maintain supply when the duty unit fails" is, and it is hidden.
+8. Where the description states a redundancy or duty arrangement AND this subsystem commands the changeover, write the OUTCOME it delivers as the function and move the arrangement into the standard. Where another subsystem commands it, create no row for it here. "2 x 100%, one duty one standby, lead/lag" is not a function; "maintain supply when the duty unit fails" is, and it is hidden.
 9. Merge two functions when they would fail in the same way and produce the same failure.
 10. Before final answer, audit silently:
    - Did I miss a containment or protection function that the specs imply?
@@ -3267,6 +3334,7 @@ Use this method silently:
    - Did I leave a standard qualitative when the Specs held a number?
    - Did I split every standard that holds more than one requirement into separate parameters, WITHOUT promoting design ratings into parameters?
    - Did I mark standby and protective functions as hidden?
+   - Does every control, load/unload, sequencing, standby or changeover row belong to hardware THIS subsystem holds? If a sibling owns it, or this is passive equipment, delete the row.
    - Where the context flagged a CONFLICT covering a value I used, did I keep it as one requirement and note the conflict, rather than treating each conflicting value as its own?
 
 ${detailRule}
@@ -3315,7 +3383,7 @@ Return ONLY this JSON, no prose, no markdown:
                 }))
                 .filter((r: any) => r.function && r.standard);
 
-            return buildBreakdownRows(rawRows, subsystemName, projectName, detailLevel);
+            return buildBreakdownRows(rawRows, subsystemName, projectName, detailLevel, siblingSubsystems);
         } catch {
             return [];
         }
