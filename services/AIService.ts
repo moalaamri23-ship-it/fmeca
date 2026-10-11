@@ -122,68 +122,26 @@ const buildSiblingSubsystemBlock = (siblings?: string[], noun: string = 'specifi
 const buildSystemDescriptionBlock = (desc?: string): string => {
     const text = (desc || '').trim();
     if (!text) return '';
-    return `\nSYSTEM CONTEXT (operating philosophy, configuration, redundancy and duty of the parent system — it describes the whole package; use it only to decide which of its duties THIS subsystem's own hardware performs, never as a list of duties to repeat):\n"""\n${text}\n"""\n`;
-};
-
-// Ownership decides which subsystem a shared duty is written in.
-//
-// A package's control philosophy -- load/unload, duty/standby changeover,
-// start/stop sequencing -- is performed by ONE subsystem's sensors, logic and
-// final elements, but the system context is fed to every subsystem. Without an
-// ownership rule each subsystem restated it as its own: one control loop became
-// functional failures in the driven machine, its driver, every vessel and the
-// panel, and the standby takeover became a hidden function once per subsystem.
-// Passive vessels picked up feedback and buffering duties they have no hardware
-// to perform.
-//
-// The patterns name CLASSES of subsystem, not equipment instances.
-export const CONTROL_OWNER_PATTERN = /\b(control|controls|controller|panel|ucp|plc|dcs|pcs|logic|instrumentation|automation|sgs|esd)\b/i;
-export const PASSIVE_EQUIPMENT_PATTERN = /\b(receiver|vessel|tank|drum|accumulator|reservoir|bottle|piping|pipework|pipeline|header|manifold)\b/i;
-
-/**
- * Tell the model which subsystem owns the package's shared control and
- * changeover duties, and that every other subsystem leaves them out.
- */
-export const buildControlOwnershipBlock = (subsystem?: string, siblings?: string[]): string => {
-    const self = (subsystem || '').trim();
-    if (!self) return '';
-    const names = (siblings || []).map(n => (n || '').trim()).filter(Boolean);
-    const lines: string[] = [];
-    if (CONTROL_OWNER_PATTERN.test(self)) {
-        lines.push(`"${self}" holds the control hardware (sensing, logic, command outputs). The package's control, sequencing, load/unload and standby changeover duties that the system context describes are performed here: state each of them ONCE, in this subsystem.`);
-    } else {
-        const owners = names.filter(n => CONTROL_OWNER_PATTERN.test(n));
-        lines.push(owners.length
-            ? `The package's control, sequencing, load/unload and standby changeover duties are most likely owned by: ${owners.map(n => `"${n}"`).join(', ')}. Leave those duties out of "${self}" -- it only experiences them.`
-            : `No sibling is identifiable as the control subsystem. Include a control, sequencing or changeover duty in "${self}" only if its own hardware performs it.`);
-        if (PASSIVE_EQUIPMENT_PATTERN.test(self)) {
-            lines.push(`"${self}" is passive equipment. Its duties are to store, contain, separate or drain; it has no control duty and provides no feedback or buffering function for a control loop.`);
-        }
-    }
-    return `\nDUTY OWNERSHIP:\n${lines.map(l => `- ${l}`).join('\n')}\n`;
+    return `\nSYSTEM CONTEXT (operating philosophy, configuration, redundancy and duty of the parent system — use it to establish this subsystem's duty and protective role, not to describe other subsystems):\n"""\n${text}\n"""\n`;
 };
 
 // The function description is the seed for every functional failure, and
-// decomposeFunction mines it for functions. It used to demand coverage of five
-// dimensions for every subsystem, including "controlled performance" and
-// "duty (standby, lead/lag, load/unload)" whenever the system context stated
-// one -- which made every subsystem restate the package's control philosophy.
-// Coverage now follows ownership: a subsystem states only what its own
-// hardware does, one sentence per duty.
-export const FUNCTION_DESCRIPTION_TECHNICAL_RULES = `Function description rules:
-- Describe intended operation only, and ONLY the duties this subsystem's own hardware performs.
-- Ownership: a control, sequence, setpoint, load/unload, start/stop, standby or changeover duty belongs to the subsystem that holds the sensing, the logic and the final element that perform it -- usually the control panel, PLC or instrumentation subsystem. Write a shared duty once, in that owner, never in a subsystem that merely experiences its effect.
-- Passive equipment (vessels, receivers, tanks, piping) has no control duty. Its duties are to store, contain, separate or drain; it does not maintain a setpoint, provide feedback, or buffer a control loop. The flow, pressure and temperature of the stream passing through it are set by other equipment and are not its performance standard: state its storage capacity and what it contains.
-- A subsystem that conditions or passes a stream it does not drive (filter, dryer, strainer, heat exchanger, separator) owns only what it changes in that stream -- moisture, particulates, heat transferred -- not the stream's flow, pressure or temperature set by the equipment upstream.
-- Certifications and classifications (hazardous-area, ingress protection, SIL, fire rating) and design ratings are properties, not duties. Do not write them as something the subsystem delivers or maintains.
-- A driven machine that is one unit of a duty/standby pair states its own duty -- its output at rated performance when it runs. The changeover, and maintaining the service when the duty unit fails, belong to the subsystem that commands the start.
-- The system context describes the whole package. Use it to decide which of its duties this subsystem owns; do not repeat the package's operating philosophy.
-- Choose what to state from what this subsystem owns: its mission with performance standard; what it must contain; protective duties its own devices perform; control it performs with its own sensing and logic. Silence on anything it does not own is correct.
+// decomposeFunction mines it for five separate dimensions. A single sentence
+// carries the primary duty only, so containment, protection and standby duties
+// -- where the high-severity functional failures live -- were unrecoverable
+// downstream. The checklist below is a coverage list, not a menu.
+const FUNCTION_DESCRIPTION_TECHNICAL_RULES = `Function description rules:
+- Describe intended operation only. Cover each dimension below that the available context supports, and stay silent on the ones it does not:
+  1. Mission: the value, service, conversion, movement, or storage the subsystem must provide, with its performance standard.
+  2. Controlled performance: variables, setpoints, sequences, or demand response it must maintain.
+  3. Operating envelope: measurable ranges, design ratings, or limits within which operation must stay acceptable.
+  4. Containment: what the subsystem must hold in or keep separated — process fluid, lubricant, pressure, heat.
+  5. Protection and duty: protective functions it must perform, and its operating duty (continuous, standby, lead/lag, load/unload, intermittent) when the system context states one. State the duty as a condition on what the subsystem must deliver — "maintains supply when the duty unit fails", "holds discharge pressure by loading and unloading" — never as a bare arrangement. The duty exists here so a later step can tell which functions are hidden and what their performance standard is; an arrangement written as a deliverable becomes a function that only restates itself.
 - Write the performance standard as an exact value whenever Specs provides one. If Specs is empty or generic, do not invent numbers; use "required", "specified", or "operating range".
-- Absorbed power, design pressure, design temperature, and set points are ratings, limits, or protection thresholds -- never deliverables. Do not write them as something the subsystem "delivers" or "provides".
+- Absorbed power, design pressure, design temperature, and set points are ratings, limits, or protection thresholds — never deliverables. Do not write them as something the subsystem "delivers" or "provides".
 - Do not include model numbers, serial numbers, or equipment identifiers; they are identity, not function.
 - Do not include functional failures, failure modes, causes, effects, alarms, trips, inspections, PM tasks, controls, mitigations, recommendations, or maintenance wording. A protective function is what the subsystem must do; a trip setting or inspection task is not.
-- Output 1 to 3 plain sentences, one per duty the subsystem actually owns, no list formatting. Never pad.`;
+- Output 2 to 4 plain sentences, no list formatting. Use one sentence per dimension and merge dimensions that read naturally together. Never pad to reach four.`;
 
 // SAE JA1011 5.1 requires every function to be identified, primary and
 // secondary alike, with performance standards quantified where practicable.
@@ -192,7 +150,7 @@ export const FUNCTION_DESCRIPTION_TECHNICAL_RULES = `Function description rules:
 // operating envelope -- a performance standard, not a function -- to its own
 // row. Containment and protection carry the highest-severity failures in RCM,
 // so their absence was the single largest coverage gap in the analysis.
-export const FUNCTION_BREAKDOWN_TECHNICAL_RULES = `Function breakdown rules (SAE JA1011 5.1):
+const FUNCTION_BREAKDOWN_TECHNICAL_RULES = `Function breakdown rules (SAE JA1011 5.1):
 - Identify every function the subsystem must perform, primary and secondary alike. Classify each into exactly one class:
   - "primary": the reason the subsystem exists — the value, service, conversion, movement, or storage it delivers.
   - "containment": what it must hold in or keep separated — process fluid, lubricant, pressure, heat.
@@ -202,18 +160,13 @@ export const FUNCTION_BREAKDOWN_TECHNICAL_RULES = `Function breakdown rules (SAE
   - "efficiency": economy or efficiency duties the description explicitly states.
 - Each row is one functional verb plus one object. Do not start with "to" or a gerund.
 - The operating envelope is NOT a function. Put measurable ranges, ratings, and limits in the row's "standard" field, which is where JA1011 puts a performance standard.
-- Certifications and classifications (hazardous-area such as ATEX/IECEx zone, ingress protection, SIL, fire rating) are NOT functions and NOT parameters. They state what the equipment was built to, not what it does; leave them out.
-- Receiving or distributing the subsystem's OWN supply (electrical power, control power, pneumatic or hydraulic supply) is NOT a function. Losing it is a cause of losing the functions it feeds. The exception is a subsystem whose purpose is to supply others (switchboard, MCC, UPS, distribution board, charger).
-- A quality requirement (cleanliness, particle, oil-content or moisture class, purity) is ONE requirement on the row that delivers the conditioned product. The filters, stages or devices that achieve it do not get rows of their own for the same requirement.
-- Passive equipment (vessels, receivers, tanks, piping): its storage row's standard is its capacity. The flow, pressure and temperature of the stream passing through it are set by other equipment and are not parameters of its functions. A subsystem that conditions a stream it does not drive (filter, dryer, strainer, heat exchanger) owns only what it changes in the stream, not the upstream flow, pressure or temperature.
 - Equipment condition and integrity expectations are NOT functions. Do not create rows for vibration, wear, corrosion, or overheating — those are failure modes and belong to a later step.
 - A design arrangement is NOT a function. "2 x 100%", duty/standby, lead/lag, N+1, parallel trains, and installed spares describe HOW a duty is met, not what the subsystem does. Write the outcome the arrangement exists to deliver as the function — for a duty/standby pair that outcome is maintaining the service when the duty unit fails — and put the arrangement wording in "standard". A function written as an arrangement produces a functional failure that is only the arrangement restated.
-- Installed standby and redundancy are PROTECTION, not primary, and belong ONLY to the subsystem that commands the changeover. A driven unit of a duty/standby pair states its own duty when running; the takeover is not its row. A standby unit exists to take over when the duty unit fails, which is a protective duty on the duty unit's failure and is hidden by nature: nobody finds out it will not start until it is asked to. Class it "protection", mark it hidden, and phrase it as the capability — "be able to maintain supply when the duty unit is unavailable".
+- Installed standby and redundancy are PROTECTION, not primary. A standby unit exists to take over when the duty unit fails, which is a protective duty on the duty unit's failure and is hidden by nature: nobody finds out it will not start until it is asked to. Class it "protection", mark it hidden, and phrase it as the capability — "be able to maintain supply when the duty unit is unavailable".
 - Duty rotation, wear equalisation, and run-hour balancing are operating strategies, NOT functions. Their failure accelerates wear, which is a cause of other failure modes; it is not a functional failure. Do not create a row for them.
 - A duty that limits, caps, relieves, isolates, or trips is "protection", even when the description states it only as a bare maximum. Control holds a variable at a setpoint during normal running; protection stops an excursion. Classify by what the duty does, not by the grammar of the sentence it appears in, and mark a protective duty hidden when it is exercised only once the process reaches it.
 - A protective function's performance standard is its TRIP or SET POINT, not a design rating and not a performance-table maximum. Where the context offers both a rating and an instrumented setpoint for the same quantity, the setpoint is the standard: it is the value the protective device actually acts on. Take the trip.
 - Include only functions inside the subsystem boundary and supported by the function description, specs, or system context.
-- Ownership: create a control, sequencing, load/unload, standby or changeover row ONLY in the subsystem whose own hardware (sensing, logic, final element) performs it -- usually the control panel, PLC or instrumentation subsystem. Where the description mentions such a duty but a sibling subsystem owns it, the subsystem only experiences it: create no row, even if the description says otherwise. Passive equipment (vessels, receivers, tanks, piping) gets no control row at all.
 - Do not create rows from causes, effects, alarms, inspections, repairs, tests, tags, personnel instructions, or maintenance tasks.
 - Cap the row count by function, not by failure. A function that yields several failed states is still one row.
 
@@ -274,9 +227,7 @@ Hard rules:
 - "on_demand" is not a direction. Emit it only for a row whose "evidence" is "hidden", where it REPLACES that row's "total" failure -- a hidden function's total loss is discovered on demand. Never emit both "total" and "on_demand" for the same row, and never "on_demand" for an evident function.
 - Use the parameter's own value in the failure text, and make the wording agree with the direction. "partial" reads as below/insufficient, "upper_limit" reads as above/exceeds. A failure tagged "upper_limit" whose text says "below" is a contradiction and will be rejected.
 - When the row has no parameters, the standard is qualitative. Emit total loss only, and do not invent values to enumerate against.
-- Two failures on the same row must differ in parameter or in direction. Identical states reworded are duplicates.
-- A fixed physical property of passive equipment -- storage volume, nameplate capacity, size -- does not degrade by degrees. Its storage function fails only totally (unable to store or hold); never write a "partial" or "below capacity" failure against it.
-- A certification or classification (hazardous-area, ingress protection, SIL) is never a failed state.`;
+- Two failures on the same row must differ in parameter or in direction. Identical states reworded are duplicates.`;
 
 /**
  * Verb forms folded to one stem before a function phrase is used as a key.
@@ -388,90 +339,6 @@ const buildSiblingFailureModeBlock = (siblings: any): string => {
     return `\nSibling failure modes in the same analysis context (exclude barriers that fit these better):\n${rows}`;
 };
 
-// One owner rule set for every place a control or mitigation line is written.
-// It used to exist twice with different wording, and the current-controls wand
-// had a third ("use (Instrument team) for instrument controls"), so the same
-// alarm got an owner in one field and not in the other.
-//
-// A stand-alone alarm, trip, interlock or safety device acts automatically:
-// nobody performs a task, so no team owns the line. A team owns a line only
-// when someone has to do something -- including react to the alarm.
-export const OWNER_ASSIGNMENT_RULES = `Owner assignment (team in parentheses at the end of the line; the first matching rule wins):
-1. Vibration analysis (route survey, spectrum or trend review, online vibration data analysis) → (Condition Monitoring Team). A check for abnormal noise or vibration by sense on a round is NOT vibration analysis: it is an operator check (rule 10).
-2. Oil analysis or oil sampling for analysis → (Operations Team)
-3. An alarm, trip, interlock, shutdown or safety device listed on its own -- the device acts automatically and nobody performs a task → NO owner. Write it with no parentheses: "1- [Tag: TAGNO (Hi-Hi: X unit)]" or "1- High temperature trip [Tag: TAGNO (Hi-Hi: X unit)]".
-4. A task someone performs in response to an alarm or reading ("Clean suction filter when differential pressure reaches Hi-Hi [Tag: TAGNO (Hi-Hi: X unit)]") → the team that performs the task, by the rules below.
-5. Any task on a pressure safety or relief valve (PSV, PRV, safety valve): bench test, recertification, overhaul, inspection, replacement → (PSV team)
-6. Greasing or lubricating an electric motor's bearings → (Mechanical team)
-7. Any other task on an electric motor -- windings, insulation resistance, terminals, cables, current, cleaning, inspection, replacement -- → (Electrical team)
-8. Calibration, loop check, proof test or repair of a sensor, transmitter, switch or instrumented trip → (Instrument team)
-9. Lubrication, alignment, bearing, seal, coupling, mechanical inspection → (Mechanical team)
-10. Operational round, manual monitoring, log, operator check → (Operations Team)
-11. Control system, PLC, SCADA, interlock logic, delay, communication changes → (Automation team)
-Rules 1-7 override checklist section names; otherwise use the checklist section name as owner when the task comes from the checklist.`;
-
-const VIBRATION_ANALYSIS_TASK = /\bvibration\s+(?:analysis|analyses|survey|spectrum|spectra|trend|trending|data\s+analysis)\b/i;
-const SENSORY_ROUND_CHECK = /\b(?:check|listen|look|feel|observe|walk|round|patrol)\b[^()]*\b(?:noise|sound|vibrations?)\b|\babnormal\s+(?:noise|sound|vibrations?)\b/i;
-const PSV_TASK = /\b(psvs?|prvs?|pressure safety valves?|pressure relief valves?|safety relief valves?|relief valves?|safety valves?)\b/i;
-// "Motor control", "motor-operated valve" and "motor-driven pump" name other
-// equipment; the motor is only a qualifier there.
-const ELECTRIC_MOTOR = /\bmotors?\b(?![\s-]*(?:control|operated|driven))/i;
-const MOTOR_GREASING = /\b(grease|greasing|regrease|re-grease|lubricate|lubricating|lubrication)\b/i;
-// Coupling alignment and the coupling itself sit between the motor and the
-// machine; they are a train task, not a motor task.
-const ROUND_CHECK = /\b(rounds?|patrol|walk-?down|operator check|log sheet)\b/i;
-const TRAIN_TASK = /\b(coupling|alignment|align)\b/i;
-const OIL_ANALYSIS_TASK = /\b(?:oil|lube|lubricant)\s+(?:analysis|analyses|sampling|sample)\b/i;
-const OWNER_SUFFIX = /\s*\(([^()]*)\)\s*$/;
-const LOOKS_LIKE_TEAM = /\b(team|crew|dept|department|section|group|operations?|mechanical|instrument|automation|electrical|condition monitoring)\b/i;
-const STANDALONE_DEVICE = /\b(alarm|trip|interlock|shutdown|shut-down|esd|psv|prv|relief valve|safety valve|rupture dis[ck]|bursting dis[ck]|switch|permissive)\b/i;
-// A task line names something someone does; a device line names only the device
-// and the variable it watches. Only a device line loses its owner. Ambiguous
-// words ("set point", "stops the pump") are deliberately not in the list.
-const ACTION_WORD = /\b(?:verify|check|clean|replace|inspect|calibrate|test|proof|perform|carry out|conduct|sample|analy[sz]e|lubricate|grease|align|tighten|record|log|review|install|add|implement|respond|react|drain|change|adjust|monitor|measure|repair|overhaul|reset|investigate|isolate|confirm|ensure|walk|patrol|refill|flush|purge|blow down|torque|retighten|survey|modify|update|configure|train|apply|raise|initiate)\b/i;
-
-/**
- * Enforce the owner rules that can be decided from the line itself: vibration
- * analysis to Condition Monitoring, oil analysis to Operations, and no owner on
- * a stand-alone alarm/trip/safety device. Everything else is left as written.
- */
-export function applyOwnerRules(text: string, subsystemName: string = ''): string {
-    if (!text) return text;
-    // In a motor's own subsystem a line need not say "motor" to be a motor task.
-    const motorSubsystem = /\bmotors?\b/i.test(subsystemName) && !/\b(control|operated|driven|turbine|engine)\b/i.test(subsystemName);
-    return text.split('\n').map(line => {
-        const m = line.match(/^(\s*\d+\s*[-–.)]\s*)(.*)$/);
-        const prefix = m ? m[1] : '';
-        let body = (m ? m[2] : line).trimEnd();
-        if (!body.trim()) return line;
-        const ownerMatch = body.match(OWNER_SUFFIX);
-        const hasOwner = Boolean(ownerMatch && LOOKS_LIKE_TEAM.test(ownerMatch[1]));
-        const withoutOwner = hasOwner ? body.slice(0, ownerMatch!.index).trimEnd() : body;
-        const setOwner = (team: string) => `${prefix}${withoutOwner} (${team})`;
-        if (VIBRATION_ANALYSIS_TASK.test(withoutOwner)) return setOwner('Condition Monitoring Team');
-        // A by-sense noise/vibration check on a round is an operator check. The
-        // model reads "vibration" and hands it to Condition Monitoring anyway.
-        if (hasOwner && /condition monitoring/i.test(ownerMatch![1]) && SENSORY_ROUND_CHECK.test(withoutOwner)) return setOwner('Operations Team');
-        if (OIL_ANALYSIS_TASK.test(withoutOwner)) return setOwner('Operations Team');
-        if (hasOwner) {
-            const words = withoutOwner.replace(/\[Tag:[^\]]*\]/gi, ' ').trim();
-            const tagOnly = !words;
-            const deviceOnly = STANDALONE_DEVICE.test(words) && !ACTION_WORD.test(words) && !/\b(when|on alarm|upon|if)\b/i.test(words);
-            if (tagOnly || deviceOnly) return `${prefix}${withoutOwner}`;
-        }
-        // Only a line someone actually performs gets a team assigned below.
-        const isTask = ACTION_WORD.test(withoutOwner.replace(/\[Tag:[^\]]*\]/gi, ' ')) || hasOwner;
-        if (!isTask) return line;
-        if (PSV_TASK.test(withoutOwner)) return setOwner('PSV team');
-        // A round check stays with Operations even on a motor: the operator does it.
-        if ((motorSubsystem || ELECTRIC_MOTOR.test(withoutOwner)) && !ROUND_CHECK.test(withoutOwner) && !SENSORY_ROUND_CHECK.test(withoutOwner)) {
-            if (MOTOR_GREASING.test(withoutOwner)) return setOwner('Mechanical team');
-            if (!TRAIN_TASK.test(withoutOwner)) return setOwner('Electrical team');
-        }
-        return line;
-    }).join('\n');
-}
-
 const buildModeFieldRules = (controlsKnowledgeAvailable: boolean, generatedLabel = 'THIS generated failure mode'): string => `Field rules per mode:
 - Apply these shared rules to every generated row:
 ${FMECA_HIERARCHY_RULES}
@@ -487,19 +354,14 @@ ${controlsKnowledgeAvailable
 ${LIBRARY_EXAMPLES}`;
 
 const MODE_ACTION_FORMAT_RULES = `Current controls format — return as a numbered string per mode without the words "Existing control":
-"1- [Tag: TAGNO (limit if stated)]" for a stand-alone device, or "1- Action [Tag: TAGNO (limit if stated)] (Owner)\\n2- ..."
+"1- [Tag: TAGNO (limit if stated)] (Owner)" or "1- Action [Tag: TAGNO (limit if stated)] (Owner)\\n2- ..."
 Mitigation format — return as a numbered string per mode:
 "1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."
-${OWNER_ASSIGNMENT_RULES}
+Owner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)
 Use checklist knowledge for PM tasks and reference data for instrument tags and limits only when they pass the failure-mode-specific barrier filter.
 ${FAILURE_MODE_BARRIER_FILTER}`;
 
 const blankGeneratedRpn = () => ({ s: "", o: "", d: "" });
-
-const applyModeOwnerRules = (m: any, subsystemName: string = '') => {
-    if (typeof m?.currentControls === 'string') m.currentControls = applyOwnerRules(m.currentControls, subsystemName);
-    if (typeof m?.mitigation === 'string') m.mitigation = applyOwnerRules(m.mitigation, subsystemName);
-};
 
 export interface AIMessage {
     role: string;
@@ -602,20 +464,8 @@ export function buildBreakdownRows(
     subsystemName: string,
     projectName: string,
     detailLevel: 'normal' | 'detailed' = 'detailed',
-    siblingSubsystems: string[] = [],
 ): RawBreakdownRow[] {
-    // Tested on the subsystem name alone. It used to include the project name,
-    // so any project whose name contained "instrument", "control" or "panel"
-    // made EVERY subsystem a control subsystem and the monitoring filter below
-    // never fired: passive equipment kept feedback rows it has no hardware for.
-    const isControlSubsystem = /transmitter|sensor|instrument|control|panel|plc|ucp|pcs|sgs|logic|controller/i.test(subsystemName);
-    // Duty ownership (see CONTROL_OWNER_PATTERN). The prompt asks the model to
-    // leave shared control and changeover duties to the subsystem that performs
-    // them; this is the backstop for a description written before that rule,
-    // which still mentions the package's load/unload and standby philosophy.
-    const ownsControl = CONTROL_OWNER_PATTERN.test(subsystemName);
-    const isPassive = !ownsControl && PASSIVE_EQUIPMENT_PATTERN.test(subsystemName);
-    const controlOwnerExists = ownsControl || siblingSubsystems.some(n => CONTROL_OWNER_PATTERN.test(n || ''));
+    const isControlSubsystem = /transmitter|sensor|instrument|control|panel|plc|ucp|pcs|sgs|logic|controller/i.test(`${subsystemName} ${projectName}`);
     const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     const textOf = (r: RawBreakdownRow) => compact(`${r.function} ${r.standard} ${r.snippet}`);
     const includesAny = (text: string, terms: RegExp[]) => terms.some(re => re.test(text));
@@ -699,19 +549,8 @@ export function buildBreakdownRows(
         /\b(operate|run|maintain|deliver|supply|provide|contain|control|regulate|protect|store|transfer|generate)\b/.test(compact(fn));
     const isProtectiveFunction = (fn: string) =>
         /\b(protect|limit|relieve|contain|isolate|prevent|restrict|shut|trip|stop)\b/.test(compact(fn));
-    // Duties a package performs once, through its control hardware. Deliberately
-    // excludes setpoint/trip wording: a machine's own protective trip is its duty.
-    const sharedDutyTerms = [/\b(load|unload|loading|unloading|lead lag|standby|stand by|changeover|change over|duty unit|duty standby|auto start|auto restart|sequence|sequencing|cut in|cut out)\b/];
-    const isUnownedDuty = (row: RawBreakdownRow) => {
-        if (ownsControl) return false;
-        if (row.functionClass !== 'control' && row.functionClass !== 'protection') return false;
-        const text = textOf(row);
-        if (isPassive && (row.functionClass === 'control' || includesAny(text, controlTerms))) return true;
-        return (controlOwnerExists || isPassive) && includesAny(text, sharedDutyTerms);
-    };
     const shouldSkip = (row: RawBreakdownRow) => {
         const text = textOf(row);
-        if (isUnownedDuty(row)) return true;
         if (weakOnly.test(row.standard.trim())) return true;
         if (includesAny(text, ppeTerms)) return true;
         if (!/noise|sound|acoustic/i.test(`${subsystemName} ${projectName}`) && isNoiseExposureOnly(text)) return true;
@@ -728,42 +567,7 @@ export function buildBreakdownRows(
     // Vibration, wear, corrosion and overheating are failure modes, not functions,
     // and a row built from them produced a functional failure that was really a
     // mode -- the exact field confusion FMECA_HIERARCHY_RULES forbids elsewhere.
-    // Parameters that describe what the equipment IS rather than what it does.
-    // A certification or a design rating carried as a parameter becomes a
-    // functional failure ("breaches hazardous-area integrity") that is really a
-    // property, and the FF step has no way to tell.
-    const CERTIFICATION = /\b(atex|iecex|hazardous area|zone\s*[012]|ip\s?\d{2}|sil\s?[1-4]|explosion[- ]?proof|ex\s?[deip]\b|fire rating|nema\s?\d+)/i;
-    const DESIGN_RATING = /\bdesign\s+(pressure|temperature)\b|\brating\b|\brated\s+(pressure|temperature)\b/i;
-    const PASS_THROUGH = /\b(flow|flowrate|flow rate|pressure|temperature|throughput|inlet|outlet)\b/i;
-    const FIXED_SIZE = /\b(capacity|volume|size|storage)\b/i;
-    // "Inlet/outlet capacity: 510 Sm3/hr" is a flow whatever it is called; the
-    // unit says so.
-    const RATE_UNIT = /\/\s*(h|hr|hour|min|s|sec|day)\b|\b(scfm|acfm|cfm|gpm|lpm|sm3|nm3|m3h|kg\/h|t\/h)\b|\bper\s+(hour|minute|second|day)\b/i;
-    const SUPPLY_DISTRIBUTOR = /\b(switchboard|switchgear|mcc|motor control cent(er|re)|ups|distribution|transformer|power supply|charger|battery|generator|hydraulic power unit|hpu)\b/i;
-    const isOwnSupplyRow = (row: RawBreakdownRow) =>
-        row.functionClass === 'support'
-        && /\b(power|energi[sz]e|supply|feed)\b/i.test(row.function)
-        && /\b(itself|own|control|instrument\w*|electronics|components|panel|logic|devices?|circuits?)\b/i.test(row.function)
-        && !SUPPLY_DISTRIBUTOR.test(subsystemName);
-    const cleanParameters = (row: RawBreakdownRow): RawBreakdownRow => {
-        let params = (row.standardParameters ?? [])
-            .filter(pp => !CERTIFICATION.test(`${pp.name} ${pp.value}`) && !DESIGN_RATING.test(pp.name));
-        if (isPassive && row.functionClass !== 'containment' && row.functionClass !== 'protection') {
-            params = params
-                .filter(pp => !PASS_THROUGH.test(pp.name) && !RATE_UNIT.test(`${pp.value} ${pp.unit ?? ''}`))
-                // A vessel's volume cannot fall short by degrees; "spec" lets it
-                // fail only as a whole, which is the only way it actually fails.
-                .map(pp => FIXED_SIZE.test(pp.name) ? { ...pp, bound: 'spec' as StandardParameter['bound'] } : pp);
-        }
-        return { ...row, standardParameters: params };
-    };
-    const candidateRows: RawBreakdownRow[] = rawRows
-        .filter(row => !shouldSkip(row))
-        .filter(row => !isOwnSupplyRow(row))
-        // A row that is nothing but a certification ("maintain ATEX Zone 2
-        // integrity") is a property restated as a duty.
-        .filter(row => !(CERTIFICATION.test(row.function) && !(row.standardParameters ?? []).some(pp => !CERTIFICATION.test(`${pp.name} ${pp.value}`))))
-        .map(cleanParameters);
+    const candidateRows: RawBreakdownRow[] = rawRows.filter(row => !shouldSkip(row));
 
     // Bucket by declared JA1011 class so distinct secondary functions are never
     // merged into one another. Two rows only collapse when they share a class
@@ -837,30 +641,6 @@ export function buildBreakdownRows(
     });
 
     bucketOrder.forEach(bucket => addRow(mergeBucket(bucket, buckets.get(bucket)!), bucket));
-    // One quality requirement, one row. When every requirement a row states is a
-    // conformance ("spec") requirement already stated by an earlier row of the
-    // same class, the row is the device that achieves the requirement restated as
-    // a function -- a filter beside the product it cleans -- and yields the same
-    // functional failure twice.
-    // A lone number ("1", "2") would match unrelated classes, so it never counts;
-    // a code such as "16/14/11" does.
-    const specKey = (pp: StandardParameter) => {
-        const key = compact(`${pp.value} ${pp.unit ?? ''}`);
-        return /[a-z]/i.test(key) || key.includes(' ') ? key : `#${pp.name}#${key}`;
-    };
-    // "class 1" and "iso 8573 1 class 1" are the same requirement written twice.
-    const sameSpec = (a: string, b: string) => a === b || ` ${a} `.includes(` ${b} `) || ` ${b} `.includes(` ${a} `);
-    for (let i = rows.length - 1; i >= 0; i--) {
-        const params = rows[i].standardParameters ?? [];
-        if (!params.length || !params.every(pp => pp.bound === 'spec')) continue;
-        if (rows[i].functionClass === 'containment') continue;
-        const coveredBy = rows.find((other, j) => j !== i
-            && other.functionClass === rows[i].functionClass
-            && (other.standardParameters?.length ?? 0) >= params.length
-            && (j < i || (other.standardParameters?.length ?? 0) > params.length)
-            && params.every(pp => (other.standardParameters ?? []).some(op => op.bound === 'spec' && sameSpec(specKey(op), specKey(pp)))));
-        if (coveredBy) rows.splice(i, 1);
-    }
     if (rows.length > maxRows) {
         // Say what was dropped. A subsystem with more real duties than the cap
         // silently lost the tail, and the survivors read as a complete answer.
@@ -870,45 +650,6 @@ export function buildBreakdownRows(
         );
     }
     return rows.slice(0, maxRows);
-}
-
-// A driver and the machine it drives fail differently -- windings, insulation
-// and motor bearings against seals, rotors and wear parts -- and are maintained
-// by different trades, so JA1011 analysis keeps them apart. The structure prompt
-// says so; this is the backstop for a model that still returns "Pump and Motor".
-// The driver must be the head noun of its part: "Drive Motor" and "Gas Turbine"
-// are drivers, "Motor Control Center" and "Engine Cooling" are not.
-const DRIVER_TERMS = /\b(motor|turbine|engine|driver)s?(?:\s+(?:assembly|unit))?$/i;
-const DRIVER_SPEC_KEY = /\b(motor|voltage|current|frequency|insulation|enclosure|ip|poles?|starter|starting|vfd|winding|frame size|service factor|efficiency class)\b/i;
-const COMBINED_NAME_SPLIT = /\s+(?:and|&|\+|with)\s+|\s*\/\s*/i;
-
-/**
- * Split any subsystem whose name joins a driver to the machine it drives
- * ("Pump and Motor", "Compressor & Drive Motor") into one subsystem each.
- * Spec pairs whose key belongs to the driver move with it; the rest stay with
- * the driven machine. Any other subsystem passes through untouched.
- */
-export function splitCombinedDriverSubsystems<T extends { name?: string; specs?: string }>(subsystems: T[]): T[] {
-    const out: T[] = [];
-    for (const sub of subsystems || []) {
-        const name = String(sub?.name || '').trim();
-        const parts = name.split(COMBINED_NAME_SPLIT).map(p => p.trim()).filter(Boolean);
-        const driverParts = parts.filter(p => DRIVER_TERMS.test(p));
-        const drivenParts = parts.filter(p => !DRIVER_TERMS.test(p));
-        if (parts.length < 2 || !driverParts.length || !drivenParts.length) {
-            out.push(sub);
-            continue;
-        }
-        const pairs = String(sub?.specs || '').split(/,(?![^()]*\))/).map(p => p.trim()).filter(Boolean);
-        const isDriverPair = (pair: string) => DRIVER_SPEC_KEY.test(pair.split(':')[0] || '');
-        const driverSpecs = pairs.filter(isDriverPair).join(', ');
-        const drivenSpecs = pairs.filter(p => !isDriverPair(p)).join(', ');
-        // A bare "Motor" says nothing about what it drives; name it for its duty.
-        const nameDriver = (p: string) => /^(motor|electric motor|e-motor)$/i.test(p) ? `${drivenParts.join(' and ')} Drive Motor` : p;
-        out.push({ ...sub, name: drivenParts.join(' and '), specs: drivenSpecs });
-        for (const d of driverParts) out.push({ ...sub, name: nameDriver(d), specs: driverSpecs, func: '' } as T);
-    }
-    return out;
 }
 
 export const AIService = {
@@ -1546,7 +1287,7 @@ export const AIService = {
         return points >= 6 ? 'high' : points >= 3 ? 'medium' : 'low';
     },
 
-    cleanNumberedActionList(text: string, subsystemName: string = ''): string {
+    cleanNumberedActionList(text: string): string {
         const lines = (text || '')
             .replace(/```[a-zA-Z]*\s*/g, '')
             .replace(/```/g, '')
@@ -1576,7 +1317,7 @@ export const AIService = {
                 .replace(/^(?:existing|current)\s+controls?\s*[:\-]?\s*/i, '')
                 .replace(/\s+/g, ' ')
                 .trim();
-            return applyOwnerRules(`${i + 1}- ${cleaned}`, subsystemName);
+            return `${i + 1}- ${cleaned}`;
         }).join('\n');
     },
 
@@ -1591,9 +1332,9 @@ export const AIService = {
      * instead usually wraps it in the numbered format it was also given, which
      * `cleanNumberedActionList` would otherwise keep, so that shape is caught too.
      */
-    cleanControlsList(text: string, subsystemName: string = ''): string {
+    cleanControlsList(text: string): string {
         if (/<\s*no_evidence\s*\/?\s*>/i.test(text || '')) return '';
-        const cleaned = this.cleanNumberedActionList(text, subsystemName);
+        const cleaned = this.cleanNumberedActionList(text);
         const lines = cleaned.split('\n').filter(Boolean);
         if (!lines.length) return '';
         // A real control names a tag or an owning team; a narrated null answer names neither.
@@ -1655,9 +1396,8 @@ ${existingNote}Task: List ONLY existing controls that are currently deployed for
 ${FMECA_HIERARCHY_RULES}
 ${FMECA_CONCISE_WORDING_RULES}
 Include:
-- Relevant PM/checklist tasks that directly prevent the stated cause, detect the stated cause, detect this mode's specific failure signature, or limit the stated effect.
-- Deployed instrument/protection controls from the reference data, such as temperature, pressure, level, flow, vibration, speed, differential pressure, alarms, trips, interlocks, shutdowns, transmitters, switches, or monitoring points. Include tag numbers and alarm/trip limits when stated.
-${OWNER_ASSIGNMENT_RULES}
+- Relevant PM/checklist tasks that directly prevent the stated cause, detect the stated cause, detect this mode's specific failure signature, or limit the stated effect. Use the checklist section name as owner.
+- Deployed instrument/protection controls from the reference data, such as temperature, pressure, level, flow, vibration, speed, differential pressure, alarms, trips, interlocks, shutdowns, transmitters, switches, or monitoring points. Include tag numbers and alarm/trip limits when stated. Use (Instrument team) for instrument controls unless the source states another owner.
 Rules:
 - Match controls to THIS Functional Failure + Failure Mode + Cause + Effect only.
 - Do NOT include tasks for sibling failure modes in the checklist.
@@ -1666,11 +1406,11 @@ Rules:
 - If nothing is evidenced for this failure mode, reply with exactly <no_evidence/> and nothing else. Do not describe the absence in words.
 ${FAILURE_MODE_BARRIER_FILTER}
 Output contract:
-- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)]" (no owner) for a stand-alone device, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when someone performs a task.
+- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
 - Never write the words "Existing control".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const controlsOutputContract = `FINAL OUTPUT CONTRACT:
-- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)]" (no owner) for a stand-alone device, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when someone performs a task.
+- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
 - Never write the words "Existing control".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const controlsContent = controlsPrompt + '\n\n' + controlsOutputContract;
@@ -1686,7 +1426,7 @@ Output contract:
                 apiKey: key,
                 responseFormat: 'text'
             });
-            return this.cleanControlsList(controlsRes, contextData.subsystem || '');
+            return this.cleanControlsList(controlsRes);
         }
         // --- END CURRENT CONTROLS SPECIALIST ---
 
@@ -1715,9 +1455,9 @@ Output contract:
                 : d <= 3
                 ? `Detection is already good (D=${d}/10). Focus on preventive maintenance actions.`
                 : `Detection score is moderate (D=${d}/10). Balance preventive tasks with detection controls.`;
-            const ownerRules = OWNER_ASSIGNMENT_RULES;
+            const ownerRules = `Owner assignment (add team in parentheses after each action):\n- Sensor, transmitter, switch, monitor, level/pressure/vibration/flow tag → (Instrument team)\n- Lubrication, alignment, bearing, seal, coupling, mechanical inspection → (Mechanical team)\n- Control system, PLC, SCADA, interlock, delay, communication → (Automation team)\n- Operational round, manual monitoring, log, operator check → (Operation team)`;
             const formatRule = `Output contract:
-- Return ONLY numbered lines in this exact form: "1- Action description [Tag: TAGNO (Hi: X unit, Hi-Hi: Y unit) if applicable] (Owner)". Omit "(Owner)" only for a stand-alone alarm, trip or safety device, per the owner rules.
+- Return ONLY numbered lines in this exact form: "1- Action description [Tag: TAGNO (Hi: X unit, Hi-Hi: Y unit) if applicable] (Owner)".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const existingNote = currentText?.trim() ? `Existing mitigations to enhance and expand:\n"""${currentText}"""\n` : '';
             const controlsCovered = (contextData.currentControls as string)?.trim()
@@ -1769,7 +1509,7 @@ ${formatRule}`;
                 apiKey: key,
                 responseFormat: 'text'
             });
-            return this.cleanNumberedActionList(mitigationRes, contextData.subsystem || '');
+            return this.cleanNumberedActionList(mitigationRes);
         }
         // --- END MITIGATION SPECIALIST ---
 
@@ -1778,13 +1518,12 @@ ${formatRule}`;
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
                 ${buildSystemDescriptionBlock((contextData as any).projectDescription)}
                 ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
-                ${buildControlOwnershipBlock(contextData.subsystem, (contextData as any).siblingSubsystems)}
                 The user wrote this Function Description: """${currentText}"""
                 Task: Rewrite and enhance it as a proper Function Description.
                 ${FMECA_HIERARCHY_RULES}
                 ${FMECA_CONCISE_WORDING_RULES}
                 ${FUNCTION_DESCRIPTION_TECHNICAL_RULES}
-                Preserve the user's core meaning and any specific values they provided, except duties the ownership rules assign to another subsystem: drop those.
+                Preserve the user's core meaning and any specific values they provided.
                 Output strictly the description text only.`;
             } else if (isFunctionalFailureField) {
                 corePrompt = `${failureContext}
@@ -1846,7 +1585,6 @@ ${formatRule}`;
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
                 ${buildSystemDescriptionBlock((contextData as any).projectDescription)}
                 ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
-                ${buildControlOwnershipBlock(contextData.subsystem, (contextData as any).siblingSubsystems)}
                 Task: Write a Function Description for the subsystem "${contextData.subsystem}".
                 ${FMECA_HIERARCHY_RULES}
                 ${FMECA_CONCISE_WORDING_RULES}
@@ -1948,7 +1686,6 @@ ${formatRule}`;
         ${FMECA_HIERARCHY_RULES}
         ${FMECA_CONCISE_WORDING_RULES}
         Identify the critical Subsystems for a formal FMECA. Scale the count to the system's complexity and criticality (simple package: 3-4, complex train: up to 8).
-        Every driver -- electric motor, turbine, engine -- is a subsystem of its own, separate from the machine it drives. Never combine a driver with the driven machine in one subsystem (not "Pump and Motor", not "Compressor and Drive Motor"); they fail differently and are maintained by different trades.
         For each subsystem, generate 'specs' using format "Key: Value Unit, Key: Value Unit" only when exact specs are present in the system description or reference data. Do not invent realistic values. If no exact specs are available for a subsystem, return an empty string for specs.
         Output strictly valid JSON object:
         { "subsystems": [ {
@@ -1975,7 +1712,7 @@ ${formatRule}`;
                 responseFormat: 'json'
             });
             const parsed = this.extractJSON(res);
-            return splitCombinedDriverSubsystems(parsed.subsystems || []);
+            return parsed.subsystems || [];
         } catch(e) { return []; }
     },
 
@@ -2024,7 +1761,7 @@ ${formatRule}`;
                 if (!modes.length) throw new Error('mode-generation: empty result');
                 // currentControls require checklist/reference evidence — forced empty otherwise.
                 if (!controlsKnowledgeAvailable) modes.forEach((m: any) => { m.currentControls = ''; });
-                modes.forEach((m: any) => { m.rpn = blankGeneratedRpn(); m.rpnStatus = 'unscored'; applyModeOwnerRules(m, subName); });
+                modes.forEach((m: any) => { m.rpn = blankGeneratedRpn(); m.rpnStatus = 'unscored'; });
                 return modes;
             } catch(e) {
                 lastErr = e;
@@ -2307,7 +2044,6 @@ Return ONLY strict JSON:
                             if (!controlsKnowledgeAvailable) m.currentControls = '';
                             m.rpn = blankGeneratedRpn();
                             m.rpnStatus = 'unscored';
-                            applyModeOwnerRules(m, subName);
                         });
                         return { failureId, modes };
                     })
@@ -3491,8 +3227,7 @@ Return ONLY strict JSON: { "desc": "...", "parameter": "the standardParameters e
         // did not, so a duty delivered through a neighbouring subsystem's hardware
         // (a standby start through the MCC, a changeover through the control system)
         // had nothing to check itself against and became a row here.
-        const siblingBlock = buildSiblingSubsystemBlock(siblingSubsystems, 'functions')
-            + buildControlOwnershipBlock(subsystemName, siblingSubsystems);
+        const siblingBlock = buildSiblingSubsystemBlock(siblingSubsystems, 'functions');
 
         // Without specs the breakdown can only quantify what survived into the
         // function prose, so every standard degraded to "within operating range".
@@ -3522,7 +3257,7 @@ Use this method silently:
 5. Split each standard into its separate measurable requirements. Ask what the standard is really requiring: a flow AND a pressure AND a temperature AND a quality grade are four requirements that fail independently, not one. Record each as a parameter with its bound.
 6. Decide whether each function is evident or hidden. A function is hidden when its failure would not be apparent to operating staff under normal circumstances — standby duties, protective duties, and anything demanded only intermittently.
 7. Treat monitoring references, control architecture, locations, identifiers, and personnel instructions as supporting context, not functions. A protective DUTY is a function; the device performing it is not.
-8. Where the description states a redundancy or duty arrangement AND this subsystem commands the changeover, write the OUTCOME it delivers as the function and move the arrangement into the standard. Where another subsystem commands it, create no row for it here. "2 x 100%, one duty one standby, lead/lag" is not a function; "maintain supply when the duty unit fails" is, and it is hidden.
+8. Where the description states a redundancy or duty arrangement, write the OUTCOME it delivers as the function and move the arrangement into the standard. "2 x 100%, one duty one standby, lead/lag" is not a function; "maintain supply when the duty unit fails" is, and it is hidden.
 9. Merge two functions when they would fail in the same way and produce the same failure.
 10. Before final answer, audit silently:
    - Did I miss a containment or protection function that the specs imply?
@@ -3532,7 +3267,6 @@ Use this method silently:
    - Did I leave a standard qualitative when the Specs held a number?
    - Did I split every standard that holds more than one requirement into separate parameters, WITHOUT promoting design ratings into parameters?
    - Did I mark standby and protective functions as hidden?
-   - Does every control, load/unload, sequencing, standby or changeover row belong to hardware THIS subsystem holds? If a sibling owns it, or this is passive equipment, delete the row.
    - Where the context flagged a CONFLICT covering a value I used, did I keep it as one requirement and note the conflict, rather than treating each conflicting value as its own?
 
 ${detailRule}
@@ -3581,7 +3315,7 @@ Return ONLY this JSON, no prose, no markdown:
                 }))
                 .filter((r: any) => r.function && r.standard);
 
-            return buildBreakdownRows(rawRows, subsystemName, projectName, detailLevel, siblingSubsystems);
+            return buildBreakdownRows(rawRows, subsystemName, projectName, detailLevel);
         } catch {
             return [];
         }
