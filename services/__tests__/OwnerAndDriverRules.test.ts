@@ -52,8 +52,9 @@ describe('applyOwnerRules', () => {
     it('keeps the owner on a task performed on a safety device', () => {
         const line = '1- Proof test high temperature trip [Tag: TT-101] (Instrument team)';
         expect(applyOwnerRules(line)).toBe(line);
-        const psv = '2- Bench test relief valve at set pressure (Mechanical team)';
-        expect(applyOwnerRules(psv)).toBe(psv);
+        // PSV work belongs to the PSV team (see TeamsAndAuxSpecs.test.ts).
+        expect(applyOwnerRules('2- Bench test relief valve at set pressure (Mechanical team)'))
+            .toBe('2- Bench test relief valve at set pressure (PSV team)');
     });
 
     it('leaves ordinary tasks alone', () => {
