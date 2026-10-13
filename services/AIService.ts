@@ -1,4 +1,4 @@
-import { ContextData, FunctionClass, FailedStateType, StandardParameter } from '../types';
+import { ContextData, FunctionClass, FailedStateType, StandardParameter, OperatingContext, SystemFunctionPlan, SubsystemPlan, PlannedDuty, ReceivedProperty } from '../types';
 import { RICH_LIBRARY } from '../constants';
 import { buildCopilotPrompt, parseCopilotReply, getCopilotSessionId } from './copilotHelper';
 import {
@@ -115,6 +115,176 @@ const buildSiblingSubsystemBlock = (siblings?: string[], noun: string = 'specifi
     if (!names.length) return '';
     return `\nOTHER SUBSYSTEMS IN THIS PROJECT (their ${noun} belong to them, not to the subsystem being generated — do not include them):\n${names.map(n => `- ${n}`).join('\n')}\n`;
 };
+
+const normalizeSubsystemName = (s: string) => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+const PLAN_FUNCTION_CLASSES: FunctionClass[] = ['primary', 'containment', 'protection', 'control', 'support', 'efficiency'];
+
+/**
+ * Validate the model's function plan against the subsystems MasterGen actually
+ * created.
+ *
+ * The plan never adds, drops or renames a subsystem: an entry whose name does
+ * not match one of `subsystemNames` is discarded, and the names are rewritten
+ * to the exact MasterGen spelling so later lookups by name succeed. A subsystem
+ * the model left out simply has no entry and falls back to the sibling-names
+ * path, which is the pre-plan behaviour.
+ */
+export function parseSystemFunctionPlan(raw: any, subsystemNames: string[]): SystemFunctionPlan | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const byKey = new Map(subsystemNames.map(n => [normalizeSubsystemName(n), n]));
+    const resolve = (name: any): string | undefined => byKey.get(normalizeSubsystemName(String(name ?? '')));
+    const strList = (v: any): string[] => Array.isArray(v) ? v.map(x => String(x ?? '').trim()).filter(Boolean) : [];
+
+    const seen = new Set<string>();
+    const subsystems: SubsystemPlan[] = [];
+    for (const s of Array.isArray(raw.subsystems) ? raw.subsystems : []) {
+        const name = resolve(s?.name);
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        const duties: PlannedDuty[] = (Array.isArray(s?.duties) ? s.duties : [])
+            .map((d: any) => {
+                const fn = String(d?.function ?? '').trim();
+                const cls = String(d?.functionClass ?? '').trim().toLowerCase() as FunctionClass;
+                return {
+                    function: fn,
+                    functionClass: PLAN_FUNCTION_CLASSES.includes(cls) ? cls : 'primary',
+                    evidence: String(d?.evidence ?? '').trim().toLowerCase() === 'hidden' ? 'hidden' : 'evident',
+                    standardSource: String(d?.standardSource ?? '').trim(),
+                } as PlannedDuty;
+            })
+            .filter((d: PlannedDuty) => d.function);
+        const receives: ReceivedProperty[] = (Array.isArray(s?.receives) ? s.receives : [])
+            .map((r: any) => ({ property: String(r?.property ?? '').trim(), owner: resolve(r?.owner) ?? String(r?.owner ?? '').trim() }))
+            .filter((r: ReceivedProperty) => r.property);
+        subsystems.push({
+            name,
+            includes: strList(s?.includes),
+            excludes: strList(s?.excludes),
+            changes: strList(s?.changes),
+            receives,
+            duties,
+            specs: String(s?.specs ?? '').trim(),
+        });
+    }
+    if (!subsystems.length) return null;
+
+    const systemDuties = (Array.isArray(raw.systemDuties) ? raw.systemDuties : [])
+        .map((d: any) => ({ duty: String(d?.duty ?? '').trim(), owner: resolve(d?.owner) ?? '' }))
+        .filter((d: { duty: string; owner: string }) => d.duty && d.owner);
+
+    return { createdAt: new Date().toISOString(), subsystems, systemDuties };
+}
+
+export function findSubsystemPlan(plan: SystemFunctionPlan | undefined | null, subsystemName: string): SubsystemPlan | undefined {
+    if (!plan) return undefined;
+    const key = normalizeSubsystemName(subsystemName);
+    return plan.subsystems.find(s => normalizeSubsystemName(s.name) === key);
+}
+
+/**
+ * Render one subsystem's plan entry for the function, breakdown and FF prompts.
+ *
+ * It replaces the sibling-names block. That block told an isolated subsystem
+ * to leave out content belonging to siblings it had never been shown; this one
+ * states what was decided with the whole system in view. Returns '' when the
+ * subsystem has no entry, so the caller falls back to the sibling names.
+ */
+export function buildAllocationBlock(plan: SystemFunctionPlan | undefined | null, subsystemName: string): string {
+    const entry = findSubsystemPlan(plan, subsystemName);
+    if (!plan || !entry) return '';
+    const self = normalizeSubsystemName(entry.name);
+    const lines: string[] = [];
+    lines.push(`SYSTEM FUNCTION ALLOCATION for "${entry.name}" (decided once with the whole system in view; where the system context reads otherwise, this allocation wins):`);
+    if (entry.includes.length) lines.push(`- Inside this boundary: ${entry.includes.join('; ')}`);
+    if (entry.excludes.length) lines.push(`- Outside this boundary (belongs to another subsystem): ${entry.excludes.join('; ')}`);
+    if (entry.changes.length) lines.push(`- Properties this subsystem changes or delivers: ${entry.changes.join('; ')}`);
+    if (entry.duties.length) {
+        lines.push(`- Duties this subsystem owns:`);
+        entry.duties.forEach(d => lines.push(`  - ${d.function} [${d.functionClass}, ${d.evidence}]${d.standardSource ? ` (standard: ${d.standardSource})` : ''}`));
+    }
+    if (entry.receives.length) {
+        lines.push(`- Passes through or consumes, owned elsewhere. Not this subsystem's performance, so no function or functional failure of its own:`);
+        entry.receives.forEach(r => lines.push(`  - ${r.property}${r.owner ? ` (owned by ${r.owner})` : ''}`));
+    }
+    const elsewhere = plan.systemDuties.filter(d => normalizeSubsystemName(d.owner) !== self);
+    if (elsewhere.length) {
+        lines.push(`- System duties owned by other subsystems. This subsystem only experiences them:`);
+        elsewhere.forEach(d => lines.push(`  - ${d.duty} (owned by ${d.owner})`));
+    }
+    return `\n${lines.join('\n')}\n`;
+}
+
+/** One subsystem's allocation, as the breakdown step needs it: the prompt block and the owned duties. */
+export interface SubsystemAllocation {
+    block: string;
+    duties: string[];
+}
+
+export function allocationFor(plan: SystemFunctionPlan | undefined | null, subsystemName: string): SubsystemAllocation | null {
+    const entry = findSubsystemPlan(plan, subsystemName);
+    const block = buildAllocationBlock(plan, subsystemName);
+    if (!entry || !block) return null;
+    return { block, duties: entry.duties.map(d => d.function) };
+}
+
+const DUTY_STOPWORDS = new Set(['the', 'a', 'an', 'of', 'to', 'and', 'or', 'in', 'on', 'at', 'for', 'from', 'with', 'within', 'by', 'its', 'when', 'into', 'as']);
+const dutyTokens = (s: string): string[] => String(s || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(FUNCTION_VERB_PATTERN, m => FUNCTION_VERB_FORMS[m.toLowerCase()] || m)
+    .split(' ')
+    .filter(t => t && !DUTY_STOPWORDS.has(t));
+
+/** Which owned duty a row's claimed duty names, or -1. Tolerates rewording, not a different duty. */
+export function matchAllocatedDuty(claimed: string, duties: string[]): number {
+    const c = dutyTokens(claimed);
+    if (!c.length) return -1;
+    const cs = new Set(c);
+    let best = -1, bestScore = 0;
+    duties.forEach((d, i) => {
+        const dt = dutyTokens(d);
+        if (!dt.length) return;
+        const shared = new Set(dt.filter(t => cs.has(t))).size;
+        // Overlap against the SHORTER phrase, so a row that names a duty in fewer
+        // words still matches it; two shared words minimum, so one generic word
+        // ("drive", "supply") never ties a row to a duty on its own.
+        if (shared < Math.min(2, dt.length, c.length)) return;
+        const score = shared / Math.min(new Set(dt).size, cs.size);
+        if (score > bestScore) { bestScore = score; best = i; }
+    });
+    return bestScore >= 0.6 ? best : -1;
+}
+
+/**
+ * With a system function plan, the plan's owned duties define the row set and
+ * the function description only supplies their standards.
+ *
+ * The description step still restates whatever the package description says --
+ * a driver of a duty/standby pair writes "provides standby capacity when the
+ * running unit stops" because the description rules ask every subsystem for its
+ * operating duty -- and the breakdown faithfully turned that sentence into a
+ * hidden row the plan had given to a different subsystem. Each row's function
+ * must be an owned duty's wording; a row whose function matches none is dropped,
+ * and the drop is reported.
+ *
+ * `duty` is the row's OWN function text. A separate "which duty is this" field
+ * was tried first and the model filled it with an owned duty for every row,
+ * including the standby row it was meant to catch.
+ *
+ * If NO row matches, the model ignored the instruction rather than the plan, so
+ * every row is kept: failing open loses nothing that worked before.
+ */
+export function keepAllocatedRows<T>(rows: Array<{ row: T; duty: string }>, duties: string[], subsystemName: string): T[] {
+    if (!duties.length || !rows.length) return rows.map(r => r.row);
+    const matched = rows.map(r => matchAllocatedDuty(r.duty, duties));
+    if (matched.every(m => m < 0)) return rows.map(r => r.row);
+    const dropped = rows.filter((_, i) => matched[i] < 0);
+    if (dropped.length) {
+        console.warn(`[decomposeFunction] "${subsystemName}": ${dropped.length} row(s) dropped as not allocated to this subsystem.`, dropped.map(d => d.duty || '(no duty named)'));
+    }
+    return rows.filter((_, i) => matched[i] >= 0).map(r => r.row);
+}
 
 // The Context field carries operating philosophy: redundancy, standby/lead-lag
 // duty, and control behaviour. Without it a standby unit reads as a continuous
@@ -464,8 +634,21 @@ export function buildBreakdownRows(
     subsystemName: string,
     projectName: string,
     detailLevel: 'normal' | 'detailed' = 'detailed',
+    /**
+     * True when the rows were kept because they match duties a system function
+     * plan allocated to this subsystem. The plan decided ownership with the whole
+     * system in view, so the device and monitoring keyword skips below -- which
+     * guess the same thing from words in the subsystem name -- do not override it.
+     * A metering subsystem lost its one allocated duty, reporting to the DCS, to
+     * the monitoring skip because its name carried no control keyword.
+     */
+    allocated: boolean = false,
 ): RawBreakdownRow[] {
-    const isControlSubsystem = /transmitter|sensor|instrument|control|panel|plc|ucp|pcs|sgs|logic|controller/i.test(`${subsystemName} ${projectName}`);
+    // Tested on the subsystem name alone. MasterGen passes the whole package
+    // description as projectName, and any description mentioning a control panel
+    // or an "instrument" service made every subsystem a control subsystem, which
+    // switched off the monitoring and safeguard skips below for all of them.
+    const isControlSubsystem = /transmitter|sensor|instrument|control|panel|plc|ucp|pcs|sgs|logic|controller/i.test(subsystemName);
     const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     const textOf = (r: RawBreakdownRow) => compact(`${r.function} ${r.standard} ${r.snippet}`);
     const includesAny = (text: string, terms: RegExp[]) => terms.some(re => re.test(text));
@@ -554,11 +737,19 @@ export function buildBreakdownRows(
         if (weakOnly.test(row.standard.trim())) return true;
         if (includesAny(text, ppeTerms)) return true;
         if (!/noise|sound|acoustic/i.test(`${subsystemName} ${projectName}`) && isNoiseExposureOnly(text)) return true;
+        // A row the model declared "protection" is never dropped by a keyword. These
+        // filters exist to remove rows describing a device or a monitoring point, and
+        // which subsystems they applied to was decided by keywords in the subsystem
+        // NAME: a leak-detection subsystem whose name happened to lack "instrument"
+        // or "control" lost its alarm duty -- a hidden protective function, exactly
+        // the kind the analysis must keep -- with no warning.
+        const declaredProtection = row.functionClass === 'protection';
         // A relief or isolation DUTY is a protection function under JA1011 5.1 and
         // must survive; only a row describing the device itself is dropped. The
         // blanket skip here was what erased overpressure-limiting failures.
-        if (!isControlSubsystem && includesAny(text, safeguardTerms) && !isProtectiveFunction(row.function)) return true;
-        if (!isControlSubsystem && includesAny(text, monitoringTerms)) return true;
+        if (allocated) return false;
+        if (!declaredProtection && !isControlSubsystem && includesAny(text, safeguardTerms) && !isProtectiveFunction(row.function)) return true;
+        if (!declaredProtection && !isControlSubsystem && includesAny(text, monitoringTerms)) return true;
         if (includesAny(text, designOnlyTerms) && !isFunctionalVerb(row.function)) return true;
         return false;
     };
@@ -1517,7 +1708,7 @@ ${formatRule}`;
             if (isFunctionDescriptionField) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
                 ${buildSystemDescriptionBlock((contextData as any).projectDescription)}
-                ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
+                ${contextData.allocationBlock || buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
                 The user wrote this Function Description: """${currentText}"""
                 Task: Rewrite and enhance it as a proper Function Description.
                 ${FMECA_HIERARCHY_RULES}
@@ -1584,8 +1775,9 @@ ${formatRule}`;
             if (isFunctionDescriptionField) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
                 ${buildSystemDescriptionBlock((contextData as any).projectDescription)}
-                ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
-                Task: Write a Function Description for the subsystem "${contextData.subsystem}".
+                ${contextData.allocationBlock || buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
+                Task: Write a Function Description for the subsystem "${contextData.subsystem}".${contextData.allocationBlock ? `
+                Describe the duties the allocation gives this subsystem, and nothing it lists as passing through, owned elsewhere, or outside the boundary. Each dimension of the rules below applies only as far as an owned duty supports it.` : ''}
                 ${FMECA_HIERARCHY_RULES}
                 ${FMECA_CONCISE_WORDING_RULES}
                 ${FUNCTION_DESCRIPTION_TECHNICAL_RULES}
@@ -1716,6 +1908,118 @@ ${formatRule}`;
         } catch(e) { return []; }
     },
 
+    /**
+     * Allocate the system's functions to its subsystems, once, before the
+     * subsystems are generated in parallel.
+     *
+     * Each subsystem's function, breakdown and FF steps run in isolation and used
+     * to see only their siblings' names, so every subsystem claimed every duty and
+     * stream property in the package description: one header pressure became a
+     * failure of the compressor, the dryer, the receiver and the control panel.
+     * Ownership is a property of the whole system and cannot be inferred from
+     * inside one subsystem, so it is decided here, with every subsystem and the
+     * reference data in view, and handed to each subsystem as data.
+     *
+     * Returns null when no plan could be made. Callers then fall back to the
+     * sibling-names path, which is the behaviour before this step existed.
+     */
+    async planSystemFunctions(args: {
+        sysName: string;
+        sysDesc: string;
+        subsystems: Array<{ name: string; specs?: string }>;
+        operatingContext?: OperatingContext;
+        key: string;
+        modelName: string;
+        mode: string;
+        refText: string;
+        aiProvider?: string;
+        azureEndpoint?: string;
+        powerAutomateUrl?: string;
+        sessionId?: string;
+    }): Promise<SystemFunctionPlan | null> {
+        const { sysName, sysDesc, subsystems, operatingContext, key, modelName, mode, refText, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', sessionId } = args;
+        const names = subsystems.map(s => String(s.name || '').trim()).filter(Boolean);
+        if (!names.length) return null;
+        // Demo mode has no model to allocate with; the sibling-names path still runs.
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') return null;
+
+        const contextLines = operatingContext
+            ? ([
+                ['Summary', operatingContext.summary],
+                ['Redundancy', operatingContext.redundancy],
+                ['Duty cycle', operatingContext.dutyCycle],
+                ['Environment', operatingContext.environment],
+                ['Production impact', operatingContext.productionImpactRule],
+                ['Safety / environmental regime', operatingContext.safetyEnvRegime],
+            ] as const).filter(([, v]) => String(v || '').trim()).map(([k, v]) => `- ${k}: ${String(v).trim()}`)
+            : [];
+        const operatingBlock = contextLines.length
+            ? `\nSTATED OPERATING CONTEXT (SAE JA1011 Q1, recorded by the analyst):\n${contextLines.join('\n')}\n`
+            : '';
+        const subsystemBlock = subsystems
+            .map((s, i) => `${i + 1}. "${String(s.name || '').trim()}"\n   Specs: ${String(s.specs || '').trim() || '(none)'}`)
+            .join('\n');
+
+        const corePrompt = `Act as the senior reliability engineer leading an SAE JA1011 function analysis of the whole system "${sysName}".
+${buildSystemDescriptionBlock(sysDesc)}${operatingBlock}
+The system has already been divided into these subsystems. Each will next be analysed on its own, in parallel, seeing only what you allocate to it here:
+${subsystemBlock}
+
+Task: allocate every function of the system to exactly one subsystem, so that no duty and no stream property is analysed twice.
+
+Allocation principles:
+- Boundary: name the hardware inside each subsystem. Hardware that is its own subsystem in the list above is outside every other subsystem's boundary, even when it is physically mounted on or supplied with it.
+- Stream and service properties: a property of anything that passes through several subsystems in turn (its quantity, pressure, temperature, composition, contaminant content, energy, or signal) belongs to the subsystem whose own hardware produces or changes it. Every other subsystem it passes through lists it under "receives", naming that owner.
+- System duties: the service the system delivers, holding a shared variable at a setpoint, starting, stopping or changing over between redundant units, and shutting down or isolating on an excursion each belong to exactly ONE subsystem: the one whose own hardware does the work, or senses, decides and commands it. List them in "systemDuties". Other subsystems only experience them.
+- Owned duties: for each subsystem, list the duties its own hardware performs, each as a verb plus an object. Containment of what its own envelope holds is a duty. A protective device inside its boundary gives it a protection duty. Standby takeover and protective duties exercised only on demand are "hidden"; everything else is "evident".
+- One duty, one place: each duty in "systemDuties" also appears in its owner's "duties" and in no other subsystem's "duties", reworded or not. A subsystem that only takes part in it -- supplies its power, receives its command, or is the machine it starts -- lists nothing for it.
+- Redundancy: the ability of an installed spare to take over when the duty unit fails is ONE system duty, however many subsystems the spare's hardware spans. Allocate it once. The other subsystems of the spare state only what their own hardware does when it runs.
+- Two duties that would fail the same way, with the same consequence, are one duty.
+- Not duties: a rating, a consumption, a certification, a design life, an arrangement such as duty/standby, and a subsystem's own power or utility supply describe the equipment, not what it must do.
+- Specs: return each subsystem's specs with every line that describes another subsystem's hardware moved to that subsystem. Copy values verbatim. Never add a value that is not in the specs above or in the reference data.
+- Use the subsystem names exactly as listed. Do not add, merge, split or rename subsystems.
+- There is no target number of duties. A subsystem that owns two duties has two.
+
+Return ONLY strict JSON:
+{
+  "systemDuties": [ { "duty": "verb + object", "owner": "exact subsystem name" } ],
+  "subsystems": [ {
+    "name": "exact subsystem name",
+    "includes": ["hardware inside the boundary"],
+    "excludes": ["hardware outside the boundary that could be mistaken for part of it"],
+    "changes": ["property this subsystem produces or changes"],
+    "receives": [ { "property": "property it only passes through or consumes", "owner": "exact subsystem name" } ],
+    "duties": [ { "function": "verb + object", "functionClass": "primary|containment|protection|control|support|efficiency", "evidence": "evident|hidden", "standardSource": "spec line or context statement that defines its standard, or empty" } ],
+    "specs": "Key: Value Unit, Key: Value Unit"
+  } ]
+}`;
+
+        try {
+            const parsed = await this._withRetry(async () => {
+                const res = await this.chat({
+                    feature: 'system-function-plan',
+                    provider: (aiProvider || inferProvider(key)) as any,
+                    azureEndpoint: azureEndpoint || undefined,
+                    powerAutomateUrl: powerAutomateUrl || undefined,
+                    sessionId,
+                    model: modelName,
+                    messages: [{ role: 'user', content: corePrompt }],
+                    mode: mode as 'ai' | 'file' | 'hybrid',
+                    refText,
+                    apiKey: key,
+                    responseFormat: 'json'
+                });
+                const plan = parseSystemFunctionPlan(this.extractJSON(res), names);
+                if (!plan) throw new Error('system-function-plan: no usable plan');
+                return plan;
+            }, 2);
+            return parsed;
+        } catch (e) {
+            console.warn('[planSystemFunctions] no plan; subsystems fall back to sibling names.', e);
+            return null;
+        }
+    },
+
     async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingModes: string[] = [], sessionId?: string): Promise<any[]> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
@@ -1790,12 +2094,14 @@ ${formatRule}`;
         systemContext?: string;
         sessionId?: string;
         siblingSubsystems?: string[];
+        /** This subsystem's system function plan entry; replaces the sibling names when present. */
+        allocationBlock?: string;
     }): Promise<{
         failures: Array<{ rowId: string; desc: string; sourceSnippet?: string; failedState?: FailedStateType; parameter?: string; needsReview?: boolean }>;
         /** Generations thrown away by the cleaner, keyed by rowId. Reported, never replaced with a template. */
         rejected: Array<{ rowId: string; raw: string; reason?: string }>;
     }> {
-        const { systemName, subsystemName, subsystemSpecs, funcDesc, rows, existingFailures, key, modelName, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', systemContext = '', sessionId, siblingSubsystems = [] } = args;
+        const { systemName, subsystemName, subsystemSpecs, funcDesc, rows, existingFailures, key, modelName, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', systemContext = '', sessionId, siblingSubsystems = [], allocationBlock = '' } = args;
         if (!rows.length) return { failures: [], rejected: [] };
         if ((!key || key.length < 10) && aiProvider !== 'copilot') {
             return {
@@ -1819,7 +2125,7 @@ ${formatRule}`;
         const prompt = `Context: System "${systemName}", Subsystem "${subsystemName}".
 Subsystem Specs: "${subsystemSpecs || 'N/A'}"
 Subsystem Function: "${funcDesc}"
-${buildSiblingSubsystemBlock(siblingSubsystems, 'functional failures')}
+${allocationBlock || buildSiblingSubsystemBlock(siblingSubsystems, 'functional failures')}
 Function breakdown rows:
 ${rowBlock}
 
@@ -3193,8 +3499,10 @@ Return ONLY strict JSON: { "desc": "...", "parameter": "the standardParameters e
         detailLevel: 'normal' | 'detailed' = 'detailed',
         subsystemSpecs: string = '',
         sessionId?: string,
-        siblingSubsystems: string[] = []
+        siblingSubsystems: string[] = [],
+        allocation: SubsystemAllocation | null = null
     ): Promise<Array<{ function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden'; standardParameters: StandardParameter[] }>> {
+        const allocationBlock = allocation?.block || '';
         if (!funcDesc?.trim()) return [];
         // Every other call in the generation chain answers with a fixture when
         // there is no key; this one returned nothing, which dead-ended Auto-Fill
@@ -3227,7 +3535,11 @@ Return ONLY strict JSON: { "desc": "...", "parameter": "the standardParameters e
         // did not, so a duty delivered through a neighbouring subsystem's hardware
         // (a standby start through the MCC, a changeover through the control system)
         // had nothing to check itself against and became a row here.
-        const siblingBlock = buildSiblingSubsystemBlock(siblingSubsystems, 'functions');
+        //
+        // A system function plan, when there is one, replaces the names: it says
+        // which duties and properties are this subsystem's and which belong to a
+        // sibling, decided with the whole system in view.
+        const siblingBlock = allocationBlock || buildSiblingSubsystemBlock(siblingSubsystems, 'functions');
 
         // Without specs the breakdown can only quantify what survived into the
         // function prose, so every standard degraded to "within operating range".
@@ -3235,7 +3547,12 @@ Return ONLY strict JSON: { "desc": "...", "parameter": "the standardParameters e
             ? `Subsystem Specs (use these verbatim to quantify each standard):\n"""\n${subsystemSpecs}\n"""\n\n`
             : '';
 
-        const detailRule = detailLevel === 'normal'
+        // With an allocation the row set is the owned duties, so there is no floor.
+        // The "4-8 rows" minimum made a subsystem with two real duties invent two
+        // more from the sentences of its own description.
+        const detailRule = allocationBlock
+            ? 'Return one row per duty the allocation gives this subsystem that the description supports, and no more than 8. There is no minimum: a subsystem that owns two duties has two rows. Never create a row for a property the allocation lists as passing through or owned elsewhere.'
+            : detailLevel === 'normal'
             ? 'Return 3-6 rows, one per distinct function. Prefer fewer rows when two rows would fail in the same way.'
             : 'Return 4-8 rows, one per distinct function. Split only genuinely distinct functions, never values, tags, devices, or sentence parts.';
 
@@ -3278,7 +3595,8 @@ JSON field rules:
 - quantified = true only when "standard" contains a real measurable value.
 - functionClass = exactly one of: primary, containment, protection, control, support, efficiency.
 - evidence = "evident" or "hidden".
-- snippet = verbatim source slice from the original description, 15-80 characters.
+- snippet = verbatim source slice from the original description, 15-80 characters.${allocationBlock ? `
+- With an allocation, the rows ARE the owned duties: one row per owned duty, and "function" is that duty's own wording, shortened to its verb and object where it is longer than 7 words. A function the allocation does not list as owned does not belong to this subsystem, whatever the description says: leave it out.` : ''}
 
 Return ONLY this JSON, no prose, no markdown:
 { "rows": [ { "function": "...", "standard": "...", "standardParameters": [ { "name": "...", "value": "...", "unit": "...", "bound": "min" } ], "quantified": true, "functionClass": "primary", "evidence": "evident", "snippet": "..." } ] }`;
@@ -3303,19 +3621,24 @@ Return ONLY this JSON, no prose, no markdown:
                 if (!p || !Array.isArray(p.rows)) throw new Error('decompose: bad shape');
                 return p;
             });
-            const rawRows: RawBreakdownRow[] = parsed.rows
-                .map((r: any) => this.cleanBreakdownRow({
-                    function: String(r?.function ?? '').trim(),
-                    standard: String(r?.standard ?? '').trim(),
-                    snippet: String(r?.snippet ?? '').trim(),
-                    functionClass: String(r?.functionClass ?? r?.function_class ?? '').trim(),
-                    quantified: Boolean(r?.quantified),
-                    evidence: String(r?.evidence ?? '').trim(),
-                    standardParameters: r?.standardParameters ?? r?.standard_parameters,
+            const claimed = parsed.rows
+                .map((r: any) => ({
+                    duty: '',
+                    row: this.cleanBreakdownRow({
+                        function: String(r?.function ?? '').trim(),
+                        standard: String(r?.standard ?? '').trim(),
+                        snippet: String(r?.snippet ?? '').trim(),
+                        functionClass: String(r?.functionClass ?? r?.function_class ?? '').trim(),
+                        quantified: Boolean(r?.quantified),
+                        evidence: String(r?.evidence ?? '').trim(),
+                        standardParameters: r?.standardParameters ?? r?.standard_parameters,
+                    }),
                 }))
-                .filter((r: any) => r.function && r.standard);
+                .filter((r: any) => r.row.function && r.row.standard)
+                .map((r: any) => ({ ...r, duty: r.row.function }));
+            const rawRows: RawBreakdownRow[] = keepAllocatedRows(claimed, allocation?.duties ?? [], subsystemName);
 
-            return buildBreakdownRows(rawRows, subsystemName, projectName, detailLevel);
+            return buildBreakdownRows(rawRows, subsystemName, projectName, detailLevel, Boolean(allocation?.duties.length));
         } catch {
             return [];
         }
