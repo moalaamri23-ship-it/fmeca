@@ -17,7 +17,7 @@ import { CitationModal, type CitationGroup } from './components/CitationModal';
 import { BulkCiteButton, type CiteState } from './components/CiteButton';
 import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
-import { AIService, TieredModels, buildAllocationBlock, allocationFor, findSubsystemPlan } from './services/AIService';
+import { AIService, TieredModels } from './services/AIService';
 import { LocalFileSystemProvider, sanitizeName, isCancellation } from './services/FileSystem';
 import { requestFullscreenViaHost, notifyHostFullscreenReleased } from './services/ShellFullscreen';
 import { RICH_LIBRARY } from './constants';
@@ -2207,8 +2207,7 @@ syncFitBtn();
         const decomposed = await AIService.decomposeFunction(
             sub.func, sub.name, activeProject!.name,
             apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', sub.specs || '', newConversationId(),
-            siblingSubsystemNames(sId),
-            allocationFor(activeProject!.functionPlan, sub.name)
+            siblingSubsystemNames(sId)
         );
         const rows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
         if (rows.length > 0) {
@@ -2386,16 +2385,13 @@ syncFitBtn();
             const existingFFs = sub.failures.map(f => f.desc).filter(Boolean);
             const modeSystemContext = scopedSystemContext(name, specs, func);
             const modeTags = hybridSourceTags(Boolean(modeSystemContext));
-            // The allocation MasterGen made, when this subsystem was part of it.
-            const allocation = allocationFor(activeProject.functionPlan, name);
-            const allocationBlock = allocation?.block || '';
             let workingFunc = (func || '').trim();
             if (!workingFunc) {
-                workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId), allocationBlock }, aiProvider, azureEndpoint, '', powerAutomateUrl, runSession) || '').trim();
+                workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId) }, aiProvider, azureEndpoint, '', powerAutomateUrl, runSession) || '').trim();
             }
             const siblings = siblingSubsystemNames(sId);
             const rows = workingFunc
-                ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '', runSession, siblings, allocation)).map(r => ({ ...r, id: generateId() }))
+                ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '', runSession, siblings)).map(r => ({ ...r, id: generateId() }))
                 : [];
             if (!rows.length) {
                 alert("Auto-Fill could not decompose the function.");
@@ -2417,8 +2413,7 @@ syncFitBtn();
                 // what decides whether a function's failure is found on demand.
                 systemContext: modeSystemContext,
                 sessionId: runSession,
-                siblingSubsystems: siblings,
-                allocationBlock
+                siblingSubsystems: siblings
             });
             if (ffBatch.rejected.length) {
                 console.warn(`[Auto-Fill] ${ffBatch.rejected.length} functional failures were unusable and were dropped, not replaced.`, ffBatch.rejected);
@@ -2567,9 +2562,9 @@ syncFitBtn();
                 ? `${activeProject.name}: ${activeProject.desc}`
                 : activeProject.name;
             const tags = hybridSourceTags();
-            // The function plan, then six steps per subsystem: function, breakdown,
-            // functional failures, failure modes, RPN, and the subsystem itself.
-            const progressTotal = 2 + rawSubs.length * 6;
+            // Six steps per subsystem: function, breakdown, functional failures,
+            // failure modes, RPN, and the subsystem itself.
+            const progressTotal = 1 + rawSubs.length * 6;
             let progressDone = 1;
             let subsDone = 0;
             const mark = (step: string, units = 0, subsystemFinished = false) => {
@@ -2579,36 +2574,6 @@ syncFitBtn();
                 setMasterProgress(prev => ({ percent: Math.max(prev.percent, percent), done: subsDone, total: rawSubs.length, step }));
             };
             mark('Subsystem skeleton ready');
-
-            // Allocate the system's functions before the subsystems split up into
-            // the pool. Each worker sees only its own entry, so without this every
-            // subsystem claimed every duty and stream property in the package
-            // description. A failed plan is not fatal: the workers fall back to
-            // sibling names, which is how MasterGen ran before this step.
-            mark('Allocating functions across subsystems');
-            const functionPlan = await AIService.planSystemFunctions({
-                sysName: activeProject.name,
-                sysDesc: activeProject.desc,
-                subsystems: rawSubs.map((o: any) => ({ name: o.name, specs: o.specs })),
-                operatingContext: activeProject.operatingContext,
-                key: apiKey,
-                modelName,
-                mode: aiSourceMode,
-                refText: globalFileText,
-                aiProvider,
-                azureEndpoint,
-                powerAutomateUrl,
-                sessionId: runSession
-            });
-            if (masterCancelRef.current) { wasCancelled = true; return; }
-            if (!functionPlan) issues.push('System function plan could not be made; subsystems were generated with sibling names only');
-            // The plan moves spec lines to the subsystem they describe. A subsystem
-            // the plan returned no specs for keeps the ones step one gave it.
-            const subs: any[] = rawSubs.map((o: any) => {
-                const planned = findSubsystemPlan(functionPlan, o.name)?.specs;
-                return planned ? { ...o, specs: planned } : o;
-            });
-            mark('Function plan ready', 1);
 
             const runPool = async <T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> => {
                 const results: R[] = new Array(items.length);
@@ -2623,25 +2588,23 @@ syncFitBtn();
             };
 
             const poolLimit = MASTERGEN_CONCURRENCY[aiProvider as AIProvider] ?? DEFAULT_MASTERGEN_CONCURRENCY;
-            const completedSubs: any[] = await runPool(subs, poolLimit, (async (s: any) => {
+            const completedSubs: any[] = await runPool(rawSubs, poolLimit, (async (s: any) => {
                 if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                 // This subsystem's own thread — its steps build on each other,
                 // and it must not queue behind the other pool workers.
                 const subSession = newConversationId();
-                const subSiblings = subs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean);
-                const allocation = allocationFor(functionPlan, s.name);
-                const allocationBlock = allocation?.block || '';
                 try {
                     mark('Generating functions');
-                    const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: s.name, specs: s.specs, siblingSubsystems: subSiblings, allocationBlock }, aiProvider, azureEndpoint, '', powerAutomateUrl, subSession);
+                    const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: s.name, specs: s.specs, siblingSubsystems: rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean) }, aiProvider, azureEndpoint, '', powerAutomateUrl, subSession);
                     if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                     const func = (funcDesc || s.func || '').trim();
                     mark('Functions ready', 1);
 
+                    const subSiblings = rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean);
                     let breakdown: BreakdownRow[] = [];
                     if (func) {
                         mark('Decomposing functions');
-                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '', subSession, subSiblings, allocation);
+                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '', subSession, subSiblings);
                         if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                         breakdown = rows.map(r => ({ ...r, id: generateId() }));
                     }
@@ -2668,8 +2631,7 @@ syncFitBtn();
                             // step is where they decide whether a failure is found on demand.
                             systemContext: masterSystemContext,
                             sessionId: subSession,
-                            siblingSubsystems: subSiblings,
-                            allocationBlock
+                            siblingSubsystems: subSiblings
                         });
                         if (ffBatch.rejected.length) {
                             issues.push(`${s.name}: ${ffBatch.rejected.length} functional failures were unusable and were dropped`);
@@ -2768,10 +2730,6 @@ syncFitBtn();
                 funcHashAtBreakdown: s.breakdown?.length ? String(s.func || '').split('').reduce((h: number, c: string) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0).toString(36) : undefined,
                 failures: (s.failures || []).map((f: any) => ({
                     id: f.id || generateId(), desc: f.desc, sourceTags: f.sourceTags, sourceBreakdownRowId: f.sourceBreakdownRowId, sourceSnippet: f.sourceSnippet,
-                    // The audit tags travel with the failure. Dropping them here left every
-                    // MasterGen export without its failed states, so neither the coverage
-                    // check nor a reviewer could see what the derivation step had decided.
-                    failedState: f.failedState, parameter: f.parameter, needsReview: f.needsReview,
                     // Scores arrive with the modes now. A mode the batch scorer
                     // skipped still falls back to a blank, so an unscored row
                     // stays visibly unscored rather than inheriting a neighbour.
@@ -2791,7 +2749,7 @@ syncFitBtn();
                     }))
                 }))
             }));
-            setActiveProject(p => p ? (p.subsystems.length === 0 ? touchProject({ ...p, subsystems: newSubs, functionPlan: functionPlan ?? undefined }) : p) : null);
+            setActiveProject(p => p ? (p.subsystems.length === 0 ? touchProject({ ...p, subsystems: newSubs }) : p) : null);
             setMasterProgress(prev => ({ percent: 100, done: prev.total, total: prev.total, step: 'Complete' }));
             if (issues.length > 0) alert(`Master generation finished with issues:\n${issues.join('\n')}`);
         } catch (e: any) {
@@ -3280,7 +3238,7 @@ syncFitBtn();
                                         </div>
                                         {!sub.collapsed && (
                                             <div className="animate-enter">
-                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" locked={subsystemLocked(sub.id)} labelAddon={<button onClick={(e) => { e.stopPropagation(); setBreakdownSubId(sub.id); }} title="View Function Breakdown" className="text-slate-400 hover:text-brand-600 transition text-[11px] leading-none">⊞</button>} value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} {...citeProps({subId: sub.id, field: 'func', label: 'Function'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, projectDescription: activeProject.desc, subsystem: sub.name, specs: sub.specs, siblingSubsystems: siblingSubsystemNames(sub.id), allocationBlock: buildAllocationBlock(activeProject.functionPlan, sub.name)}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} disabled={genBusy.has(sub.id)} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">{genBusy.has(sub.id) ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
+                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" locked={subsystemLocked(sub.id)} labelAddon={<button onClick={(e) => { e.stopPropagation(); setBreakdownSubId(sub.id); }} title="View Function Breakdown" className="text-slate-400 hover:text-brand-600 transition text-[11px] leading-none">⊞</button>} value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} {...citeProps({subId: sub.id, field: 'func', label: 'Function'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, projectDescription: activeProject.desc, subsystem: sub.name, specs: sub.specs, siblingSubsystems: siblingSubsystemNames(sub.id)}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} disabled={genBusy.has(sub.id)} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">{genBusy.has(sub.id) ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full text-left text-sm border-collapse">
                                                         <thead className="bg-slate-50 text-slate-500 text-xs font-bold uppercase"><tr><th className="p-2 border-r w-1/5">Functional Failure</th><th className="p-2 border-r w-1/6">Mode</th><th className="p-2 border-r w-1/6">Effect</th><th className="p-2 border-r w-1/6">Cause</th><th className="p-2 border-r w-1/5">Controls &amp; Mitigation</th>{showRPN && <th className="p-2 text-center">RPN</th>}<th className="p-2 text-center">Edit</th></tr></thead>

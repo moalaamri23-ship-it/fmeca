@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checkRow, checkBreakdown, checkProject, matchesByRow, duplicateClaims } from '../CoverageCheck';
+import { checkRow, checkBreakdown, checkProject, matchesByRow } from '../CoverageCheck';
 import { BreakdownRow, Failure, Project } from '../../types';
 
 const brow = (over: Partial<BreakdownRow> = {}): BreakdownRow => ({
@@ -150,12 +150,8 @@ describe('checkProject', () => {
         expect(out[0].detail).toContain('Wet Air Receiver');
     });
 
-    it('reports no conflict when the two subsystems agree, but flags the shared claim', () => {
-        // Agreement is not a disagreement, but one setpoint written into two
-        // subsystems is the duplication signature: one of them does not own it.
-        const out = checkProject(proj('8.0', '8.0'));
-        expect(out.map(f => f.label)).toEqual(['Claimed by several subsystems', 'Claimed by several subsystems']);
-        expect(out.every(f => f.severity === 'info')).toBe(true);
+    it('is quiet when the two subsystems agree', () => {
+        expect(checkProject(proj('8.0', '8.0'))).toEqual([]);
     });
 
     it('does not compare values carrying different units', () => {
@@ -270,49 +266,5 @@ describe('findValueConflict — dual-unit restatements are not disputes', () => 
 
     it('flags a repeated unit carrying two different figures', () => {
         expect(detailFor('8.5 barg (control philosophy 8.0 barg; conflict)')).toHaveLength(1);
-    });
-});
-
-describe('duplicateClaims', () => {
-    const sub = (id: string, name: string, rows: BreakdownRow[]) =>
-        ({ id, name, specs: '', func: '', failures: [], functionBreakdown: rows } as any);
-    const project = (subsystems: any[]): Project => ({ id: 'p', name: 'x', desc: '', created: '', updated: '', subsystems } as unknown as Project);
-
-    /**
-     * The real shape of the bloat: a flow produced by one machine reappeared as
-     * a requirement of every item it passed through, under a different name in
-     * each. Keying on the name found none of them.
-     */
-    it('matches one value and unit claimed under different names', () => {
-        const out = duplicateClaims(project([
-            sub('s1', 'Dryer', [brow({ id: 'r1', standardParameters: [{ name: 'outlet capacity', value: '510', unit: 'Sm3/hr', bound: 'min' }] })]),
-            sub('s2', 'Dry Receiver', [brow({ id: 'r2', standardParameters: [{ name: 'inlet/outlet capacity', value: '510', unit: 'sm3/hr', bound: 'target' }] })]),
-        ]));
-        expect(out).toHaveLength(1);
-        expect(out[0].sightings.map(s => s.subsystem)).toEqual(['Dryer', 'Dry Receiver']);
-    });
-
-    it('normalises degree units', () => {
-        const out = duplicateClaims(project([
-            sub('s1', 'A', [brow({ id: 'r1', standardParameters: [{ name: 't', value: '60', unit: 'deg C', bound: 'max' }] })]),
-            sub('s2', 'B', [brow({ id: 'r2', standardParameters: [{ name: 't', value: '60', unit: '°C', bound: 'max' }] })]),
-        ]));
-        expect(out).toHaveLength(1);
-    });
-
-    it('ignores repeats inside one subsystem, conformance requirements, and protective trip points', () => {
-        const out = duplicateClaims(project([
-            sub('s1', 'A', [
-                brow({ id: 'r1', standardParameters: [{ name: 'p', value: '9', unit: 'barg', bound: 'min' }] }),
-                brow({ id: 'r2', standardParameters: [{ name: 'p2', value: '9', unit: 'barg', bound: 'min' }] }),
-                brow({ id: 'r3', functionClass: 'protection', standardParameters: [{ name: 'set', value: '12', unit: 'barg', bound: 'max' }] }),
-            ]),
-            sub('s2', 'B', [
-                brow({ id: 'r4', functionClass: 'protection', standardParameters: [{ name: 'set', value: '12', unit: 'barg', bound: 'max' }] }),
-                brow({ id: 'r5', standardParameters: [{ name: 'class', value: '1', unit: 'ISO class', bound: 'spec' }] }),
-            ]),
-            sub('s3', 'C', [brow({ id: 'r6', standardParameters: [{ name: 'class', value: '1', unit: 'ISO class', bound: 'spec' }] })]),
-        ]));
-        expect(out).toEqual([]);
     });
 });

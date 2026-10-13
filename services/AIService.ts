@@ -1,5 +1,4 @@
-import { ContextData, FunctionClass, FailedStateType, StandardParameter, OperatingContext, SystemFunctionPlan, SubsystemPlan, PlannedDuty, ReceivedProperty, FailureShape } from '../types';
-import { allowedFailedStates, normalizeFailureShape } from './FailureShape';
+import { ContextData, FunctionClass, FailedStateType, StandardParameter } from '../types';
 import { RICH_LIBRARY } from '../constants';
 import { buildCopilotPrompt, parseCopilotReply, getCopilotSessionId } from './copilotHelper';
 import {
@@ -117,176 +116,6 @@ const buildSiblingSubsystemBlock = (siblings?: string[], noun: string = 'specifi
     return `\nOTHER SUBSYSTEMS IN THIS PROJECT (their ${noun} belong to them, not to the subsystem being generated — do not include them):\n${names.map(n => `- ${n}`).join('\n')}\n`;
 };
 
-const normalizeSubsystemName = (s: string) => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-
-const PLAN_FUNCTION_CLASSES: FunctionClass[] = ['primary', 'containment', 'protection', 'control', 'support', 'efficiency'];
-
-/**
- * Validate the model's function plan against the subsystems MasterGen actually
- * created.
- *
- * The plan never adds, drops or renames a subsystem: an entry whose name does
- * not match one of `subsystemNames` is discarded, and the names are rewritten
- * to the exact MasterGen spelling so later lookups by name succeed. A subsystem
- * the model left out simply has no entry and falls back to the sibling-names
- * path, which is the pre-plan behaviour.
- */
-export function parseSystemFunctionPlan(raw: any, subsystemNames: string[]): SystemFunctionPlan | null {
-    if (!raw || typeof raw !== 'object') return null;
-    const byKey = new Map(subsystemNames.map(n => [normalizeSubsystemName(n), n]));
-    const resolve = (name: any): string | undefined => byKey.get(normalizeSubsystemName(String(name ?? '')));
-    const strList = (v: any): string[] => Array.isArray(v) ? v.map(x => String(x ?? '').trim()).filter(Boolean) : [];
-
-    const seen = new Set<string>();
-    const subsystems: SubsystemPlan[] = [];
-    for (const s of Array.isArray(raw.subsystems) ? raw.subsystems : []) {
-        const name = resolve(s?.name);
-        if (!name || seen.has(name)) continue;
-        seen.add(name);
-        const duties: PlannedDuty[] = (Array.isArray(s?.duties) ? s.duties : [])
-            .map((d: any) => {
-                const fn = String(d?.function ?? '').trim();
-                const cls = String(d?.functionClass ?? '').trim().toLowerCase() as FunctionClass;
-                return {
-                    function: fn,
-                    functionClass: PLAN_FUNCTION_CLASSES.includes(cls) ? cls : 'primary',
-                    evidence: String(d?.evidence ?? '').trim().toLowerCase() === 'hidden' ? 'hidden' : 'evident',
-                    standardSource: String(d?.standardSource ?? '').trim(),
-                } as PlannedDuty;
-            })
-            .filter((d: PlannedDuty) => d.function);
-        const receives: ReceivedProperty[] = (Array.isArray(s?.receives) ? s.receives : [])
-            .map((r: any) => ({ property: String(r?.property ?? '').trim(), owner: resolve(r?.owner) ?? String(r?.owner ?? '').trim() }))
-            .filter((r: ReceivedProperty) => r.property);
-        subsystems.push({
-            name,
-            includes: strList(s?.includes),
-            excludes: strList(s?.excludes),
-            changes: strList(s?.changes),
-            receives,
-            duties,
-            specs: String(s?.specs ?? '').trim(),
-        });
-    }
-    if (!subsystems.length) return null;
-
-    const systemDuties = (Array.isArray(raw.systemDuties) ? raw.systemDuties : [])
-        .map((d: any) => ({ duty: String(d?.duty ?? '').trim(), owner: resolve(d?.owner) ?? '' }))
-        .filter((d: { duty: string; owner: string }) => d.duty && d.owner);
-
-    return { createdAt: new Date().toISOString(), subsystems, systemDuties };
-}
-
-export function findSubsystemPlan(plan: SystemFunctionPlan | undefined | null, subsystemName: string): SubsystemPlan | undefined {
-    if (!plan) return undefined;
-    const key = normalizeSubsystemName(subsystemName);
-    return plan.subsystems.find(s => normalizeSubsystemName(s.name) === key);
-}
-
-/**
- * Render one subsystem's plan entry for the function, breakdown and FF prompts.
- *
- * It replaces the sibling-names block. That block told an isolated subsystem
- * to leave out content belonging to siblings it had never been shown; this one
- * states what was decided with the whole system in view. Returns '' when the
- * subsystem has no entry, so the caller falls back to the sibling names.
- */
-export function buildAllocationBlock(plan: SystemFunctionPlan | undefined | null, subsystemName: string): string {
-    const entry = findSubsystemPlan(plan, subsystemName);
-    if (!plan || !entry) return '';
-    const self = normalizeSubsystemName(entry.name);
-    const lines: string[] = [];
-    lines.push(`SYSTEM FUNCTION ALLOCATION for "${entry.name}" (decided once with the whole system in view; where the system context reads otherwise, this allocation wins):`);
-    if (entry.includes.length) lines.push(`- Inside this boundary: ${entry.includes.join('; ')}`);
-    if (entry.excludes.length) lines.push(`- Outside this boundary (belongs to another subsystem): ${entry.excludes.join('; ')}`);
-    if (entry.changes.length) lines.push(`- Properties this subsystem changes or delivers: ${entry.changes.join('; ')}`);
-    if (entry.duties.length) {
-        lines.push(`- Duties this subsystem owns:`);
-        entry.duties.forEach(d => lines.push(`  - ${d.function} [${d.functionClass}, ${d.evidence}]${d.standardSource ? ` (standard: ${d.standardSource})` : ''}`));
-    }
-    if (entry.receives.length) {
-        lines.push(`- Passes through or consumes, owned elsewhere. Not this subsystem's performance, so no function or functional failure of its own:`);
-        entry.receives.forEach(r => lines.push(`  - ${r.property}${r.owner ? ` (owned by ${r.owner})` : ''}`));
-    }
-    const elsewhere = plan.systemDuties.filter(d => normalizeSubsystemName(d.owner) !== self);
-    if (elsewhere.length) {
-        lines.push(`- System duties owned by other subsystems. This subsystem only experiences them:`);
-        elsewhere.forEach(d => lines.push(`  - ${d.duty} (owned by ${d.owner})`));
-    }
-    return `\n${lines.join('\n')}\n`;
-}
-
-/** One subsystem's allocation, as the breakdown step needs it: the prompt block and the owned duties. */
-export interface SubsystemAllocation {
-    block: string;
-    duties: string[];
-}
-
-export function allocationFor(plan: SystemFunctionPlan | undefined | null, subsystemName: string): SubsystemAllocation | null {
-    const entry = findSubsystemPlan(plan, subsystemName);
-    const block = buildAllocationBlock(plan, subsystemName);
-    if (!entry || !block) return null;
-    return { block, duties: entry.duties.map(d => d.function) };
-}
-
-const DUTY_STOPWORDS = new Set(['the', 'a', 'an', 'of', 'to', 'and', 'or', 'in', 'on', 'at', 'for', 'from', 'with', 'within', 'by', 'its', 'when', 'into', 'as']);
-const dutyTokens = (s: string): string[] => String(s || '')
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .replace(FUNCTION_VERB_PATTERN, m => FUNCTION_VERB_FORMS[m.toLowerCase()] || m)
-    .split(' ')
-    .filter(t => t && !DUTY_STOPWORDS.has(t));
-
-/** Which owned duty a row's claimed duty names, or -1. Tolerates rewording, not a different duty. */
-export function matchAllocatedDuty(claimed: string, duties: string[]): number {
-    const c = dutyTokens(claimed);
-    if (!c.length) return -1;
-    const cs = new Set(c);
-    let best = -1, bestScore = 0;
-    duties.forEach((d, i) => {
-        const dt = dutyTokens(d);
-        if (!dt.length) return;
-        const shared = new Set(dt.filter(t => cs.has(t))).size;
-        // Overlap against the SHORTER phrase, so a row that names a duty in fewer
-        // words still matches it; two shared words minimum, so one generic word
-        // ("drive", "supply") never ties a row to a duty on its own.
-        if (shared < Math.min(2, dt.length, c.length)) return;
-        const score = shared / Math.min(new Set(dt).size, cs.size);
-        if (score > bestScore) { bestScore = score; best = i; }
-    });
-    return bestScore >= 0.6 ? best : -1;
-}
-
-/**
- * With a system function plan, the plan's owned duties define the row set and
- * the function description only supplies their standards.
- *
- * The description step still restates whatever the package description says --
- * a driver of a duty/standby pair writes "provides standby capacity when the
- * running unit stops" because the description rules ask every subsystem for its
- * operating duty -- and the breakdown faithfully turned that sentence into a
- * hidden row the plan had given to a different subsystem. Each row's function
- * must be an owned duty's wording; a row whose function matches none is dropped,
- * and the drop is reported.
- *
- * `duty` is the row's OWN function text. A separate "which duty is this" field
- * was tried first and the model filled it with an owned duty for every row,
- * including the standby row it was meant to catch.
- *
- * If NO row matches, the model ignored the instruction rather than the plan, so
- * every row is kept: failing open loses nothing that worked before.
- */
-export function keepAllocatedRows<T>(rows: Array<{ row: T; duty: string }>, duties: string[], subsystemName: string): T[] {
-    if (!duties.length || !rows.length) return rows.map(r => r.row);
-    const matched = rows.map(r => matchAllocatedDuty(r.duty, duties));
-    if (matched.every(m => m < 0)) return rows.map(r => r.row);
-    const dropped = rows.filter((_, i) => matched[i] < 0);
-    if (dropped.length) {
-        console.warn(`[decomposeFunction] "${subsystemName}": ${dropped.length} row(s) dropped as not allocated to this subsystem.`, dropped.map(d => d.duty || '(no duty named)'));
-    }
-    return rows.filter((_, i) => matched[i] >= 0).map(r => r.row);
-}
-
 // The Context field carries operating philosophy: redundancy, standby/lead-lag
 // duty, and control behaviour. Without it a standby unit reads as a continuous
 // one and "fails to start on demand" can never be derived downstream.
@@ -353,25 +182,6 @@ Performance standard parameters:
 - A rating that measures what the equipment CONSUMES or WITHSTANDS is not a parameter of the service it delivers. It describes the cost or the envelope of doing the duty, not the duty, so a failure derived from it competes with the output the function exists to produce. Put a consumption rating on an "efficiency" function of its own when the description supports one, and otherwise leave it out. Put a withstand rating in the containment row's standard text.
 - Order "standardParameters" with the requirements the function exists to deliver first.
 - When the standard is qualitative and holds no measurable requirement, return an empty "standardParameters" array rather than inventing values.`;
-
-// The failed states a function can reach are a property of the function, so the
-// breakdown step -- which has the equipment and its standard in view -- declares
-// them, and the FF step only writes what was declared. Without this the FF step
-// read a parameter list and a direction vocabulary and produced one failure per
-// parameter plus a reflexive "erratic", whatever the equipment could do: a fixed
-// vessel volume came back "stores below capacity", a motor came back "power
-// below" beside "speed below" beside "erratic".
-/** Reason prefix for a failure discarded because its row's failure shape does not admit its state. */
-const OUTSIDE_SHAPE = 'outside the declared failure shape';
-
-const FAILURE_SHAPE_RULES = `Failure shape (exactly one per row) -- which failed states this function can physically reach in its operating context:
-- "binary": it is done or not done; there is no "less" of it. Containment, a command or start, a transmitted signal, a connection, a capacity fixed by construction.
-- "below": it delivers an amount that can fall short of the standard: a flow, a head, a power, a removal.
-- "above": it must keep something under a limit, and only exceeding the limit is a failure.
-- "band": it holds a variable at a setpoint, and both too low and too high matter.
-- "conformance": it must meet a quality grade or specification that has no amount to fall short of.
-- "protective": it acts only on demand against an excursion: a trip, relief, isolation, takeover, or alarm.
-Judge the shape from what the equipment physically does, not from how many parameters the standard holds.`;
 
 // JA1011 5.2 requires all failed states of each FUNCTION -- not of each
 // parameter, and the difference is the whole design of this block.
@@ -640,7 +450,6 @@ export type RawBreakdownRow = {
     quantified: boolean;
     evidence: 'evident' | 'hidden';
     standardParameters: StandardParameter[];
-    failureShape?: FailureShape;
 };
 
 /**
@@ -655,21 +464,8 @@ export function buildBreakdownRows(
     subsystemName: string,
     projectName: string,
     detailLevel: 'normal' | 'detailed' = 'detailed',
-    /**
-     * True when the rows were kept because they match duties a system function
-     * plan allocated to this subsystem. The plan decided ownership with the whole
-     * system in view, so the device and monitoring keyword skips below -- which
-     * guess the same thing from words in the subsystem name -- do not override it.
-     * A metering subsystem lost its one allocated duty, reporting to the DCS, to
-     * the monitoring skip because its name carried no control keyword.
-     */
-    allocated: boolean = false,
 ): RawBreakdownRow[] {
-    // Tested on the subsystem name alone. MasterGen passes the whole package
-    // description as projectName, and any description mentioning a control panel
-    // or an "instrument" service made every subsystem a control subsystem, which
-    // switched off the monitoring and safeguard skips below for all of them.
-    const isControlSubsystem = /transmitter|sensor|instrument|control|panel|plc|ucp|pcs|sgs|logic|controller/i.test(subsystemName);
+    const isControlSubsystem = /transmitter|sensor|instrument|control|panel|plc|ucp|pcs|sgs|logic|controller/i.test(`${subsystemName} ${projectName}`);
     const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     const textOf = (r: RawBreakdownRow) => compact(`${r.function} ${r.standard} ${r.snippet}`);
     const includesAny = (text: string, terms: RegExp[]) => terms.some(re => re.test(text));
@@ -716,7 +512,6 @@ export function buildBreakdownRows(
             quantified: row.quantified,
             evidence: row.evidence,
             standardParameters: row.standardParameters,
-            failureShape: row.failureShape,
         };
         if (!cleaned.function || !cleaned.standard) return;
         if (usedKeys.has(key)) {
@@ -759,19 +554,11 @@ export function buildBreakdownRows(
         if (weakOnly.test(row.standard.trim())) return true;
         if (includesAny(text, ppeTerms)) return true;
         if (!/noise|sound|acoustic/i.test(`${subsystemName} ${projectName}`) && isNoiseExposureOnly(text)) return true;
-        // A row the model declared "protection" is never dropped by a keyword. These
-        // filters exist to remove rows describing a device or a monitoring point, and
-        // which subsystems they applied to was decided by keywords in the subsystem
-        // NAME: a leak-detection subsystem whose name happened to lack "instrument"
-        // or "control" lost its alarm duty -- a hidden protective function, exactly
-        // the kind the analysis must keep -- with no warning.
-        const declaredProtection = row.functionClass === 'protection';
         // A relief or isolation DUTY is a protection function under JA1011 5.1 and
         // must survive; only a row describing the device itself is dropped. The
         // blanket skip here was what erased overpressure-limiting failures.
-        if (allocated) return false;
-        if (!declaredProtection && !isControlSubsystem && includesAny(text, safeguardTerms) && !isProtectiveFunction(row.function)) return true;
-        if (!declaredProtection && !isControlSubsystem && includesAny(text, monitoringTerms)) return true;
+        if (!isControlSubsystem && includesAny(text, safeguardTerms) && !isProtectiveFunction(row.function)) return true;
+        if (!isControlSubsystem && includesAny(text, monitoringTerms)) return true;
         if (includesAny(text, designOnlyTerms) && !isFunctionalVerb(row.function)) return true;
         return false;
     };
@@ -1387,7 +1174,7 @@ export const AIService = {
             });
     },
 
-    cleanBreakdownRow(row: { function: string; standard: string; snippet: string; functionClass?: string; quantified?: boolean; evidence?: string; standardParameters?: unknown; failureShape?: unknown }): { function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden'; standardParameters: StandardParameter[]; failureShape?: FailureShape } {
+    cleanBreakdownRow(row: { function: string; standard: string; snippet: string; functionClass?: string; quantified?: boolean; evidence?: string; standardParameters?: unknown }): { function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden'; standardParameters: StandardParameter[] } {
         const fn = this.normalizeFunctionPhraseForFailure(row.function);
         const standard = this.cleanSingleFieldText(row.standard)
             .replace(/^(?:to|and)\s+/i, '')
@@ -1408,7 +1195,6 @@ export const AIService = {
             quantified: /\d/.test(standard) || standardParameters.some(p => /\d/.test(p.value)),
             evidence: String(row.evidence || '').toLowerCase().trim() === 'hidden' ? 'hidden' : 'evident',
             standardParameters,
-            failureShape: normalizeFailureShape(row.failureShape),
         };
     },
 
@@ -1731,7 +1517,7 @@ ${formatRule}`;
             if (isFunctionDescriptionField) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
                 ${buildSystemDescriptionBlock((contextData as any).projectDescription)}
-                ${contextData.allocationBlock || buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
+                ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
                 The user wrote this Function Description: """${currentText}"""
                 Task: Rewrite and enhance it as a proper Function Description.
                 ${FMECA_HIERARCHY_RULES}
@@ -1798,9 +1584,8 @@ ${formatRule}`;
             if (isFunctionDescriptionField) {
                 corePrompt = `Context: System "${contextData.project || 'Unknown'}", Subsystem "${contextData.subsystem}", Specs "${contextData.specs || 'N/A'}".
                 ${buildSystemDescriptionBlock((contextData as any).projectDescription)}
-                ${contextData.allocationBlock || buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
-                Task: Write a Function Description for the subsystem "${contextData.subsystem}".${contextData.allocationBlock ? `
-                Describe the duties the allocation gives this subsystem, and nothing it lists as passing through, owned elsewhere, or outside the boundary. Each dimension of the rules below applies only as far as an owned duty supports it.` : ''}
+                ${buildSiblingSubsystemBlock((contextData as any).siblingSubsystems, 'functions')}
+                Task: Write a Function Description for the subsystem "${contextData.subsystem}".
                 ${FMECA_HIERARCHY_RULES}
                 ${FMECA_CONCISE_WORDING_RULES}
                 ${FUNCTION_DESCRIPTION_TECHNICAL_RULES}
@@ -1931,118 +1716,6 @@ ${formatRule}`;
         } catch(e) { return []; }
     },
 
-    /**
-     * Allocate the system's functions to its subsystems, once, before the
-     * subsystems are generated in parallel.
-     *
-     * Each subsystem's function, breakdown and FF steps run in isolation and used
-     * to see only their siblings' names, so every subsystem claimed every duty and
-     * stream property in the package description: one header pressure became a
-     * failure of the compressor, the dryer, the receiver and the control panel.
-     * Ownership is a property of the whole system and cannot be inferred from
-     * inside one subsystem, so it is decided here, with every subsystem and the
-     * reference data in view, and handed to each subsystem as data.
-     *
-     * Returns null when no plan could be made. Callers then fall back to the
-     * sibling-names path, which is the behaviour before this step existed.
-     */
-    async planSystemFunctions(args: {
-        sysName: string;
-        sysDesc: string;
-        subsystems: Array<{ name: string; specs?: string }>;
-        operatingContext?: OperatingContext;
-        key: string;
-        modelName: string;
-        mode: string;
-        refText: string;
-        aiProvider?: string;
-        azureEndpoint?: string;
-        powerAutomateUrl?: string;
-        sessionId?: string;
-    }): Promise<SystemFunctionPlan | null> {
-        const { sysName, sysDesc, subsystems, operatingContext, key, modelName, mode, refText, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', sessionId } = args;
-        const names = subsystems.map(s => String(s.name || '').trim()).filter(Boolean);
-        if (!names.length) return null;
-        // Demo mode has no model to allocate with; the sibling-names path still runs.
-        if ((!key || key.length < 10) && aiProvider !== 'copilot') return null;
-
-        const contextLines = operatingContext
-            ? ([
-                ['Summary', operatingContext.summary],
-                ['Redundancy', operatingContext.redundancy],
-                ['Duty cycle', operatingContext.dutyCycle],
-                ['Environment', operatingContext.environment],
-                ['Production impact', operatingContext.productionImpactRule],
-                ['Safety / environmental regime', operatingContext.safetyEnvRegime],
-            ] as const).filter(([, v]) => String(v || '').trim()).map(([k, v]) => `- ${k}: ${String(v).trim()}`)
-            : [];
-        const operatingBlock = contextLines.length
-            ? `\nSTATED OPERATING CONTEXT (SAE JA1011 Q1, recorded by the analyst):\n${contextLines.join('\n')}\n`
-            : '';
-        const subsystemBlock = subsystems
-            .map((s, i) => `${i + 1}. "${String(s.name || '').trim()}"\n   Specs: ${String(s.specs || '').trim() || '(none)'}`)
-            .join('\n');
-
-        const corePrompt = `Act as the senior reliability engineer leading an SAE JA1011 function analysis of the whole system "${sysName}".
-${buildSystemDescriptionBlock(sysDesc)}${operatingBlock}
-The system has already been divided into these subsystems. Each will next be analysed on its own, in parallel, seeing only what you allocate to it here:
-${subsystemBlock}
-
-Task: allocate every function of the system to exactly one subsystem, so that no duty and no stream property is analysed twice.
-
-Allocation principles:
-- Boundary: name the hardware inside each subsystem. Hardware that is its own subsystem in the list above is outside every other subsystem's boundary, even when it is physically mounted on or supplied with it.
-- Stream and service properties: a property of anything that passes through several subsystems in turn (its quantity, pressure, temperature, composition, contaminant content, energy, or signal) belongs to the subsystem whose own hardware produces or changes it. Every other subsystem it passes through lists it under "receives", naming that owner.
-- System duties: the service the system delivers, holding a shared variable at a setpoint, starting, stopping or changing over between redundant units, and shutting down or isolating on an excursion each belong to exactly ONE subsystem: the one whose own hardware does the work, or senses, decides and commands it. List them in "systemDuties". Other subsystems only experience them.
-- Owned duties: for each subsystem, list the duties its own hardware performs, each as a verb plus an object. Containment of what its own envelope holds is a duty. A protective device inside its boundary gives it a protection duty. Standby takeover and protective duties exercised only on demand are "hidden"; everything else is "evident".
-- One duty, one place: each duty in "systemDuties" also appears in its owner's "duties" and in no other subsystem's "duties", reworded or not. A subsystem that only takes part in it -- supplies its power, receives its command, or is the machine it starts -- lists nothing for it.
-- Redundancy: the ability of an installed spare to take over when the duty unit fails is ONE system duty, however many subsystems the spare's hardware spans. Allocate it once. The other subsystems of the spare state only what their own hardware does when it runs.
-- Two duties that would fail the same way, with the same consequence, are one duty.
-- Not duties: a rating, a consumption, a certification, a design life, an arrangement such as duty/standby, and a subsystem's own power or utility supply describe the equipment, not what it must do.
-- Specs: return each subsystem's specs with every line that describes another subsystem's hardware moved to that subsystem. Copy values verbatim. Never add a value that is not in the specs above or in the reference data.
-- Use the subsystem names exactly as listed. Do not add, merge, split or rename subsystems.
-- There is no target number of duties. A subsystem that owns two duties has two.
-
-Return ONLY strict JSON:
-{
-  "systemDuties": [ { "duty": "verb + object", "owner": "exact subsystem name" } ],
-  "subsystems": [ {
-    "name": "exact subsystem name",
-    "includes": ["hardware inside the boundary"],
-    "excludes": ["hardware outside the boundary that could be mistaken for part of it"],
-    "changes": ["property this subsystem produces or changes"],
-    "receives": [ { "property": "property it only passes through or consumes", "owner": "exact subsystem name" } ],
-    "duties": [ { "function": "verb + object", "functionClass": "primary|containment|protection|control|support|efficiency", "evidence": "evident|hidden", "standardSource": "spec line or context statement that defines its standard, or empty" } ],
-    "specs": "Key: Value Unit, Key: Value Unit"
-  } ]
-}`;
-
-        try {
-            const parsed = await this._withRetry(async () => {
-                const res = await this.chat({
-                    feature: 'system-function-plan',
-                    provider: (aiProvider || inferProvider(key)) as any,
-                    azureEndpoint: azureEndpoint || undefined,
-                    powerAutomateUrl: powerAutomateUrl || undefined,
-                    sessionId,
-                    model: modelName,
-                    messages: [{ role: 'user', content: corePrompt }],
-                    mode: mode as 'ai' | 'file' | 'hybrid',
-                    refText,
-                    apiKey: key,
-                    responseFormat: 'json'
-                });
-                const plan = parseSystemFunctionPlan(this.extractJSON(res), names);
-                if (!plan) throw new Error('system-function-plan: no usable plan');
-                return plan;
-            }, 2);
-            return parsed;
-        } catch (e) {
-            console.warn('[planSystemFunctions] no plan; subsystems fall back to sibling names.', e);
-            return null;
-        }
-    },
-
     async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingModes: string[] = [], sessionId?: string): Promise<any[]> {
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
@@ -2107,7 +1780,7 @@ Return ONLY strict JSON:
         subsystemName: string;
         subsystemSpecs: string;
         funcDesc: string;
-        rows: Array<{ id: string; function: string; standard: string; snippet: string; functionClass?: FunctionClass; quantified?: boolean; evidence?: 'evident' | 'hidden'; standardParameters?: StandardParameter[]; failureShape?: FailureShape }>;
+        rows: Array<{ id: string; function: string; standard: string; snippet: string; functionClass?: FunctionClass; quantified?: boolean; evidence?: 'evident' | 'hidden'; standardParameters?: StandardParameter[] }>;
         existingFailures: string[];
         key: string;
         modelName: string;
@@ -2117,14 +1790,12 @@ Return ONLY strict JSON:
         systemContext?: string;
         sessionId?: string;
         siblingSubsystems?: string[];
-        /** This subsystem's system function plan entry; replaces the sibling names when present. */
-        allocationBlock?: string;
     }): Promise<{
         failures: Array<{ rowId: string; desc: string; sourceSnippet?: string; failedState?: FailedStateType; parameter?: string; needsReview?: boolean }>;
         /** Generations thrown away by the cleaner, keyed by rowId. Reported, never replaced with a template. */
         rejected: Array<{ rowId: string; raw: string; reason?: string }>;
     }> {
-        const { systemName, subsystemName, subsystemSpecs, funcDesc, rows, existingFailures, key, modelName, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', systemContext = '', sessionId, siblingSubsystems = [], allocationBlock = '' } = args;
+        const { systemName, subsystemName, subsystemSpecs, funcDesc, rows, existingFailures, key, modelName, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', systemContext = '', sessionId, siblingSubsystems = [] } = args;
         if (!rows.length) return { failures: [], rejected: [] };
         if ((!key || key.length < 10) && aiProvider !== 'copilot') {
             return {
@@ -2142,15 +1813,13 @@ Return ONLY strict JSON:
             standardParameters: r.standardParameters ?? [],
             functionClass: r.functionClass || 'primary',
             evidence: r.evidence || 'evident',
-            ...(r.failureShape ? { failureShape: r.failureShape, allowedStates: allowedFailedStates(r.failureShape, r.evidence) } : {}),
             snippet: r.snippet,
         })), null, 2);
-        const allowedByRow = new Map(rows.map(r => [r.id, allowedFailedStates(r.failureShape, r.evidence)]));
 
         const prompt = `Context: System "${systemName}", Subsystem "${subsystemName}".
 Subsystem Specs: "${subsystemSpecs || 'N/A'}"
 Subsystem Function: "${funcDesc}"
-${allocationBlock || buildSiblingSubsystemBlock(siblingSubsystems, 'functional failures')}
+${buildSiblingSubsystemBlock(siblingSubsystems, 'functional failures')}
 Function breakdown rows:
 ${rowBlock}
 
@@ -2160,7 +1829,6 @@ ${FMECA_CONCISE_WORDING_RULES}
 ${FUNCTIONAL_FAILURE_TECHNICAL_RULES}
 ${JA1011_FAILED_STATE_RULES}
 Each row's "standardParameters" is the list of requirements to enumerate against. Where it is empty the standard is qualitative: emit total loss only and do not invent values.
-Where a row carries "allowedStates", its failure shape decides which failed states exist and the parameters only quantify them. Write failures only in those states, and at most ONE failure per state per row: when several parameters fall short in the same state, that is one failed state -- name the parameter that governs it. A state outside "allowedStates" is discarded.
 "evidence" tells you how the failure is discovered, not how many failures there are. A hidden row's total loss is written as an on-demand failure and REPLACES the total row; it is not an extra one.
 Use the full subsystem function only to resolve ambiguity, not to add extra details.
 Write short professional FMECA failure states, not narratives.
@@ -2222,7 +1890,7 @@ Return ONLY strict JSON. "parameter" names the standardParameters entry the fail
                 }
                 const claimed = String(f?.failedState ?? f?.failed_state ?? '').toLowerCase().trim() as FailedStateType;
                 // "lower_limit" never meant anything distinct from "partial".
-                let failedState = claimed === 'lower_limit'
+                const failedState = claimed === 'lower_limit'
                     ? 'partial'
                     : validStates.includes(claimed) ? claimed : undefined;
                 // A failure tagged upper_limit whose text says "below" is not a
@@ -2242,22 +1910,7 @@ Return ONLY strict JSON. "parameter" names the standardParameters entry the fail
                     continue;
                 }
                 const parameter = this.cleanSingleFieldText(String(f?.parameter ?? '')).toLowerCase() || undefined;
-                // A declared shape is enforced here, not only asked for. A state the
-                // shape does not admit is dropped and reported -- never sent to the
-                // repair pass, which would only restate it -- and the shape allows one
-                // failure per state, so the key drops the parameter.
-                const allowed = allowedByRow.get(rowId);
-                // Total loss and on-demand loss are the same state; which label is
-                // right follows from the row's evidence, so relabel rather than drop.
-                if (allowed && failedState === 'total' && allowed.includes('on_demand')) failedState = 'on_demand';
-                else if (allowed && failedState === 'on_demand' && allowed.includes('total')) failedState = 'total';
-                if (allowed && (!failedState || !allowed.includes(failedState))) {
-                    rejected.push({ rowId, raw, reason: `${OUTSIDE_SHAPE}: "${failedState ?? 'untagged'}" is not one of ${allowed.join(', ')}` });
-                    continue;
-                }
-                const dedupeKey = allowed
-                    ? `${rowId}|${failedState}`
-                    : `${rowId}|${parameter ?? ''}|${failedState ?? desc.toLowerCase()}`;
+                const dedupeKey = `${rowId}|${parameter ?? ''}|${failedState ?? desc.toLowerCase()}`;
                 if (seen.has(dedupeKey)) continue;
                 seen.add(dedupeKey);
                 kept.push({
@@ -2284,9 +1937,8 @@ Return ONLY strict JSON. "parameter" names the standardParameters entry the fail
             // would reach Copilot stripped of the breakdown rows it is meant to be
             // repairing — it would arrive as a list of rejected sentences with no
             // idea what they described.
-            const repairable = rejected.filter(r => !r.reason?.startsWith(OUTSIDE_SHAPE));
-            if (repairable.length) {
-                const repairList = repairable
+            if (rejected.length) {
+                const repairList = rejected
                     .map(r => `- rowId "${r.rowId}"${r.reason ? ` [${r.reason}]` : ''}: ${r.raw}`)
                     .join('\n');
                 const repair = `Function breakdown rows:
@@ -2306,14 +1958,11 @@ These failures are already accepted — do not repeat them and do not add anythi
 ${kept.map(k => `- ${k.desc}`).join('\n') || '(none)'}
 
 Return ONLY strict JSON: { "failures": [ { "rowId": "...", "parameter": "...", "failedState": "...", "desc": "...", "sourceSnippet": "..." } ] }`;
-                const before = repairable.length;
-                const outsideShape = rejected.filter(r => r.reason?.startsWith(OUTSIDE_SHAPE));
+                const before = rejected.length;
                 const recovered = await callOnce([{ role: 'user', content: repair }]);
                 rejected.length = 0;
                 absorb(recovered);
-                const stillUnusable = rejected.length;
-                rejected.push(...outsideShape);
-                if (stillUnusable) console.warn(`[generateFFsForBreakdownRows] ${stillUnusable}/${before} still unusable after repair`);
+                if (rejected.length) console.warn(`[generateFFsForBreakdownRows] ${rejected.length}/${before} still unusable after repair`);
             }
 
             return { failures: kept, rejected };
@@ -3544,10 +3193,8 @@ Return ONLY strict JSON: { "desc": "...", "parameter": "the standardParameters e
         detailLevel: 'normal' | 'detailed' = 'detailed',
         subsystemSpecs: string = '',
         sessionId?: string,
-        siblingSubsystems: string[] = [],
-        allocation: SubsystemAllocation | null = null
-    ): Promise<RawBreakdownRow[]> {
-        const allocationBlock = allocation?.block || '';
+        siblingSubsystems: string[] = []
+    ): Promise<Array<{ function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden'; standardParameters: StandardParameter[] }>> {
         if (!funcDesc?.trim()) return [];
         // Every other call in the generation chain answers with a fixture when
         // there is no key; this one returned nothing, which dead-ended Auto-Fill
@@ -3580,11 +3227,7 @@ Return ONLY strict JSON: { "desc": "...", "parameter": "the standardParameters e
         // did not, so a duty delivered through a neighbouring subsystem's hardware
         // (a standby start through the MCC, a changeover through the control system)
         // had nothing to check itself against and became a row here.
-        //
-        // A system function plan, when there is one, replaces the names: it says
-        // which duties and properties are this subsystem's and which belong to a
-        // sibling, decided with the whole system in view.
-        const siblingBlock = allocationBlock || buildSiblingSubsystemBlock(siblingSubsystems, 'functions');
+        const siblingBlock = buildSiblingSubsystemBlock(siblingSubsystems, 'functions');
 
         // Without specs the breakdown can only quantify what survived into the
         // function prose, so every standard degraded to "within operating range".
@@ -3592,12 +3235,7 @@ Return ONLY strict JSON: { "desc": "...", "parameter": "the standardParameters e
             ? `Subsystem Specs (use these verbatim to quantify each standard):\n"""\n${subsystemSpecs}\n"""\n\n`
             : '';
 
-        // With an allocation the row set is the owned duties, so there is no floor.
-        // The "4-8 rows" minimum made a subsystem with two real duties invent two
-        // more from the sentences of its own description.
-        const detailRule = allocationBlock
-            ? 'Return one row per duty the allocation gives this subsystem that the description supports, and no more than 8. There is no minimum: a subsystem that owns two duties has two rows. Never create a row for a property the allocation lists as passing through or owned elsewhere.'
-            : detailLevel === 'normal'
+        const detailRule = detailLevel === 'normal'
             ? 'Return 3-6 rows, one per distinct function. Prefer fewer rows when two rows would fail in the same way.'
             : 'Return 4-8 rows, one per distinct function. Split only genuinely distinct functions, never values, tags, devices, or sentence parts.';
 
@@ -3605,8 +3243,6 @@ Return ONLY strict JSON: { "desc": "...", "parameter": "the standardParameters e
 ${FMECA_HIERARCHY_RULES}
 ${FMECA_CONCISE_WORDING_RULES}
 ${FUNCTION_BREAKDOWN_TECHNICAL_RULES}
-
-${FAILURE_SHAPE_RULES}
 
 ${contextLine}${specsBlock}${siblingBlock}Function description:
 """
@@ -3642,12 +3278,10 @@ JSON field rules:
 - quantified = true only when "standard" contains a real measurable value.
 - functionClass = exactly one of: primary, containment, protection, control, support, efficiency.
 - evidence = "evident" or "hidden".
-- failureShape = exactly one of: binary, below, above, band, conformance, protective.
-- snippet = verbatim source slice from the original description, 15-80 characters.${allocationBlock ? `
-- With an allocation, the rows ARE the owned duties: one row per owned duty, and "function" is that duty's own wording, shortened to its verb and object where it is longer than 7 words. A function the allocation does not list as owned does not belong to this subsystem, whatever the description says: leave it out.` : ''}
+- snippet = verbatim source slice from the original description, 15-80 characters.
 
 Return ONLY this JSON, no prose, no markdown:
-{ "rows": [ { "function": "...", "standard": "...", "standardParameters": [ { "name": "...", "value": "...", "unit": "...", "bound": "min" } ], "quantified": true, "functionClass": "primary", "evidence": "evident", "failureShape": "below", "snippet": "..." } ] }`;
+{ "rows": [ { "function": "...", "standard": "...", "standardParameters": [ { "name": "...", "value": "...", "unit": "...", "bound": "min" } ], "quantified": true, "functionClass": "primary", "evidence": "evident", "snippet": "..." } ] }`;
 
         const content = prompt + (systemContext ? '\n\n' + systemContext : '');
         try {
@@ -3669,25 +3303,19 @@ Return ONLY this JSON, no prose, no markdown:
                 if (!p || !Array.isArray(p.rows)) throw new Error('decompose: bad shape');
                 return p;
             });
-            const claimed = parsed.rows
-                .map((r: any) => ({
-                    duty: '',
-                    row: this.cleanBreakdownRow({
-                        function: String(r?.function ?? '').trim(),
-                        standard: String(r?.standard ?? '').trim(),
-                        snippet: String(r?.snippet ?? '').trim(),
-                        functionClass: String(r?.functionClass ?? r?.function_class ?? '').trim(),
-                        quantified: Boolean(r?.quantified),
-                        evidence: String(r?.evidence ?? '').trim(),
-                        standardParameters: r?.standardParameters ?? r?.standard_parameters,
-                        failureShape: r?.failureShape ?? r?.failure_shape,
-                    }),
+            const rawRows: RawBreakdownRow[] = parsed.rows
+                .map((r: any) => this.cleanBreakdownRow({
+                    function: String(r?.function ?? '').trim(),
+                    standard: String(r?.standard ?? '').trim(),
+                    snippet: String(r?.snippet ?? '').trim(),
+                    functionClass: String(r?.functionClass ?? r?.function_class ?? '').trim(),
+                    quantified: Boolean(r?.quantified),
+                    evidence: String(r?.evidence ?? '').trim(),
+                    standardParameters: r?.standardParameters ?? r?.standard_parameters,
                 }))
-                .filter((r: any) => r.row.function && r.row.standard)
-                .map((r: any) => ({ ...r, duty: r.row.function }));
-            const rawRows: RawBreakdownRow[] = keepAllocatedRows(claimed, allocation?.duties ?? [], subsystemName);
+                .filter((r: any) => r.function && r.standard);
 
-            return buildBreakdownRows(rawRows, subsystemName, projectName, detailLevel, Boolean(allocation?.duties.length));
+            return buildBreakdownRows(rawRows, subsystemName, projectName, detailLevel);
         } catch {
             return [];
         }

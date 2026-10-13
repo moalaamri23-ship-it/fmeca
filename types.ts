@@ -85,18 +85,6 @@ export type FunctionClass = 'primary' | 'containment' | 'protection' | 'control'
 export type FailedStateType = 'total' | 'partial' | 'upper_limit' | 'lower_limit' | 'intermittent' | 'on_demand';
 
 /**
- * Which failed states a function can physically reach, declared per breakdown
- * row. See allowedFailedStates in services/FailureShape.ts for the mapping.
- *   binary      -> done or not done (containment, a command, a fixed capacity)
- *   below       -> delivers an amount that can fall short
- *   above       -> must stay under a limit
- *   band        -> holds a setpoint; too low and too high both matter
- *   conformance -> meets a grade or specification
- *   protective  -> acts on demand against an excursion
- */
-export type FailureShape = 'binary' | 'below' | 'above' | 'band' | 'conformance' | 'protective';
-
-/**
  * One measurable requirement inside a function's performance standard.
  *
  * The standard used to be free text alone, so nothing downstream could tell
@@ -136,8 +124,6 @@ export interface BreakdownRow {
   evidence?: 'evident' | 'hidden';
   /** Parsed requirements inside `standard`. Absent on rows saved before this existed. */
   standardParameters?: StandardParameter[];
-  /** Which failed states this function can reach. Absent on rows saved before this existed: no restriction. */
-  failureShape?: FailureShape;
 }
 
 export interface BreakdownMatch {
@@ -177,53 +163,6 @@ export interface OperatingContext {
   safetyEnvRegime: string;
 }
 
-/** One duty a subsystem's own hardware performs, as allocated at system level. */
-export interface PlannedDuty {
-  /** Verb + object, e.g. "relieve overpressure". */
-  function: string;
-  functionClass: FunctionClass;
-  evidence: 'evident' | 'hidden';
-  /** The spec value or context statement that defines the duty's standard, if any. */
-  standardSource: string;
-}
-
-/** A stream or service property a subsystem only passes through or consumes, and who owns it. */
-export interface ReceivedProperty {
-  property: string;
-  owner: string;
-}
-
-export interface SubsystemPlan {
-  /** Subsystem name exactly as MasterGen named it. */
-  name: string;
-  /** Hardware inside this subsystem's boundary. */
-  includes: string[];
-  /** Hardware that belongs to a sibling subsystem and is outside this boundary. */
-  excludes: string[];
-  /** Properties this subsystem's own hardware changes or delivers. */
-  changes: string[];
-  receives: ReceivedProperty[];
-  duties: PlannedDuty[];
-  /** Specs reassigned to this subsystem at system level. Empty keeps the original specs. */
-  specs: string;
-}
-
-/**
- * System-level function allocation, made once before the subsystems are
- * generated in parallel.
- *
- * Each subsystem used to be generated alone with only its siblings' names, so
- * every one of them claimed every duty and stream property it could see in the
- * package description. The plan decides ownership with the whole system in
- * view, and each subsystem's steps are then fed its own entry.
- */
-export interface SystemFunctionPlan {
-  createdAt: string;
-  subsystems: SubsystemPlan[];
-  /** Package-level duties (the delivered service, shared control, changeover, shutdown) and their single owner. */
-  systemDuties: Array<{ duty: string; owner: string }>;
-}
-
 export interface Project {
   id: string;
   name: string;
@@ -233,8 +172,6 @@ export interface Project {
   subsystems: Subsystem[];
   /** Stated operating context (JA1011 Q1); absent until the user records it. */
   operatingContext?: OperatingContext;
-  /** Function allocation MasterGen made before generating the subsystems. Reused by Auto-Fill and Redecompose. */
-  functionPlan?: SystemFunctionPlan;
   /** Last RCM Studio feedback import: what was applied and the FMECA-facing gaps to resolve. */
   rcmFeedback?: {
     importedAt: string;
@@ -407,6 +344,4 @@ export interface ContextData {
   siblingFailureModes?: Array<Pick<Mode, 'mode' | 'cause' | 'effect'>>;
   /** Names of the project's other subsystems — used to keep Specs inside this subsystem's boundary. */
   siblingSubsystems?: string[];
-  /** This subsystem's entry in the system function plan, rendered as a prompt block. Replaces the sibling-names block. */
-  allocationBlock?: string;
 }
