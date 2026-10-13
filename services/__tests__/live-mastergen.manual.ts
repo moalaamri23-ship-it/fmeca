@@ -48,6 +48,10 @@ const URL_ = process.env.COPILOT_URL || envFromFile('COPILOT_URL') || '';
 const OUT = process.env.OUT_DIR || join(tmpdir(), 'fmeca-live');
 const ONLY = (process.env.SYSTEMS || '').split(',').map(s => s.trim()).filter(Boolean);
 const CONCURRENCY = Number(process.env.CONCURRENCY || 8);
+// plan: function plan + failure shapes. baseline: neither. plan-noshape: the plan,
+// with each row's failure shape stripped before the FF step, to isolate S3.
+type Variant = 'plan' | 'baseline' | 'plan-noshape';
+const VARIANTS = ((process.env.VARIANTS || 'plan,baseline').split(',').map(v => v.trim()).filter(Boolean)) as Variant[];
 
 const SYSTEMS: Array<{ id: string; name: string; desc: string }> = [
     {
@@ -109,7 +113,7 @@ const runPool = async <T, R>(items: T[], limit: number, worker: (item: T) => Pro
 const sid = (tag: string) => `live-${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
 /** Steps 2-4 of MasterGen's worker, with the same arguments App.tsx passes. */
-const generateSubsystem = async (sys: { name: string; desc: string }, s: any, all: any[], plan: SystemFunctionPlan | null) => {
+const generateSubsystem = async (sys: { name: string; desc: string }, s: any, all: any[], plan: SystemFunctionPlan | null, shapes = true) => {
     const projectContext = `${sys.name}: ${sys.desc}`;
     const session = sid('sub');
     const siblings = all.filter(o => o !== s).map(o => String(o.name || '').trim()).filter(Boolean);
@@ -120,7 +124,7 @@ const generateSubsystem = async (sys: { name: string; desc: string }, s: any, al
     }, 'copilot', '', '', URL_, session) || '').trim();
     const rows = func
         ? (await AIService.decomposeFunction(func, s.name, projectContext, '', '', 'copilot', '', URL_, '', 'detailed', s.specs || '', session, siblings, allocation))
-            .map((r, i) => ({ ...r, id: `${s.name}#${i}` }))
+            .map((r, i) => ({ ...r, id: `${s.name}#${i}`, failureShape: shapes ? r.failureShape : undefined }))
         : [];
     const ff = rows.length
         ? await AIService.generateFFsForBreakdownRows({
@@ -187,14 +191,13 @@ describe.skipIf(!URL_)('live MasterGen A/B: function plan vs sibling names', () 
 
         // Both variants of every system share one pool, so the provider sees a
         // steady load instead of bursts.
-        type Job = { sysId: string; variant: 'plan' | 'baseline'; sub: any; all: any[]; plan: SystemFunctionPlan | null; sys: any };
-        const jobs: Job[] = prepared.flatMap(p => [
-            ...p.planned.map((sub: any) => ({ sysId: p.sys.id, variant: 'plan' as const, sub, all: p.planned, plan: p.plan, sys: p.sys })),
-            ...p.rawSubs.map((sub: any) => ({ sysId: p.sys.id, variant: 'baseline' as const, sub, all: p.rawSubs, plan: null, sys: p.sys })),
-        ]);
+        type Job = { sysId: string; variant: Variant; sub: any; all: any[]; plan: SystemFunctionPlan | null; sys: any };
+        const jobs: Job[] = prepared.flatMap(p => VARIANTS.flatMap((variant): Job[] => variant === 'baseline'
+            ? p.rawSubs.map((sub: any) => ({ sysId: p.sys.id, variant, sub, all: p.rawSubs, plan: null, sys: p.sys }))
+            : p.planned.map((sub: any) => ({ sysId: p.sys.id, variant, sub, all: p.planned, plan: p.plan, sys: p.sys }))));
         const results = await runPool(jobs, CONCURRENCY, async job => {
             try {
-                const out = await generateSubsystem(job.sys, job.sub, job.all, job.plan);
+                const out = await generateSubsystem(job.sys, job.sub, job.all, job.plan, job.variant !== 'plan-noshape');
                 console.log(`[${job.sysId}/${job.variant}] ${job.sub.name}: ${out.functionBreakdown.length} rows, ${out.failures.length} FFs`);
                 return { job, out, error: undefined as string | undefined };
             } catch (e: any) {
@@ -207,11 +210,11 @@ describe.skipIf(!URL_)('live MasterGen A/B: function plan vs sibling names', () 
         });
 
         for (const p of prepared) {
-            for (const variant of ['plan', 'baseline'] as const) {
+            for (const variant of VARIANTS) {
                 const subsystems = results.filter(r => r.job.sysId === p.sys.id && r.job.variant === variant && r.out).map(r => r.out!);
                 const project = {
                     id: `${p.sys.id}-${variant}`, name: p.sys.name, desc: p.sys.desc, created: '', updated: '',
-                    subsystems, functionPlan: variant === 'plan' ? p.plan ?? undefined : undefined,
+                    subsystems, functionPlan: variant === 'baseline' ? undefined : p.plan ?? undefined,
                 } as any;
                 writeFileSync(`${OUT}/${p.sys.id}-${variant}.json`, JSON.stringify(project, null, 2));
                 summary[`${p.sys.id}/${variant}`] = {

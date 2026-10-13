@@ -85,6 +85,18 @@ export type FunctionClass = 'primary' | 'containment' | 'protection' | 'control'
 export type FailedStateType = 'total' | 'partial' | 'upper_limit' | 'lower_limit' | 'intermittent' | 'on_demand';
 
 /**
+ * Which failed states a function can physically reach, declared per breakdown
+ * row. See allowedFailedStates in services/FailureShape.ts for the mapping.
+ *   binary      -> done or not done (containment, a command, a fixed capacity)
+ *   below       -> delivers an amount that can fall short
+ *   above       -> must stay under a limit
+ *   band        -> holds a setpoint; too low and too high both matter
+ *   conformance -> meets a grade or specification
+ *   protective  -> acts on demand against an excursion
+ */
+export type FailureShape = 'binary' | 'below' | 'above' | 'band' | 'conformance' | 'protective';
+
+/**
  * One measurable requirement inside a function's performance standard.
  *
  * The standard used to be free text alone, so nothing downstream could tell
@@ -124,6 +136,8 @@ export interface BreakdownRow {
   evidence?: 'evident' | 'hidden';
   /** Parsed requirements inside `standard`. Absent on rows saved before this existed. */
   standardParameters?: StandardParameter[];
+  /** Which failed states this function can reach. Absent on rows saved before this existed: no restriction. */
+  failureShape?: FailureShape;
 }
 
 export interface BreakdownMatch {

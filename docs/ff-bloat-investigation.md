@@ -314,3 +314,23 @@ Run 1 is not in the table. It found two bugs: the leak-detection subsystem lost 
 2. **The plan can merge two protective duties.** In the pump set, the low-low-level trip and the high-winding-temperature trip became one duty, and the winding-temperature trip lost its on-demand FF. This is a side effect of the "two duties that fail the same way are one duty" principle. Protective trips with different initiators fail independently, so watch for this in review.
 3. **The plan's own judgement varies between runs.** In run 3 the plan gave a standby duty to both a machine and its driver; in run 4 it did not. A plan view the analyst can edit (S1's review mitigation) is not built yet.
 4. **Power Automate Bad Gateways** dropped one subsystem in two of the runs. MasterGen reports this as an issue, and the harness records it in `summary.json`.
+
+## 8. S3: declared failure shape (implemented)
+
+Each breakdown row declares `failureShape` (`binary`, `below`, `above`, `band`, `conformance` or `protective`). `services/FailureShape.ts` maps the shape to the failed states the function can reach; hidden rows get `on_demand` in place of `total`. `generateFFsForBreakdownRows` enforces the mapping in code:
+- a state the shape does not admit is dropped and reported, and is not sent to the repair pass;
+- each row keeps at most one failure per state, so several parameters violating the same state become one failure;
+- `total` and `on_demand` are relabelled to match the row's evidence.
+
+`CoverageCheck` judges a shaped row per state (`Expected state missing`, `State outside failure shape`), not per parameter. Rows saved before this change have no shape and behave as before.
+
+Live run (`VARIANTS=plan,plan-noshape`): every system has the plan on both sides, so the difference is S3 alone.
+
+| System | Plan, no shape | Plan + shape |
+|---|---|---|
+| Compressor (like-for-like) | 35 | 23 (−34%) |
+| 415 V switchboard | 38 | 22 (−42%) |
+| Shell-and-tube cooler | 19 | 15 (−21%) |
+| Pump set | 32 | 26 (−19%) |
+
+FFs per row fell from about 1.9 to about 1.3. Intermittent states fell from 5–6 per system to 0–1, and the one left on the compressor is the pressure-control loop hunting. No protective or hidden row was lost. Remaining quibbles: a rated current written as a `below` deliverable (switchboard), and an insulation duty labelled `conformance` instead of `binary`.

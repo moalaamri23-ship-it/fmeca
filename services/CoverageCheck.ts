@@ -1,4 +1,5 @@
 import { BreakdownRow, Failure, StandardParameter, Project, Subsystem } from '../types';
+import { allowedFailedStates } from './FailureShape';
 
 /**
  * Coverage checking for a subsystem's function breakdown and its functional
@@ -170,6 +171,9 @@ export function checkRow(row: BreakdownRow, failures: Failure[]): CoverageFindin
                 detail: `"${p.name}" ${valueConflict}`,
             });
         }
+        // With a declared failure shape, parameters quantify states rather than
+        // generate them; coverage is judged per state below, not per parameter.
+        if (row.failureShape) continue;
         const missing = credibleDirections(p).filter(d => !covered.has(`${p.name}|${d}`));
         // Only report a parameter with NO coverage at all. Reporting each missing
         // direction turns the panel into the same six-per-function checklist the
@@ -185,6 +189,31 @@ export function checkRow(row: BreakdownRow, failures: Failure[]): CoverageFindin
                 severity: 'gap',
                 label: 'Uncovered requirement',
                 detail: `"${p.name}" (${p.value}${p.unit ? ' ' + p.unit : ''}) has no functional failure. Credible omission, or a gap?`,
+            });
+        }
+    }
+
+    const allowed = allowedFailedStates(row.failureShape, row.evidence);
+    if (allowed) {
+        // Hunting on a control loop and a spurious protective action are states
+        // the shape admits but does not always have; only the rest are expected.
+        const optional = (st: string) => st === 'intermittent' || (row.failureShape === 'protective' && st === 'upper_limit');
+        const missingStates = allowed.filter(st => !optional(st) && !states.has(st));
+        if (missingStates.length) {
+            findings.push({
+                rowId: row.id,
+                severity: 'gap',
+                label: 'Expected state missing',
+                detail: `This ${row.failureShape} function can reach ${missingStates.join(' and ')}, which has no failure. Credible omission, or a gap?`,
+            });
+        }
+        const outside = Array.from(states).filter(st => !allowed.includes(st as any));
+        if (outside.length) {
+            findings.push({
+                rowId: row.id,
+                severity: 'conflict',
+                label: 'State outside failure shape',
+                detail: `A ${row.failureShape} function cannot reach ${outside.join(', ')}. Either the shape or the failure is wrong.`,
             });
         }
     }
