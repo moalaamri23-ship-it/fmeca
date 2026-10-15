@@ -14,6 +14,8 @@
  * code, so the result does not depend on which run produced the file.
  */
 
+import type { FailureShape } from '../types';
+
 export type FunctionClass = 'primary' | 'containment' | 'protection' | 'control' | 'support';
 
 export interface CardFunction {
@@ -43,6 +45,8 @@ export interface CardRow {
     functionClass: FunctionClass;
     quantified: boolean;
     evidence: 'evident' | 'hidden';
+    /** Set where the class alone decides it; value duties are classified by the model. */
+    failureShape?: FailureShape;
 }
 
 export interface CardSubsystem {
@@ -211,17 +215,32 @@ export function cardToSubsystem(card: KnowledgeCard): CardSubsystem {
 // The card already states each function once with its standard. Re-deriving
 // rows with the model let it add duties from the operating context (standby,
 // trips, cycling) to subsystems that do not own them.
+// The class settles the shape for duties with no amount to fall short of:
+// containment is held or lost, a protective device acts on demand or does not.
+// Duties carrying a value (primary, control) depend on the physics of that
+// value -- a flow can fall short, a dew point can only be exceeded -- so the
+// model classifies them (AIService.classifyFailureShapes).
+const SHAPE_BY_CLASS: Partial<Record<FunctionClass, FailureShape>> = {
+    containment: 'binary',
+    protection: 'protective',
+    support: 'binary',
+};
+
 // A buffer passes on the flow it receives; the throughput on its Delivers line
 // is produced upstream and would fail there a second time.
 const STORAGE_DUTY = /^(buffer|store|hold|collect|accumulat)/i;
 function toRow(f: CardFunction, delivers: string): CardRow | null {
     const text = tidy(f.text).replace(/[.;,\s]+$/, '');
     if (!text) return null;
-    // The function line carries its own value when it has one; a primary line
-    // without one ("remove water vapour by adsorption") takes the quantified
-    // output from the card's Delivers line.
-    const standard = /\d/.test(text) ? text
-        : f.cls === 'primary' && /\d/.test(delivers) && !STORAGE_DUTY.test(text) ? delivers
+    // A primary function is judged against what this subsystem itself hands on:
+    // its Delivers line. Its own wording can name a variable another subsystem
+    // produces ("maintain air pressure and quality" on a controller whose output
+    // is commands), and every failure written against that variable duplicates
+    // the producer's. A buffer is the exception: the throughput it passes on is
+    // produced upstream, so it keeps its own wording.
+    const ownOutput = f.cls === 'primary' && delivers && !STORAGE_DUTY.test(text);
+    const standard = ownOutput ? delivers
+        : /\d/.test(text) ? text
         : 'required';
     return {
         function: text.charAt(0).toUpperCase() + text.slice(1),
@@ -231,6 +250,7 @@ function toRow(f: CardFunction, delivers: string): CardRow | null {
         // A protective device is only called on demand; its failure is hidden
         // until the demand arrives (JA1011 5.2).
         evidence: f.cls === 'protection' ? 'hidden' : 'evident',
+        failureShape: SHAPE_BY_CLASS[f.cls],
     };
 }
 

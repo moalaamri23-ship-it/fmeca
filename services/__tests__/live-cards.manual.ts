@@ -32,6 +32,9 @@ describe('live knowledge cards', () => {
         const project = process.env.PROJECT_JSON ? JSON.parse(readFileSync(process.env.PROJECT_JSON, 'utf8')) : null;
         const systemName = project?.desc ? `${project.name}: ${project.desc}` : (project?.name || 'Instrument Air Compressor Package');
         const rows = sub.rows.map((r, i) => ({ ...r, snippet: r.function, id: `row${i}` }));
+        const open = rows.filter(r => !r.failureShape);
+        const shapes = await AIService.classifyFailureShapes({ subsystemName: sub.name, subsystemSpecs: sub.specs, rows: open, key: '', modelName: '', aiProvider: 'copilot', powerAutomateUrl: url, sessionId: `cards-${Date.now()}-shape` });
+        open.forEach((r: any, i) => { if (shapes[i].length) { r.failureShape = shapes[i][0]; r.failureShapes = shapes[i]; } });
         const ff = await AIService.generateFFsForBreakdownRows({
             systemName, subsystemName: sub.name, subsystemSpecs: sub.specs,
             funcDesc: sub.func, rows, existingFailures: [], key: '', modelName: '',

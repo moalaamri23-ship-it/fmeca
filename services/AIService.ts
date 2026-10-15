@@ -1,4 +1,5 @@
-import { ContextData, FunctionClass, FailedStateType, StandardParameter } from '../types';
+import { ContextData, FunctionClass, FailedStateType, StandardParameter, FailureShape } from '../types';
+import { allowedFailedStates, allowedStatesForRow, normalizeFailureShape } from './FailureShape';
 import { RICH_LIBRARY } from '../constants';
 import { buildCopilotPrompt, parseCopilotReply, getCopilotSessionId } from './copilotHelper';
 import {
@@ -182,6 +183,25 @@ Performance standard parameters:
 - A rating that measures what the equipment CONSUMES or WITHSTANDS is not a parameter of the service it delivers. It describes the cost or the envelope of doing the duty, not the duty, so a failure derived from it competes with the output the function exists to produce. Put a consumption rating on an "efficiency" function of its own when the description supports one, and otherwise leave it out. Put a withstand rating in the containment row's standard text.
 - Order "standardParameters" with the requirements the function exists to deliver first.
 - When the standard is qualitative and holds no measurable requirement, return an empty "standardParameters" array rather than inventing values.`;
+
+// The failed states a function can reach are a property of the function, so the
+// breakdown step -- which has the equipment and its standard in view -- declares
+// them, and the FF step only writes what was declared. Without this the FF step
+// read a parameter list and a direction vocabulary and produced one failure per
+// parameter plus a reflexive "erratic", whatever the equipment could do: a fixed
+// vessel volume came back "stores below capacity", a motor came back "power
+// below" beside "speed below" beside "erratic".
+/** Reason prefix for a failure discarded because its row's failure shape does not admit its state. */
+const OUTSIDE_SHAPE = 'outside the declared failure shape';
+
+const FAILURE_SHAPE_RULES = `Failure shape (exactly one per row) -- which failed states this function can physically reach in its operating context:
+- "binary": it is done or not done; there is no "less" of it. Containment, a command or start, a transmitted signal, a connection, a capacity fixed by construction.
+- "below": it delivers an amount that can fall short of the standard: a flow, a head, a power, a removal.
+- "above": it must keep something under a limit, and only exceeding the limit is a failure.
+- "band": it holds a variable at a setpoint, and both too low and too high matter.
+- "conformance": it must meet a quality grade or specification that has no amount to fall short of.
+- "protective": it acts only on demand against an excursion: a trip, relief, isolation, takeover, or alarm.
+Judge the shape from what the equipment physically does, not from how many parameters the standard holds.`;
 
 // JA1011 5.2 requires all failed states of each FUNCTION -- not of each
 // parameter, and the difference is the whole design of this block.
@@ -450,6 +470,7 @@ export type RawBreakdownRow = {
     quantified: boolean;
     evidence: 'evident' | 'hidden';
     standardParameters: StandardParameter[];
+    failureShape?: FailureShape;
 };
 
 /**
@@ -512,6 +533,7 @@ export function buildBreakdownRows(
             quantified: row.quantified,
             evidence: row.evidence,
             standardParameters: row.standardParameters,
+            failureShape: row.failureShape,
         };
         if (!cleaned.function || !cleaned.standard) return;
         if (usedKeys.has(key)) {
@@ -1174,7 +1196,7 @@ export const AIService = {
             });
     },
 
-    cleanBreakdownRow(row: { function: string; standard: string; snippet: string; functionClass?: string; quantified?: boolean; evidence?: string; standardParameters?: unknown }): { function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden'; standardParameters: StandardParameter[] } {
+    cleanBreakdownRow(row: { function: string; standard: string; snippet: string; functionClass?: string; quantified?: boolean; evidence?: string; standardParameters?: unknown; failureShape?: unknown }): { function: string; standard: string; snippet: string; functionClass: FunctionClass; quantified: boolean; evidence: 'evident' | 'hidden'; standardParameters: StandardParameter[]; failureShape?: FailureShape } {
         const fn = this.normalizeFunctionPhraseForFailure(row.function);
         const standard = this.cleanSingleFieldText(row.standard)
             .replace(/^(?:to|and)\s+/i, '')
@@ -1195,6 +1217,7 @@ export const AIService = {
             quantified: /\d/.test(standard) || standardParameters.some(p => /\d/.test(p.value)),
             evidence: String(row.evidence || '').toLowerCase().trim() === 'hidden' ? 'hidden' : 'evident',
             standardParameters,
+            failureShape: normalizeFailureShape(row.failureShape),
         };
     },
 
@@ -1775,12 +1798,71 @@ ${formatRule}`;
         return [];
     },
 
+    /**
+     * The failure shape of each row, for rows whose class does not decide it.
+     * Returns one entry per row, undefined where the model gave none or the call
+     * failed: an unshaped row is unrestricted downstream, never dropped.
+     */
+    async classifyFailureShapes(args: {
+        subsystemName: string;
+        subsystemSpecs: string;
+        rows: Array<{ function: string; standard: string; functionClass?: FunctionClass }>;
+        key: string;
+        modelName: string;
+        aiProvider?: string;
+        azureEndpoint?: string;
+        powerAutomateUrl?: string;
+        sessionId?: string;
+    }): Promise<Array<FailureShape[]>> {
+        const { subsystemName, subsystemSpecs, rows, key, modelName, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', sessionId } = args;
+        if (!rows.length) return [];
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') return rows.map(() => []);
+        const list = rows.map((r, i) => `${i + 1}. [${r.functionClass || 'primary'}] ${r.function} -- standard: ${r.standard}`).join('\n');
+        const prompt = `Subsystem "${subsystemName}". Specs: ${subsystemSpecs || 'N/A'}.
+Functions:
+${list}
+
+${FAILURE_SHAPE_RULES}
+Give one shape per independent requirement in the function's standard: a duty that must deliver an amount and also keep a quality under a limit has two (["below", "above"]); requirements of the same kind share one. A quality value with a limit (a dew point, a contaminant content) is judged by its off-spec direction: one that must stay at or under its value can only be exceeded.
+A control duty that holds variables at setpoints is "band" even when its own line states no value: read the setpoints from the specs.
+
+Return ONLY this JSON, one list per function in the same order:
+{ "shapes": [["below", "above"], ["binary"]] }`;
+        try {
+            const parsed = await this._withRetry(async () => {
+                const res = await this.chat({
+                    feature: 'failure-shape',
+                    provider: (aiProvider || inferProvider(key)) as any,
+                    azureEndpoint: azureEndpoint || undefined,
+                    powerAutomateUrl: powerAutomateUrl || undefined,
+                    sessionId,
+                    model: modelName,
+                    messages: [{ role: 'user', content: prompt }],
+                    mode: 'ai',
+                    refText: '',
+                    apiKey: key,
+                    responseFormat: 'json'
+                });
+                const p = this.extractJSON(res);
+                if (!p || !Array.isArray(p.shapes)) throw new Error('failure shape: bad reply');
+                return p;
+            });
+            return rows.map((_, i) => {
+                const entry = parsed.shapes[i];
+                const list = (Array.isArray(entry) ? entry : [entry]).map(normalizeFailureShape).filter((v): v is FailureShape => !!v);
+                return [...new Set(list)];
+            });
+        } catch {
+            return rows.map(() => []);
+        }
+    },
+
     async generateFFsForBreakdownRows(args: {
         systemName: string;
         subsystemName: string;
         subsystemSpecs: string;
         funcDesc: string;
-        rows: Array<{ id: string; function: string; standard: string; snippet: string; functionClass?: FunctionClass; quantified?: boolean; evidence?: 'evident' | 'hidden'; standardParameters?: StandardParameter[] }>;
+        rows: Array<{ id: string; function: string; standard: string; snippet: string; functionClass?: FunctionClass; quantified?: boolean; evidence?: 'evident' | 'hidden'; standardParameters?: StandardParameter[]; failureShape?: FailureShape; failureShapes?: FailureShape[] }>;
         existingFailures: string[];
         key: string;
         modelName: string;
@@ -1792,8 +1874,12 @@ ${formatRule}`;
         siblingSubsystems?: string[];
     }): Promise<{
         failures: Array<{ rowId: string; desc: string; sourceSnippet?: string; failedState?: FailedStateType; parameter?: string; needsReview?: boolean }>;
-        /** Generations thrown away by the cleaner, keyed by rowId. Reported, never replaced with a template. */
-        rejected: Array<{ rowId: string; raw: string; reason?: string }>;
+        /**
+         * Generations thrown away, keyed by rowId. Reported, never replaced with a template.
+         * `outOfShape` marks a failure the row's failure shape does not admit: a deliberate
+         * discard, not an unusable generation, so callers do not report it as a problem.
+         */
+        rejected: Array<{ rowId: string; raw: string; reason?: string; outOfShape?: boolean }>;
     }> {
         const { systemName, subsystemName, subsystemSpecs, funcDesc, rows, existingFailures, key, modelName, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', systemContext = '', sessionId, siblingSubsystems = [] } = args;
         if (!rows.length) return { failures: [], rejected: [] };
@@ -1813,8 +1899,10 @@ ${formatRule}`;
             standardParameters: r.standardParameters ?? [],
             functionClass: r.functionClass || 'primary',
             evidence: r.evidence || 'evident',
+            ...(r.failureShape ? { failureShape: r.failureShape, allowedStates: allowedStatesForRow(r) } : {}),
             snippet: r.snippet,
         })), null, 2);
+        const allowedByRow = new Map(rows.map(r => [r.id, allowedStatesForRow(r)]));
 
         const prompt = `Context: System "${systemName}", Subsystem "${subsystemName}".
 Subsystem Specs: "${subsystemSpecs || 'N/A'}"
@@ -1829,6 +1917,7 @@ ${FMECA_CONCISE_WORDING_RULES}
 ${FUNCTIONAL_FAILURE_TECHNICAL_RULES}
 ${JA1011_FAILED_STATE_RULES}
 Each row's "standardParameters" is the list of requirements to enumerate against. Where it is empty the standard is qualitative: emit total loss only and do not invent values.
+Where a row carries "allowedStates", its failure shape decides which failed states exist and the parameters only quantify them. Write failures only in those states, and at most ONE failure per state per row: when several parameters fall short in the same state, that is one failed state -- name the parameter that governs it. A state outside "allowedStates" is discarded.
 "evidence" tells you how the failure is discovered, not how many failures there are. A hidden row's total loss is written as an on-demand failure and REPLACES the total row; it is not an extra one.
 Use the full subsystem function only to resolve ambiguity, not to add extra details.
 Write short professional FMECA failure states, not narratives.
@@ -1870,7 +1959,7 @@ Return ONLY strict JSON. "parameter" names the standardParameters entry the fail
 
         type Kept = { rowId: string; desc: string; sourceSnippet?: string; failedState?: FailedStateType; parameter?: string };
         const kept: Kept[] = [];
-        const rejected: Array<{ rowId: string; raw: string; reason?: string }> = [];
+        const rejected: Array<{ rowId: string; raw: string; reason?: string; desc?: string; parameter?: string; outOfShape?: boolean }> = [];
         // Uniqueness is rowId + parameter + failed state. Text alone was wrong in
         // both directions: it let the same state through twice reworded, and — once
         // every reject collapsed to one template string — it deleted the evidence
@@ -1890,7 +1979,7 @@ Return ONLY strict JSON. "parameter" names the standardParameters entry the fail
                 }
                 const claimed = String(f?.failedState ?? f?.failed_state ?? '').toLowerCase().trim() as FailedStateType;
                 // "lower_limit" never meant anything distinct from "partial".
-                const failedState = claimed === 'lower_limit'
+                let failedState: FailedStateType | undefined = claimed === 'lower_limit'
                     ? 'partial'
                     : validStates.includes(claimed) ? claimed : undefined;
                 // A failure tagged upper_limit whose text says "below" is not a
@@ -1904,13 +1993,36 @@ Return ONLY strict JSON. "parameter" names the standardParameters entry the fail
                     || /\bunder\s+[\d.]/i.test(desc);
                 const saysAbove = /\b(above|exceeds?|excessive|greater than|beyond|high|excess)\b/i.test(desc)
                     || /\bover\s+[\d.]/i.test(desc);
-                if ((failedState === 'upper_limit' && saysBelow && !saysAbove) ||
-                    (failedState === 'partial' && saysAbove && !saysBelow)) {
+                // A row whose shape admits a single state has its label forced below,
+                // so the wording cannot contradict it: "dew point above -15 deg C" is
+                // the off-spec state of a conformance duty, not a mislabelled excess.
+                const singleState = (allowedByRow.get(rowId)?.length ?? 0) === 1;
+                if (!singleState && ((failedState === 'upper_limit' && saysBelow && !saysAbove) ||
+                    (failedState === 'partial' && saysAbove && !saysBelow))) {
                     rejected.push({ rowId, raw, reason: `text direction contradicts failedState "${failedState}"` });
                     continue;
                 }
                 const parameter = this.cleanSingleFieldText(String(f?.parameter ?? '')).toLowerCase() || undefined;
-                const dedupeKey = `${rowId}|${parameter ?? ''}|${failedState ?? desc.toLowerCase()}`;
+                // A declared shape is enforced here, not only asked for. A state the
+                // shape does not admit is dropped and reported -- never sent to the
+                // repair pass, which would only restate it -- and the shape allows one
+                // failure per state, so the key drops the parameter.
+                const allowed = allowedByRow.get(rowId);
+                // Total loss and on-demand loss are the same state; which label is
+                // right follows from the row's evidence, so relabel rather than drop.
+                if (allowed && failedState === 'total' && allowed.includes('on_demand')) failedState = 'on_demand';
+                else if (allowed && failedState === 'on_demand' && allowed.includes('total')) failedState = 'total';
+                // A shape with one state has nothing to choose between: whatever the
+                // model called it, it is that state. Discarding instead emptied a dryer's
+                // drying duty, whose only candidates were tagged total and partial.
+                if (allowed && allowed.length === 1) failedState = allowed[0];
+                if (allowed && (!failedState || !allowed.includes(failedState))) {
+                    rejected.push({ rowId, raw, desc, parameter, outOfShape: true, reason: `${OUTSIDE_SHAPE}: "${failedState ?? 'untagged'}" is not one of ${allowed.join(', ')}` });
+                    continue;
+                }
+                const dedupeKey = allowed
+                    ? `${rowId}|${failedState}`
+                    : `${rowId}|${parameter ?? ''}|${failedState ?? desc.toLowerCase()}`;
                 if (seen.has(dedupeKey)) continue;
                 seen.add(dedupeKey);
                 kept.push({
@@ -1937,8 +2049,9 @@ Return ONLY strict JSON. "parameter" names the standardParameters entry the fail
             // would reach Copilot stripped of the breakdown rows it is meant to be
             // repairing — it would arrive as a list of rejected sentences with no
             // idea what they described.
-            if (rejected.length) {
-                const repairList = rejected
+            const repairable = rejected.filter(r => !r.reason?.startsWith(OUTSIDE_SHAPE));
+            if (repairable.length) {
+                const repairList = repairable
                     .map(r => `- rowId "${r.rowId}"${r.reason ? ` [${r.reason}]` : ''}: ${r.raw}`)
                     .join('\n');
                 const repair = `Function breakdown rows:
@@ -1958,11 +2071,26 @@ These failures are already accepted — do not repeat them and do not add anythi
 ${kept.map(k => `- ${k.desc}`).join('\n') || '(none)'}
 
 Return ONLY strict JSON: { "failures": [ { "rowId": "...", "parameter": "...", "failedState": "...", "desc": "...", "sourceSnippet": "..." } ] }`;
-                const before = rejected.length;
+                const before = repairable.length;
+                const outsideShape = rejected.filter(r => r.reason?.startsWith(OUTSIDE_SHAPE));
                 const recovered = await callOnce([{ role: 'user', content: repair }]);
                 rejected.length = 0;
                 absorb(recovered);
-                if (rejected.length) console.warn(`[generateFFsForBreakdownRows] ${rejected.length}/${before} still unusable after repair`);
+                const stillUnusable = rejected.length;
+                rejected.push(...outsideShape);
+                if (stillUnusable) console.warn(`[generateFFsForBreakdownRows] ${stillUnusable}/${before} still unusable after repair`);
+            }
+
+            // The shape narrows a row's failures; it must never erase them. A row
+            // left with nothing but out-of-shape candidates keeps the first one,
+            // relabelled to the shape's primary state.
+            for (const row of rows) {
+                const allowed = allowedByRow.get(row.id);
+                if (!allowed || kept.some(k => k.rowId === row.id)) continue;
+                const candidate = rejected.find(r => r.rowId === row.id && r.desc && r.reason?.startsWith(OUTSIDE_SHAPE));
+                if (!candidate) continue;
+                kept.push({ rowId: row.id, desc: candidate.desc!, failedState: allowed[0], parameter: candidate.parameter, sourceSnippet: row.snippet });
+                rejected.splice(rejected.indexOf(candidate), 1);
             }
 
             return { failures: kept, rejected };
@@ -3244,6 +3372,8 @@ ${FMECA_HIERARCHY_RULES}
 ${FMECA_CONCISE_WORDING_RULES}
 ${FUNCTION_BREAKDOWN_TECHNICAL_RULES}
 
+${FAILURE_SHAPE_RULES}
+
 ${contextLine}${specsBlock}${siblingBlock}Function description:
 """
 ${funcDesc}
@@ -3278,10 +3408,11 @@ JSON field rules:
 - quantified = true only when "standard" contains a real measurable value.
 - functionClass = exactly one of: primary, containment, protection, control, support, efficiency.
 - evidence = "evident" or "hidden".
+- failureShape = exactly one of: binary, below, above, band, conformance, protective.
 - snippet = verbatim source slice from the original description, 15-80 characters.
 
 Return ONLY this JSON, no prose, no markdown:
-{ "rows": [ { "function": "...", "standard": "...", "standardParameters": [ { "name": "...", "value": "...", "unit": "...", "bound": "min" } ], "quantified": true, "functionClass": "primary", "evidence": "evident", "snippet": "..." } ] }`;
+{ "rows": [ { "function": "...", "standard": "...", "standardParameters": [ { "name": "...", "value": "...", "unit": "...", "bound": "min" } ], "quantified": true, "functionClass": "primary", "evidence": "evident", "failureShape": "below", "snippet": "..." } ] }`;
 
         const content = prompt + (systemContext ? '\n\n' + systemContext : '');
         try {
@@ -3312,6 +3443,7 @@ Return ONLY this JSON, no prose, no markdown:
                     quantified: Boolean(r?.quantified),
                     evidence: String(r?.evidence ?? '').trim(),
                     standardParameters: r?.standardParameters ?? r?.standard_parameters,
+                    failureShape: r?.failureShape ?? r?.failure_shape,
                 }))
                 .filter((r: any) => r.function && r.standard);
 

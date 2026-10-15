@@ -85,7 +85,13 @@ describe('knowledge cards', () => {
             ['primary', 'evident', true], ['containment', 'evident', false], ['protection', 'hidden', false],
         ]);
         expect(pump.rows[1].standard).toBe('required');
+        expect(pump.rows.map(r => r.failureShape)).toEqual([undefined, 'binary', 'protective']);
         expect(panel.rows).toHaveLength(1);
+    });
+
+    it('judges a primary duty against its own Delivers line', () => {
+        const [pump] = cleanCards(parseKnowledgeCards(FILE)).map(cardToSubsystem);
+        expect(pump.rows[0].standard).toBe('120 m3/h at 6.5 barg to Discharge Header');
     });
 
     it('returns nothing for a file without the card layout', () => {

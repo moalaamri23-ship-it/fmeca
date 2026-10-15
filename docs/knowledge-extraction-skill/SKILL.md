@@ -100,6 +100,12 @@ SECTION 9 - REFERENCE AND GAPS
 
 Several separate equipment items: repeat Sections 1-8 per item with its tag in every header; emit Section 9 once.
 
+### One duty per function line
+Each `Functions:` line states ONE duty. Never join two duties with "and", "while" or "with" ("contain air and lubricant while separating oil" is two lines: a containment duty and a separation duty). A joined line can only fail one way, so the second duty silently loses its failures.
+
+### Primary function = this subsystem's own output
+The `primary:` line states what THIS subsystem hands on, the same output as its `Delivers:` line, with that line's standard. Never state it as a variable another subsystem produces. A control subsystem delivers decisions and commands (start, stop, load, unload, changeover, trip); the pressure, flow or quality those commands regulate is delivered by the process subsystems and is their primary function, not the controller's.
+
 ### What is NOT a function
 A protection function must be an ACTION performed by a device inside this subsystem (relieve, stop, isolate, prevent reverse flow). Providing a measurement or signal is never a protection function. `support` is only a structural duty of this subsystem's own items; cooling, filtering, separating and draining are `primary` or `containment` of the subsystem whose item does them.
 Do not list these under Functions: indication or display, measurement only, isolation valves for maintenance, maintenance notices or intervals, the redundancy arrangement itself, design ratings and set points (these go in Specifications and Limits), or any duty another subsystem executes.

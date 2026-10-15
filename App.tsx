@@ -2616,6 +2616,12 @@ syncFitBtn();
                         // owned duty with its standard, so re-deriving them would
                         // only re-add duties other subsystems own.
                         breakdown = s.rows.map((r: any) => ({ ...r, snippet: r.function, id: generateId() }));
+                        const open = breakdown.filter(r => !r.failureShape);
+                        if (open.length) {
+                            mark('Classifying failure shapes');
+                            const shapes = await AIService.classifyFailureShapes({ subsystemName: s.name, subsystemSpecs: s.specs || '', rows: open, key: apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, sessionId: subSession });
+                            open.forEach((r, i) => { if (shapes[i].length) { r.failureShape = shapes[i][0]; r.failureShapes = shapes[i]; } });
+                        }
                     } else if (func) {
                         mark('Decomposing functions');
                         const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '', subSession, subSiblings);
