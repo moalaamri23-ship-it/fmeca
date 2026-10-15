@@ -2611,7 +2611,12 @@ syncFitBtn();
 
                     const subSiblings = rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean);
                     let breakdown: BreakdownRow[] = [];
-                    if (func) {
+                    if (s.funcFromCard && s.rows?.length) {
+                        // The card's function lines are the rows: each states one
+                        // owned duty with its standard, so re-deriving them would
+                        // only re-add duties other subsystems own.
+                        breakdown = s.rows.map((r: any) => ({ ...r, snippet: r.function, id: generateId() }));
+                    } else if (func) {
                         mark('Decomposing functions');
                         const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '', subSession, subSiblings);
                         if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };

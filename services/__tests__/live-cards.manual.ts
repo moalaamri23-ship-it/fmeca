@@ -3,6 +3,8 @@
  *
  *   KNOWLEDGE_FILE=<path> SUBSYSTEM='^compressor air' OUT_DIR=<dir> npm run test:live -- live-cards
  *
+ * PROJECT_JSON (optional) supplies the system name and description, which
+ * MasterGen passes to the FF step as the system context.
  * Reads COPILOT_URL from the environment or .env.local (last assignment wins).
  * Takes one subsystem's name, specs and function from the cards, then runs the
  * same breakdown and functional-failure steps MasterGen runs.
@@ -27,10 +29,11 @@ describe('live knowledge cards', () => {
         const sub = subs.find(s => pick.test(s.name))!;
         expect(sub).toBeTruthy();
         const siblings = subs.filter(s => s !== sub).map(s => s.name);
-        const rows = (await AIService.decomposeFunction(sub.func, sub.name, 'Instrument Air Compressor Package', '', '', 'copilot', '', url, '', 'detailed', sub.specs, `cards-${Date.now()}`, siblings))
-            .map((r, i) => ({ ...r, id: `row${i}` }));
+        const project = process.env.PROJECT_JSON ? JSON.parse(readFileSync(process.env.PROJECT_JSON, 'utf8')) : null;
+        const systemName = project?.desc ? `${project.name}: ${project.desc}` : (project?.name || 'Instrument Air Compressor Package');
+        const rows = sub.rows.map((r, i) => ({ ...r, snippet: r.function, id: `row${i}` }));
         const ff = await AIService.generateFFsForBreakdownRows({
-            systemName: 'Instrument Air Compressor Package', subsystemName: sub.name, subsystemSpecs: sub.specs,
+            systemName, subsystemName: sub.name, subsystemSpecs: sub.specs,
             funcDesc: sub.func, rows, existingFailures: [], key: '', modelName: '',
             aiProvider: 'copilot', powerAutomateUrl: url, systemContext: '',
             sessionId: `cards-${Date.now()}-ff`, siblingSubsystems: siblings,

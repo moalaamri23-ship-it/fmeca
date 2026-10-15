@@ -26,13 +26,30 @@ export interface KnowledgeCard {
     functions: CardFunction[];
     specs: string[];
     delivers: string[];
-    limits: string[];
+    limits: CardLimit[];
+    /** Name plus Items lines, for matching an "executed by" entry to this card. */
+    itemsText: string;
+}
+
+export interface CardLimit {
+    text: string;
+    executedBy: string;
+}
+
+/** One row per card function line; MasterGen uses these as the breakdown rows. */
+export interface CardRow {
+    function: string;
+    standard: string;
+    functionClass: FunctionClass;
+    quantified: boolean;
+    evidence: 'evident' | 'hidden';
 }
 
 export interface CardSubsystem {
     name: string;
     specs: string;
     func: string;
+    rows: CardRow[];
 }
 
 const SUBSYSTEM_HEADER = /^SECTION\s+3\/\d+\s*-\s*SUBSYSTEM:\s*(.+?)\s*$/i;
@@ -57,15 +74,17 @@ const isNotStated = (s: string) => /^not stated\.?$/i.test(s.replace(SOURCE_REF,
 // Only the stated numbers travel; they are the performance standards of the
 // protective and control functions, and the FF step needs them as values.
 const LIMIT_COLUMNS = ['normal', 'low alarm', 'low trip', 'high alarm', 'high trip'];
-function formatLimit(row: string): string {
+function parseLimit(row: string): CardLimit | null {
     const cols = row.replace(SOURCE_REF, '').split('|').map(c => c.trim());
-    if (cols.length < 8) return '';
+    if (cols.length < 8) return null;
     const unit = isNotStated(cols[7]) ? '' : ` ${cols[7]}`;
     const values = LIMIT_COLUMNS
         .map((label, i) => [label, cols[2 + i]] as const)
         .filter(([, v]) => v && !isNotStated(v) && /\d/.test(v))
         .map(([label, v]) => `${label} ${v}${unit}`);
-    return values.length ? `${cols[0]}: ${values.join(', ')}` : '';
+    if (!values.length) return null;
+    const executedBy = cols.length > 10 && !isNotStated(cols[10]) ? cols[10] : '';
+    return { text: `${cols[0]}: ${values.join(', ')}`, executedBy };
 }
 
 /** Parse the subsystem blocks. Returns [] when the file has no card layout. */
@@ -79,7 +98,7 @@ export function parseKnowledgeCards(text: string): KnowledgeCard[] {
         const line = raw.trim();
         const header = line.match(SUBSYSTEM_HEADER);
         if (header) {
-            current = { name: header[1].trim(), functions: [], specs: [], delivers: [], limits: [] };
+            current = { name: header[1].trim(), functions: [], specs: [], delivers: [], limits: [], itemsText: header[1].trim() };
             cards.push(current);
             inFunctions = false;
             continue;
@@ -100,7 +119,9 @@ export function parseKnowledgeCards(text: string): KnowledgeCard[] {
         const delivers = line.match(/^Delivers\s*:\s*(.+)$/i);
         if (delivers) { current.delivers.push(delivers[1].trim()); continue; }
         const limit = line.match(/^Limits\s*:\s*(.+)$/i);
-        if (limit) { const l = formatLimit(limit[1]); if (l) current.limits.push(l); }
+        if (limit) { const l = parseLimit(limit[1]); if (l) current.limits.push(l); continue; }
+        const items = line.match(/^Items\s*:\s*(.+)$/i);
+        if (items) current.itemsText += ' ' + items[1];
     }
     return cards.filter(c => c.functions.length > 0);
 }
@@ -123,11 +144,43 @@ export function keepFunction(fn: CardFunction): boolean {
     return true;
 }
 
+const STOP_WORDS = new Set(['and', 'the', 'of', 'a', 'b', 'ab', 'or', 'by', 'to', 'in', 'not', 'stated', 'system', 'subsystem', 'package']);
+const tokens = (s: string) => new Set(s.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 1 && !STOP_WORDS.has(t)));
+
+/** The card whose name or items best match an "executed by" entry, or null. */
+function executingCard(executedBy: string, cards: KnowledgeCard[]): KnowledgeCard | null {
+    const want = tokens(executedBy);
+    let best: KnowledgeCard | null = null;
+    let bestScore = 0;
+    for (const c of cards) {
+        // The name decides; items only break a tie. Items lines mention what a
+        // device is used for ("for lead/lag control"), so on their own they
+        // pull a limit toward any subsystem that merely feeds the controller.
+        const name = tokens(c.name);
+        const items = tokens(c.itemsText);
+        const score = [...want].reduce((n, t) => n + (name.has(t) ? 10 : items.has(t) ? 1 : 0), 0);
+        if (score > bestScore) { best = c; bestScore = score; }
+    }
+    return best;
+}
+
 export function cleanCards(cards: KnowledgeCard[]): KnowledgeCard[] {
-    return cards
+    const kept = cards
         .filter(c => !STRUCTURE_NAME.test(c.name))
-        .map(c => ({ ...c, functions: c.functions.filter(keepFunction) }))
+        .map(c => ({ ...c, functions: c.functions.filter(keepFunction), limits: [] as CardLimit[] }))
         .filter(c => c.functions.length > 0);
+    // A limit is a performance standard of the subsystem that acts on it. An
+    // alarm or trip left on the subsystem that is merely measured turns into a
+    // "does not signal" or "unable to trip" failure there, duplicating the one
+    // the control subsystem already owns.
+    cards.forEach(original => {
+        const own = kept.find(c => c.name === original.name);
+        for (const limit of original.limits) {
+            const target = (limit.executedBy && executingCard(limit.executedBy, kept)) || own;
+            if (target) target.limits.push(limit);
+        }
+    });
+    return kept;
 }
 
 // Primary first: it is the mission every other line qualifies.
@@ -144,11 +197,41 @@ export function cardToSubsystem(card: KnowledgeCard): CardSubsystem {
         .map(f => sentence(f.text))
         .filter(Boolean)
         .join(' ');
-    const specs = [...card.specs, ...card.limits]
+    const specs = [...card.specs, ...card.limits.map(l => l.text)]
         .map(s => tidy(s).replace(/[.;\s]+$/, ''))
         .filter(s => s && !isNotStated(s))
         .join('; ');
-    return { name: card.name.replace(TAG, '').replace(/\s{2,}/g, ' ').trim(), specs, func };
+    const rows = CLASS_ORDER
+        .flatMap(cls => card.functions.filter(f => f.cls === cls))
+        .map(f => toRow(f, tidy(card.delivers[0] || '').replace(/[.;\s]+$/, '')))
+        .filter((r): r is CardRow => !!r);
+    return { name: card.name.replace(TAG, '').replace(/\s{2,}/g, ' ').trim(), specs, func, rows };
+}
+
+// The card already states each function once with its standard. Re-deriving
+// rows with the model let it add duties from the operating context (standby,
+// trips, cycling) to subsystems that do not own them.
+// A buffer passes on the flow it receives; the throughput on its Delivers line
+// is produced upstream and would fail there a second time.
+const STORAGE_DUTY = /^(buffer|store|hold|collect|accumulat)/i;
+function toRow(f: CardFunction, delivers: string): CardRow | null {
+    const text = tidy(f.text).replace(/[.;,\s]+$/, '');
+    if (!text) return null;
+    // The function line carries its own value when it has one; a primary line
+    // without one ("remove water vapour by adsorption") takes the quantified
+    // output from the card's Delivers line.
+    const standard = /\d/.test(text) ? text
+        : f.cls === 'primary' && /\d/.test(delivers) && !STORAGE_DUTY.test(text) ? delivers
+        : 'required';
+    return {
+        function: text.charAt(0).toUpperCase() + text.slice(1),
+        standard,
+        functionClass: f.cls,
+        quantified: /\d/.test(standard),
+        // A protective device is only called on demand; its failure is hidden
+        // until the demand arrives (JA1011 5.2).
+        evidence: f.cls === 'protection' ? 'hidden' : 'evident',
+    };
 }
 
 /**
