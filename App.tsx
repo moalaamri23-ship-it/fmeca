@@ -18,6 +18,7 @@ import { BulkCiteButton, type CiteState } from './components/CiteButton';
 import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
+import { subsystemsFromKnowledge } from './services/KnowledgeCards';
 import { LocalFileSystemProvider, sanitizeName, isCancellation } from './services/FileSystem';
 import { requestFullscreenViaHost, notifyHostFullscreenReleased } from './services/ShellFullscreen';
 import { RICH_LIBRARY } from './constants';
@@ -2551,7 +2552,13 @@ syncFitBtn();
         let wasCancelled = false;
 
         try {
-            const rawSubs = await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, masterSystemContext, powerAutomateUrl, runSession);
+            // A knowledge file written in subsystem-card layout already decided the
+            // subsystems, their specs and their functions from the full documents.
+            // Taking them as written avoids a second, disagreeing decision.
+            const cardSubs = aiSourceMode !== 'ai' ? subsystemsFromKnowledge(globalFileText) : [];
+            const rawSubs = cardSubs.length
+                ? cardSubs.map(s => ({ ...s, funcFromCard: true }))
+                : await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, masterSystemContext, powerAutomateUrl, runSession);
             if (masterCancelRef.current) { wasCancelled = true; return; }
             if (!rawSubs || !Array.isArray(rawSubs) || rawSubs.length === 0) { alert("Generation failed."); return; }
 
@@ -2595,7 +2602,9 @@ syncFitBtn();
                 const subSession = newConversationId();
                 try {
                     mark('Generating functions');
-                    const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: s.name, specs: s.specs, siblingSubsystems: rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean) }, aiProvider, azureEndpoint, '', powerAutomateUrl, subSession);
+                    const funcDesc = s.funcFromCard
+                        ? s.func
+                        : await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: s.name, specs: s.specs, siblingSubsystems: rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean) }, aiProvider, azureEndpoint, '', powerAutomateUrl, subSession);
                     if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                     const func = (funcDesc || s.func || '').trim();
                     mark('Functions ready', 1);
