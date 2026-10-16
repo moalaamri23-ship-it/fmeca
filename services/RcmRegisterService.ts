@@ -77,7 +77,9 @@ export const REGISTER_LIST = {
         startDate: 'StartDate',
         engineerName: 'EngineerName',   // Person column — needs $expand to read the email
         status: 'Status',
-        summaryOfActions: 'SummaryofActions',
+        // Shown as "Summary" in the list. The internal name was fixed when the column was
+        // created as "Summary of Actions" and cannot change. RCM Studio overwrites it.
+        summary: 'SummaryofActions',
     },
 } as const;
 
@@ -85,7 +87,7 @@ export interface BuildRegisterPayloadOptions {
     engineerEmail: string;
     status: string;
     startDate: string;
-    summaryOfActions: string;
+    summary: string;
     fileName: string;
     fileContentBase64: string;
     jsonFileName: string;
@@ -123,86 +125,134 @@ export function buildSubSystemsList(project: Project): string {
     return subSystemNames(project).map((name, i) => `${i + 1}- ${name}`).join('\n');
 }
 
-/** Rollup of every mode mitigation across the project, ordered by descending RPN total. */
-export function buildSummaryOfActions(project: Project): string {
-    const best = new Map<string, number>();
+/** Modes at or above this total are counted as high risk — the red band of the RPN chip. */
+export const HIGH_RPN_THRESHOLD = 100;
+
+export interface FmecaSummaryStats {
+    subsystems: number;
+    functionalFailures: number;
+    failureModes: number;
+    /** Modes with at least one current control recorded. */
+    modesWithControls: number;
+    /** Distinct control texts across the project — one PM often covers many modes. */
+    distinctControls: number;
+    /** Modes with a suggested mitigation recorded. */
+    modesWithMitigations: number;
+    distinctMitigations: number;
+    highRpnModes: number;
+    /** Highest scored RPN total, 0 when nothing is scored. */
+    maxRpn: number;
+}
+
+/** Case and whitespace differences should not make the same task count twice. */
+const normalizeAction = (text: string) => text.trim().toLowerCase().replace(/\s+/g, ' ');
+
+/** Every figure in the register Summary. Counted here, never by the AI. */
+export function computeSummaryStats(project: Project): FmecaSummaryStats {
+    const controls = new Set<string>();
+    const mitigations = new Set<string>();
+    const stats: FmecaSummaryStats = {
+        subsystems: subSystemNames(project).length,
+        functionalFailures: 0,
+        failureModes: 0,
+        modesWithControls: 0,
+        distinctControls: 0,
+        modesWithMitigations: 0,
+        distinctMitigations: 0,
+        highRpnModes: 0,
+        maxRpn: 0,
+    };
     (project.subsystems || []).forEach(sub => {
         (sub.failures || []).forEach(fail => {
+            stats.functionalFailures++;
             (fail.modes || []).forEach(mode => {
-                const text = (mode?.mitigation || '').trim();
-                if (!text) return;
-                const total = rpnTotal(mode.rpn);
-                const score = typeof total === 'number' ? total : 0;
-                const prev = best.get(text);
-                if (prev === undefined || score > prev) best.set(text, score);
+                stats.failureModes++;
+                const control = (mode?.currentControls || '').trim();
+                if (control) {
+                    stats.modesWithControls++;
+                    controls.add(normalizeAction(control));
+                }
+                const mitigation = (mode?.mitigation || '').trim();
+                if (mitigation) {
+                    stats.modesWithMitigations++;
+                    mitigations.add(normalizeAction(mitigation));
+                }
+                const total = rpnTotal(mode?.rpn);
+                if (typeof total === 'number') {
+                    if (total >= HIGH_RPN_THRESHOLD) stats.highRpnModes++;
+                    if (total > stats.maxRpn) stats.maxRpn = total;
+                }
             });
         });
     });
-    const ordered = [...best.entries()].sort((a, b) => b[1] - a[1]).map(([text]) => text);
-    return capText(ordered.join('\n'), SUMMARY_MAX_CHARS);
+    stats.distinctControls = controls.size;
+    stats.distinctMitigations = mitigations.size;
+    return stats;
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** The fixed-format figures block under the description. */
+export function buildSummaryStatsBlock(stats: FmecaSummaryStats): string {
+    return [
+        `Scope: ${plural(stats.subsystems, 'subsystem')} · ${plural(stats.functionalFailures, 'functional failure')} · ${plural(stats.failureModes, 'failure mode')}`,
+        `Current controls: ${plural(stats.modesWithControls, 'mode')} covered (${plural(stats.distinctControls, 'distinct task')})`,
+        `Suggested mitigations: ${plural(stats.modesWithMitigations, 'mode')} (${plural(stats.distinctMitigations, 'distinct action')})`,
+        `High risk: ${plural(stats.highRpnModes, 'mode')} at RPN ≥ ${HIGH_RPN_THRESHOLD}${stats.maxRpn ? ` · max RPN ${stats.maxRpn}` : ''}`,
+    ].join('\n');
+}
+
+/** Description used until the AI writes one, or when it fails — publishing never waits on AI. */
+export function buildFallbackDescription(project: Project): string {
+    const name = (project.name || '').trim() || 'Unnamed system';
+    const names = subSystemNames(project);
+    return names.length ? `${name}: ${names.join(', ')}.` : `${name}.`;
 }
 
 /**
- * Flattened controls/mitigations, highest RPN first — the input the AI summarizes.
- * Modes with neither a control nor a mitigation carry no action, so they are dropped.
+ * The register "Summary" column. RCM Studio overwrites the same column once the study
+ * becomes a full RCM report, so this is the FMECA-stage summary only.
  */
-export function buildActionsInput(project: Project): string {
-    const rows: { score: number; text: string }[] = [];
-    (project.subsystems || []).forEach(sub => {
-        (sub.failures || []).forEach(fail => {
-            (fail.modes || []).forEach(mode => {
-                const controls = (mode?.currentControls || '').trim();
-                const mitigation = (mode?.mitigation || '').trim();
-                if (!controls && !mitigation) return;
-                const total = rpnTotal(mode.rpn);
-                const score = typeof total === 'number' ? total : 0;
-                rows.push({
-                    score,
-                    text: [
-                        `SUB-SYSTEM: ${(sub.name || '').trim() || '(unnamed)'}`,
-                        `FUNCTIONAL FAILURE: ${(fail.desc || '').trim() || '(none)'}`,
-                        `FAILURE MODE: ${(mode.mode || '').trim() || '(none)'}`,
-                        `RPN: ${score || 'unscored'}`,
-                        `CURRENT CONTROLS (already in place): ${controls || '(none)'}`,
-                        `RECOMMENDED MITIGATION (not yet in place): ${mitigation || '(none)'}`,
-                    ].join('\n'),
-                });
-            });
-        });
-    });
-    return rows.sort((a, b) => b.score - a.score).map(r => r.text).join('\n\n');
+export function buildSummary(project: Project, description?: string): string {
+    const lead = (description || '').trim() || buildFallbackDescription(project);
+    return capText(`${lead}\n\n${buildSummaryStatsBlock(computeSummaryStats(project))}`, SUMMARY_MAX_CHARS);
 }
 
-export const SUMMARY_SYSTEM_PROMPT = `You are a senior reliability engineer writing the "Summary of Actions" entry for an RCM register.
+const clip = (text: string, max: number) => {
+    const t = (text || '').trim().replace(/\s+/g, ' ');
+    return t.length > max ? `${t.slice(0, max)}…` : t;
+};
 
-You receive failure modes with two distinct fields:
-- CURRENT CONTROLS — maintenance and monitoring ALREADY being performed. These continue.
-- RECOMMENDED MITIGATION — barriers NOT yet in place. These are new work to implement.
+export const DESCRIPTION_SYSTEM_PROMPT = `You are a senior reliability engineer writing the opening of the "Summary" entry for an RCM register row.
 
-Write plain text (no markdown, no bold, no headers with #) in exactly this shape:
-
-CONTINUE (existing controls)
-1- <short line, one per distinct control>
-2- ...
-
-IMPLEMENT (new actions)
-1- <action in detail: what to do, on which sub-system/equipment, and the failure mode it defends against>
-2- ...
+Write one or two plain sentences, at most 60 words, saying what the system is, what it delivers, and how it is configured (redundancy, main equipment) when the input states it.
 
 Rules:
-- CONTINUE items are terse — a few words each, merged where several modes share the same control.
-- IMPLEMENT items are detailed and specific enough to raise a work order from, and are ordered by descending RPN (highest risk first).
-- Merge duplicates across sub-systems instead of repeating them; name the sub-systems the merged item covers.
-- Never invent an action that is not in the input. Never move a mitigation into CONTINUE or a control into IMPLEMENT.
-- If a section has no items, write the heading and "None." beneath it.
-- Output only the summary text — no preamble, no closing remarks.`;
+- Plain text only: no markdown, no bullets, no headings.
+- Do not state how many subsystems, functional failures, failure modes, controls or mitigations there are. Those figures are added separately.
+- Do not list maintenance actions, controls or mitigations.
+- Use only what the input states. Do not invent ratings, equipment or redundancy.
+- Output only the sentences — no preamble, no closing remarks.`;
 
 /**
  * Instructions and data in ONE prompt: AIService._directChat only forwards messages[0]
  * for non-chatbot features, so a separate system message would be dropped.
+ * The AI sees descriptions only, never counts, so it cannot misstate a figure.
  */
-export function buildSummaryPrompt(project: Project): string {
-    return `${SUMMARY_SYSTEM_PROMPT}\n\nSYSTEM: ${project.name || '(unnamed)'}\n\n${buildActionsInput(project)}`;
+export function buildDescriptionPrompt(project: Project): string {
+    const ctx = project.operatingContext;
+    const header = [
+        `SYSTEM: ${project.name || '(unnamed)'}`,
+        project.desc?.trim() ? `PROJECT DESCRIPTION: ${clip(project.desc, 800)}` : '',
+        ctx?.summary?.trim() ? `OPERATING CONTEXT: ${clip(ctx.summary, 800)}` : '',
+        ctx?.redundancy?.trim() ? `REDUNDANCY: ${clip(ctx.redundancy, 300)}` : '',
+        ctx?.dutyCycle?.trim() ? `DUTY CYCLE: ${clip(ctx.dutyCycle, 300)}` : '',
+    ].filter(Boolean);
+    const subsystems = (project.subsystems || [])
+        .filter(s => (s?.name || '').trim())
+        .map(s => `- ${s.name.trim()}${s.func?.trim() ? `: ${clip(s.func, 200)}` : ''}`);
+    const lines = [...header, '', 'SUBSYSTEMS:', ...subsystems];
+    return `${DESCRIPTION_SYSTEM_PROMPT}\n\n${lines.join('\n')}`;
 }
 
 /** btoa() is latin1-only, so encode to UTF-8 bytes first (project text may be non-ASCII). */
@@ -277,7 +327,7 @@ function calendarDateIso(iso: string): string {
 
 /** Pure mapping from FMECA project + form values to the registry flow payload. */
 export function buildRegisterPayload(project: Project, opts: BuildRegisterPayloadOptions): RcmRegisterPayload {
-    const summary = opts.summaryOfActions.trim() || buildSummaryOfActions(project);
+    const summary = opts.summary.trim() || buildSummary(project);
     const cols = REGISTER_LIST.columns;
 
     const attachments: RegistryAttachment[] = [
@@ -303,7 +353,7 @@ export function buildRegisterPayload(project: Project, opts: BuildRegisterPayloa
             [cols.subSystems]: buildSubSystemsList(project),
             [cols.startDate]: calendarDateIso(tryIso(opts.startDate) || projectStartIso(project)),
             [cols.status]: opts.status,
-            [cols.summaryOfActions]: capText(summary, SUMMARY_MAX_CHARS),
+            [cols.summary]: capText(summary, SUMMARY_MAX_CHARS),
         },
         person: opts.engineerEmail.trim() ? { column: cols.engineerName, email: opts.engineerEmail.trim() } : undefined,
         autoNumber: { column: cols.rcmInternalNumber, prefix: 'RCM' },

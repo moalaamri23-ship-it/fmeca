@@ -31,7 +31,7 @@ import { RcmRegisterModal, type RcmRegisterSubmit } from './components/RcmRegist
 import { ImportProjectModal } from './components/ImportProjectModal';
 import { RpnScoreInput, RpnTotalBadge } from './components/RpnHoverCard';
 import { hasCompleteRpn, normalizeProjectDates, nowIso, rpnTotal } from './services/ProjectUtils';
-import { buildActionsInput, buildEvidenceAttachments, buildProjectJsonBase64, buildRegisterPayload, buildSummaryPrompt, fetchRegisterProjectJson, publishToRcmRegister, type RcmRegisterRow, type RegistryAttachment } from './services/RcmRegisterService';
+import { buildDescriptionPrompt, buildEvidenceAttachments, buildProjectJsonBase64, buildRegisterPayload, fetchRegisterProjectJson, publishToRcmRegister, type RcmRegisterRow, type RegistryAttachment } from './services/RcmRegisterService';
 import {
     buildComponentCatalogContext,
     buildFullSystemModesContext,
@@ -1371,22 +1371,21 @@ setProjects(
         start();
     };
 
-    const generateRegisterSummary = async (): Promise<string> => {
+    /** The description line of the register Summary. The figures under it are counted in code. */
+    const generateRegisterDescription = async (): Promise<string> => {
         if(!activeProject) throw new Error('No active project.');
-        const actions = buildActionsInput(activeProject);
-        if(!actions.trim()) throw new Error('No current controls or mitigations found in this project.');
         const text = await AIService.chat({
             feature: 'rcm-register-summary',
             provider: aiProvider,
             azureEndpoint: azureEndpoint || undefined,
             powerAutomateUrl: powerAutomateUrl || undefined,
             model: modelName,
-            messages: [{ role: 'user', content: buildSummaryPrompt(activeProject) }],
+            messages: [{ role: 'user', content: buildDescriptionPrompt(activeProject) }],
             mode: 'ai',
             apiKey
         });
         const clean = (text || '').trim();
-        if(!clean) throw new Error('The AI returned an empty summary.');
+        if(!clean) throw new Error('The AI returned an empty description.');
         return clean;
     };
 
@@ -1396,7 +1395,7 @@ setProjects(
             engineerEmail: values.engineerEmail,
             status: values.status,
             startDate: values.startDate,
-            summaryOfActions: values.summaryOfActions,
+            summary: values.summary,
             fileName: registerAttachment.fileName,
             fileContentBase64: registerAttachment.base64,
             jsonFileName: registerAttachment.jsonFileName,
@@ -3657,7 +3656,7 @@ syncFitBtn();
                         ...registerAttachment.extra.map(a => ({ fileName: a.name, sizeBytes: Math.round(a.contentBase64.length * 3 / 4) })),
                     ]}
                     onPublish={publishRegister}
-                    onGenerateSummary={generateRegisterSummary}
+                    onGenerateDescription={generateRegisterDescription}
                     onClose={() => { setShowRegisterModal(false); setRegisterAttachment(null); }}
                 />
             )}

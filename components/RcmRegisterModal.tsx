@@ -3,7 +3,7 @@ import { Project } from '../types';
 import { Icon } from './Icon';
 import {
     RCM_STATUS_OPTIONS,
-    buildSummaryOfActions,
+    buildSummary,
     projectStartDateInput,
     subSystemNames,
     type RcmRegisterResult,
@@ -13,7 +13,7 @@ export interface RcmRegisterSubmit {
     engineerEmail: string;
     status: string;
     startDate: string;
-    summaryOfActions: string;
+    summary: string;
 }
 
 interface RcmRegisterModalProps {
@@ -21,8 +21,8 @@ interface RcmRegisterModalProps {
     defaultEngineerEmail: string;
     attachments: { fileName: string; sizeBytes: number }[];
     onPublish: (values: RcmRegisterSubmit) => Promise<RcmRegisterResult>;
-    /** Rewrites the rollup into a CONTINUE / IMPLEMENT summary. Throws on AI failure. */
-    onGenerateSummary: () => Promise<string>;
+    /** Writes the one-or-two sentence system description. Throws on AI failure. */
+    onGenerateDescription: () => Promise<string>;
     onClose: () => void;
 }
 
@@ -35,13 +35,13 @@ export const RcmRegisterModal: React.FC<RcmRegisterModalProps> = ({
     defaultEngineerEmail,
     attachments,
     onPublish,
-    onGenerateSummary,
+    onGenerateDescription,
     onClose
 }) => {
     const [engineerEmail, setEngineerEmail] = useState(defaultEngineerEmail);
     const [status, setStatus] = useState(RCM_STATUS_OPTIONS[0]);
     const [startDate, setStartDate] = useState(() => projectStartDateInput(project));
-    const [summary, setSummary] = useState(() => buildSummaryOfActions(project));
+    const [summary, setSummary] = useState(() => buildSummary(project));
     const [publishing, setPublishing] = useState(false);
     const [result, setResult] = useState<RcmRegisterResult | null>(null);
     const [error, setError] = useState('');
@@ -55,9 +55,10 @@ export const RcmRegisterModal: React.FC<RcmRegisterModalProps> = ({
         setSummarising(true);
         setSummaryNote('');
         try {
-            setSummary(await onGenerateSummary());
+            // Only the description is AI; the figures are recounted from the project.
+            setSummary(buildSummary(project, await onGenerateDescription()));
         } catch (e: any) {
-            // Keep the plain rollup that is already in the box — it is still publishable.
+            // Keep the summary already in the box — its figures are exact and it is publishable.
             setSummaryNote(e?.message || String(e));
         } finally {
             setSummarising(false);
@@ -77,14 +78,14 @@ export const RcmRegisterModal: React.FC<RcmRegisterModalProps> = ({
         if (!engineerEmail.trim()) errs.engineerEmail = 'Engineer email is required.';
         else if (!engineerEmail.includes('@')) errs.engineerEmail = 'Enter a valid email / UPN.';
         if (!status.trim()) errs.status = 'Status is required.';
-        if (!summary.trim()) errs.summary = 'Summary of actions is required.';
+        if (!summary.trim()) errs.summary = 'Summary is required.';
         setFieldErrors(errs);
         if (Object.keys(errs).length) return;
 
         setError('');
         setPublishing(true);
         try {
-            const res = await onPublish({ engineerEmail: engineerEmail.trim(), status, startDate, summaryOfActions: summary });
+            const res = await onPublish({ engineerEmail: engineerEmail.trim(), status, startDate, summary });
             setResult(res);
         } catch (e: any) {
             setError(e?.message || String(e));
@@ -185,25 +186,25 @@ export const RcmRegisterModal: React.FC<RcmRegisterModalProps> = ({
 
                             <div>
                                 <div className="flex items-center justify-between mb-1">
-                                    <label className="block text-xs font-semibold text-slate-500">Summary of actions</label>
+                                    <label className="block text-xs font-semibold text-slate-500">Summary</label>
                                     <button
                                         onClick={runSummary}
                                         disabled={summarising}
                                         className="flex items-center gap-1 text-xs font-bold text-brand-600 hover:text-brand-700 disabled:text-slate-300 disabled:cursor-not-allowed transition"
                                     >
                                         <Icon name="wand" className="w-3.5 h-3.5" />
-                                        {summarising ? 'Writing...' : 'Rewrite with AI'}
+                                        {summarising ? 'Writing...' : 'Rewrite description'}
                                     </button>
                                 </div>
                                 <textarea
                                     value={summarising ? 'Writing summary...' : summary}
                                     onChange={e => setSummary(e.target.value)}
                                     readOnly={summarising}
-                                    rows={10}
+                                    rows={7}
                                     className={`w-full border border-slate-200 rounded px-3 py-2 text-sm outline-none focus:border-brand-500 min-h-[50px] ${summarising ? 'text-slate-400 animate-pulse' : ''}`}
                                 />
-                                <p className="text-[10px] text-slate-400 mt-1">{summary.length} characters — AI splits existing controls (continue) from mitigations (implement).</p>
-                                {summaryNote && <p className="text-xs text-amber-700 mt-1">AI summary unavailable, using the plain rollup. {summaryNote}</p>}
+                                <p className="text-[10px] text-slate-400 mt-1">{summary.length} characters — AI writes the description; the figures are counted from the project. RCM Studio replaces this once the RCM report is done.</p>
+                                {summaryNote && <p className="text-xs text-amber-700 mt-1">AI description unavailable, using the subsystem list instead. {summaryNote}</p>}
                                 {fieldErrors.summary && <p className="text-xs text-red-500 mt-1">{fieldErrors.summary}</p>}
                             </div>
 
