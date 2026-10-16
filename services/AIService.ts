@@ -1799,6 +1799,73 @@ ${formatRule}`;
     },
 
     /**
+     * Which uncovered component duties are functions in their own right.
+     *
+     * Most duties a card's items list are the means of a function already on the
+     * card -- the component serves the output the subsystem delivers -- and
+     * listing them as functions is the bloat the cards exist to remove. Only the
+     * model can tell a means from a duty whose loss fails in a way none of the
+     * listed functions' failures would describe. The answer is a suggestion for
+     * the engineer's review, never applied unseen. A failed call suggests nothing.
+     */
+    async selectMissingDuties(args: {
+        cards: Array<{ subsystem: string; functions: string[]; candidates: Array<{ id: string; item: string; duty: string }> }>;
+        key: string;
+        modelName: string;
+        aiProvider?: string;
+        azureEndpoint?: string;
+        powerAutomateUrl?: string;
+        sessionId?: string;
+    }): Promise<Array<{ id: string; cls: 'primary' | 'containment' | 'protection' | 'control' }>> {
+        const { cards, key, modelName, aiProvider = '', azureEndpoint = '', powerAutomateUrl = '', sessionId } = args;
+        if (!cards.length) return [];
+        if ((!key || key.length < 10) && aiProvider !== 'copilot') return [];
+        const body = cards.map(c => `SUBSYSTEM: ${c.subsystem}
+Functions:
+${c.functions.map(f => `- ${f}`).join('\n')}
+Component duties no function names:
+${c.candidates.map(d => `- [${d.id}] ${d.item}: ${d.duty}`).join('\n')}`).join('\n\n');
+        const prompt = `Act as a reliability engineer applying SAE JA1011 5.1 (identify every function, primary and secondary).
+
+${body}
+
+For each subsystem, a component duty listed above is usually the MEANS of a function already listed: it serves the output the subsystem delivers, and its loss shows up as a failure of that function. Those are not missing.
+Select a duty only when its loss fails in a way that none of the listed functions' failures would describe: it treats a separate stream or substance, protects a separate quality of the output, removes a separate hazard, or delivers a separate output. When unsure, do not select.
+For each selected duty give the class it would have: primary, containment, protection or control.
+
+Return ONLY this JSON:
+{ "missing": [ { "id": "...", "cls": "containment" } ] }`;
+        try {
+            const parsed = await this._withRetry(async () => {
+                const res = await this.chat({
+                    feature: 'duty-review',
+                    provider: (aiProvider || inferProvider(key)) as any,
+                    azureEndpoint: azureEndpoint || undefined,
+                    powerAutomateUrl: powerAutomateUrl || undefined,
+                    sessionId,
+                    model: modelName,
+                    messages: [{ role: 'user', content: prompt }],
+                    mode: 'ai',
+                    refText: '',
+                    apiKey: key,
+                    responseFormat: 'json'
+                });
+                const p = this.extractJSON(res);
+                if (!p || !Array.isArray(p.missing)) throw new Error('duty review: bad reply');
+                return p;
+            });
+            const ids = new Set(cards.flatMap(c => c.candidates.map(d => d.id)));
+            const classes = ['primary', 'containment', 'protection', 'control'] as const;
+            type Cls = typeof classes[number];
+            return parsed.missing
+                .map((m: any) => ({ id: String(m?.id ?? ''), cls: String(m?.cls ?? '').toLowerCase() as Cls }))
+                .filter((m: { id: string; cls: Cls }) => ids.has(m.id) && classes.includes(m.cls));
+        } catch {
+            return [];
+        }
+    },
+
+    /**
      * The failure shape of each row, for rows whose class does not decide it.
      * Returns one entry per row, undefined where the model gave none or the call
      * failed: an unshaped row is unrestricted downstream, never dropped.

@@ -34,6 +34,13 @@ export interface KnowledgeCard {
     passThrough?: boolean;
     /** Name plus Items lines, for matching an "executed by" entry to this card. */
     itemsText: string;
+    /** Each Items line: the item's name and what it does for this subsystem. */
+    items: CardItem[];
+}
+
+export interface CardItem {
+    name: string;
+    duty: string;
 }
 
 export interface CardLimit {
@@ -62,7 +69,8 @@ export interface CardSubsystem {
 const SUBSYSTEM_HEADER = /^SECTION\s+3\/\d+\s*-\s*SUBSYSTEM:\s*(.+?)\s*$/i;
 const ANY_SECTION = /^SECTION\s+\d/i;
 const FUNCTION_LINE = /^-\s*(primary|containment|protection|control|support)\s*:\s*(.+)$/i;
-const SOURCE_REF = /\s*\[S\d+[^\]]*\]/g;
+// Source refs ([S1 p.42]) and the review marker added by services/CardReview.ts.
+const SOURCE_REF = /\s*\[(S\d+[^\]]*|engineer review)\]/gi;
 // Plant tags (66-PT-127381, 66-D-127453A). Identity, not function.
 const TAG = /\b\d{2,3}-?[A-Z]{1,5}-\d{3,}[A-Z]?\b/g;
 
@@ -75,7 +83,7 @@ const tidy = (s: string) => s
     .replace(/\s+([,;.])/g, '$1')
     .trim();
 
-const isNotStated = (s: string) => /^not stated\.?$/i.test(s.replace(SOURCE_REF, '').trim());
+export const isNotStated = (s: string) => /^not stated\.?$/i.test(s.replace(SOURCE_REF, '').trim());
 
 // Limits rows: parameter | tag | normal | lo alarm | lo trip | hi alarm | hi trip | units | ...
 // Only the stated numbers travel; they are the performance standards of the
@@ -105,7 +113,7 @@ export function parseKnowledgeCards(text: string): KnowledgeCard[] {
         const line = raw.trim();
         const header = line.match(SUBSYSTEM_HEADER);
         if (header) {
-            current = { name: header[1].trim(), functions: [], specs: [], delivers: [], receives: [], limits: [], itemsText: header[1].trim() };
+            current = { name: header[1].trim(), functions: [], specs: [], delivers: [], receives: [], limits: [], itemsText: header[1].trim(), items: [] };
             cards.push(current);
             inFunctions = false;
             continue;
@@ -130,7 +138,11 @@ export function parseKnowledgeCards(text: string): KnowledgeCard[] {
         const limit = line.match(/^Limits\s*:\s*(.+)$/i);
         if (limit) { const l = parseLimit(limit[1]); if (l) current.limits.push(l); continue; }
         const items = line.match(/^Items\s*:\s*(.+)$/i);
-        if (items) current.itemsText += ' ' + items[1];
+        if (items) {
+            current.itemsText += ' ' + items[1];
+            const cols = items[1].replace(SOURCE_REF, '').split('|').map(c => c.trim());
+            if (cols.length >= 5) current.items.push({ name: cols[0], duty: cols[cols.length - 1] });
+        }
     }
     return cards.filter(c => c.functions.length > 0);
 }
@@ -141,7 +153,7 @@ const STRUCTURE_NAME = /\b(skid|structure|structural|base ?frame|frame|access|en
 // A protective function is an action. Reporting a value to something else that
 // acts is the other subsystem's duty.
 const PROTECTIVE_ACTION = /\b(reliev|stop|trip|shut|isolat|prevent|clos|vent|de-?energi|inhibit|limit|interrupt|disconnect|block|bypass|release|discharg)/i;
-const MEASUREMENT_ONLY = /\b(monitor|measur|indicat|signal|sens|display|reading|transmit)/i;
+export const MEASUREMENT_ONLY = /\b(monitor|measur|indicat|signal|sens|display|reading|transmit)/i;
 // `support` covers the subsystem's own structural duty. Heat or air handling
 // written as support is a misclassified process duty.
 const PROCESS_AS_SUPPORT = /\b(heat|air|cool|eject|exhaust|flow|ventilat|temperature)/i;
@@ -154,7 +166,7 @@ export function keepFunction(fn: CardFunction): boolean {
 }
 
 const STOP_WORDS = new Set(['and', 'the', 'of', 'a', 'b', 'ab', 'or', 'by', 'to', 'in', 'not', 'stated', 'system', 'subsystem', 'package']);
-const tokens = (s: string) => new Set(s.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 1 && !STOP_WORDS.has(t)));
+export const tokens = (s: string) => new Set(s.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 1 && !STOP_WORDS.has(t)));
 
 /** The card whose name or items best match an "executed by" entry, or null. */
 function executingCard(executedBy: string, cards: KnowledgeCard[]): KnowledgeCard | null {
@@ -224,9 +236,18 @@ export function cardToSubsystem(card: KnowledgeCard): CardSubsystem {
         .map(s => tidy(s).replace(/[.;\s]+$/, ''))
         .filter(s => s && !isNotStated(s))
         .join('; ');
+    // The Delivers line states the subsystem's mission output, so it is the
+    // standard of the first primary line only; a further primary duty (one an
+    // engineer added in review, say) is judged on its own wording.
+    const delivers = tidy(card.delivers[0] || '').replace(/[.;\s]+$/, '');
+    let missionTaken = false;
     const rows = CLASS_ORDER
         .flatMap(cls => card.functions.filter(f => f.cls === cls))
-        .map(f => toRow(f, tidy(card.delivers[0] || '').replace(/[.;\s]+$/, ''), !!card.passThrough))
+        .map(f => {
+            const mission = f.cls === 'primary' && !missionTaken;
+            if (mission) missionTaken = true;
+            return toRow(f, mission ? delivers : '', !!card.passThrough && mission);
+        })
         .filter((r): r is CardRow => !!r);
     return { name: card.name.replace(TAG, '').replace(/\s{2,}/g, ' ').trim(), specs, func, rows };
 }

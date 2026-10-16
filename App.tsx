@@ -19,6 +19,8 @@ import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
 import { subsystemsFromKnowledge } from './services/KnowledgeCards';
+import { reviewKnowledge, dutyCandidates, applyReview, isDecided, type ReviewFlag, type ReviewDecision } from './services/CardReview';
+import { CardReviewModal } from './components/CardReviewModal';
 import { LocalFileSystemProvider, sanitizeName, isCancellation } from './services/FileSystem';
 import { requestFullscreenViaHost, notifyHostFullscreenReleased } from './services/ShellFullscreen';
 import { RICH_LIBRARY } from './constants';
@@ -2535,7 +2537,7 @@ syncFitBtn();
         setMasterProgress(prev => ({ ...prev, step: 'Cancelling — waiting for in-flight requests to return...' }));
     };
 
-    const masterGen = async () => {
+    const runMasterGen = async (knowledge: string) => {
         if (!apiKey && aiProvider !== 'copilot') return alert("API Key required.");
         if (!activeProject?.name) return alert("Enter System Name.");
         if ((activeProject.subsystems || []).length > 0) return alert("MasterGen is available only when the FMECA is empty. Delete all subsystems first.");
@@ -2555,10 +2557,10 @@ syncFitBtn();
             // A knowledge file written in subsystem-card layout already decided the
             // subsystems, their specs and their functions from the full documents.
             // Taking them as written avoids a second, disagreeing decision.
-            const cardSubs = aiSourceMode !== 'ai' ? subsystemsFromKnowledge(globalFileText) : [];
+            const cardSubs = aiSourceMode !== 'ai' ? subsystemsFromKnowledge(knowledge) : [];
             const rawSubs = cardSubs.length
                 ? cardSubs.map(s => ({ ...s, funcFromCard: true }))
-                : await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, masterSystemContext, powerAutomateUrl, runSession);
+                : await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, knowledge, aiProvider, azureEndpoint, masterSystemContext, powerAutomateUrl, runSession);
             if (masterCancelRef.current) { wasCancelled = true; return; }
             if (!rawSubs || !Array.isArray(rawSubs) || rawSubs.length === 0) { alert("Generation failed."); return; }
 
@@ -2604,7 +2606,7 @@ syncFitBtn();
                     mark('Generating functions');
                     const funcDesc = s.funcFromCard
                         ? s.func
-                        : await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: s.name, specs: s.specs, siblingSubsystems: rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean) }, aiProvider, azureEndpoint, '', powerAutomateUrl, subSession);
+                        : await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, knowledge, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: s.name, specs: s.specs, siblingSubsystems: rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean) }, aiProvider, azureEndpoint, '', powerAutomateUrl, subSession);
                     if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                     const func = (funcDesc || s.func || '').trim();
                     mark('Functions ready', 1);
@@ -2695,7 +2697,7 @@ syncFitBtn();
                             key: apiKey,
                             modelName,
                             mode: aiSourceMode,
-                            refText: globalFileText,
+                            refText: knowledge,
                             aiProvider,
                             azureEndpoint,
                             systemContext: subModeSystemContext,
@@ -2782,6 +2784,50 @@ syncFitBtn();
             masterCancelRef.current = false;
         }
     };
+
+    // Before MasterGen reads a knowledge file's subsystem cards, the engineer
+    // reviews what the extraction agent may have dropped or misfiled
+    // (services/CardReview.ts). Decisions are kept on the project, so a rerun
+    // asks only about flags it has not seen.
+    const [cardReview, setCardReview] = useState<{ text: string; flags: ReviewFlag[]; suggested: Set<string> } | null>(null);
+    const [reviewing, setReviewing] = useState(false);
+    // The model's suggestions for one knowledge text: closing the review and
+    // reopening it must not spend another call on the same file.
+    const lastReviewRef = useRef<{ text: string; flags: ReviewFlag[]; suggested: Set<string> } | null>(null);
+
+    const masterGen = async () => {
+        if (!apiKey && aiProvider !== 'copilot') return alert("API Key required.");
+        if (!activeProject?.name) return alert("Enter System Name.");
+        if ((activeProject.subsystems || []).length > 0) return alert("MasterGen is available only when the FMECA is empty. Delete all subsystems first.");
+        const text = globalFileText;
+        const flags = aiSourceMode !== 'ai' && subsystemsFromKnowledge(text).length ? reviewKnowledge(text) : [];
+        if (!flags.length) return runMasterGen(text);
+
+        if (lastReviewRef.current?.text === text) return setCardReview(lastReviewRef.current);
+        setReviewing(true);
+        try {
+            const picks = await AIService.selectMissingDuties({ cards: dutyCandidates(text, flags), key: apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, sessionId: newConversationId() });
+            const byId = new Map(picks.map(p => [p.id, p.cls]));
+            const withClass = flags.map(f => f.kind === 'uncovered' && byId.has(f.id) ? { ...f, suggestedClass: byId.get(f.id) } : f);
+            const saved = activeProject.cardReview || {};
+            const pending = withClass.filter(f => (f.kind === 'foreign' || byId.has(f.id)) && !isDecided(f, saved));
+            if (!pending.length) return runMasterGen(applyReview(text, withClass, saved));
+            lastReviewRef.current = { text, flags: withClass, suggested: new Set(byId.keys()) };
+            setCardReview(lastReviewRef.current);
+        } finally {
+            setReviewing(false);
+        }
+    };
+
+    const downloadCorrectedKnowledge = (text: string, flags: ReviewFlag[], decisions: Record<string, ReviewDecision>) => {
+        const blob = new Blob([applyReview(text, flags, decisions)], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = (globalFileName || 'knowledge.txt').replace(/(\.txt)?$/i, '_reviewed.txt');
+        a.click();
+        URL.revokeObjectURL(a.href);
+    };
+
     const injectLib = (item: LibraryItem) => { if(!activeProject) return; if(activeProject.subsystems.length === 0) return alert("Add Subsystem"); let targetSubId = activeSubId || activeProject.subsystems[0].id; const targetIndex = activeProject.subsystems.findIndex(s => s.id === targetSubId); if(targetIndex === -1) return; const nm: Mode = {id: generateId(), mode: item.mode, effect: item.effect || "", cause: item.cause, currentControls: "", mitigation: item.task, rpn: blankRpn(), rpnStatus: "unscored"}; const nf: Failure = {id: generateId(), desc: item.fail || `Failure`, modes: [nm]}; const newSubs = [...activeProject.subsystems]; newSubs[targetIndex] = {...newSubs[targetIndex], failures: [...newSubs[targetIndex].failures, nf]}; setActiveProject({...activeProject, subsystems: newSubs}); };
     const getRpnColor = (r: number | "") => r === "" ? "bg-slate-100 text-slate-500" : r >= 100 ? "bg-red-100 text-red-800" : r >= 40 ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800";
     const getSubRowSpan = (sub: Subsystem) => { if (sub.failures.length === 0) return 1; return sub.failures.reduce((acc, f) => acc + (f.modes.length || 1), 0); };
@@ -3167,7 +3213,7 @@ syncFitBtn();
                                         </button>
 	                                        <button
 	                                            onClick={loadingMaster ? cancelMasterGen : masterGen}
-	                                            disabled={!loadingMaster && activeProject.subsystems.length > 0}
+	                                            disabled={reviewing || (!loadingMaster && activeProject.subsystems.length > 0)}
 	                                            title={!loadingMaster && activeProject.subsystems.length > 0 ? "Available only when the FMECA is empty" : undefined}
 	                                            className={`px-4 py-2 rounded shadow font-bold text-xs inline-flex items-center whitespace-nowrap transition ${
 	                                                loadingMaster
@@ -3181,8 +3227,8 @@ syncFitBtn();
 	                                                <span>Cancel</span>
 	                                            ) : (
 	                                                <>
-	                                                    <Icon name="bolt" />
-	                                                    <span className="whitespace-nowrap ml-1">Generate</span>
+	                                                    <Icon name={reviewing ? 'spinner' : 'bolt'} className={`w-5 h-5 ${reviewing ? 'animate-spin' : ''}`} />
+	                                                    <span className="whitespace-nowrap ml-1">{reviewing ? 'Reviewing knowledge…' : 'Generate'}</span>
 	                                                </>
 	                                            )}
 	                                        </button>
@@ -3597,6 +3643,22 @@ syncFitBtn();
                         </div>
                     )}
                 </div>
+            )}
+            {cardReview && activeProject && (
+                <CardReviewModal
+                    flags={cardReview.flags}
+                    suggested={cardReview.suggested}
+                    initial={activeProject.cardReview || {}}
+                    onClose={() => setCardReview(null)}
+                    onDownload={decisions => downloadCorrectedKnowledge(cardReview.text, cardReview.flags, decisions)}
+                    onGenerateAnyway={() => { const text = cardReview.text; setCardReview(null); runMasterGen(text); }}
+                    onGenerate={decisions => {
+                        const { text, flags } = cardReview;
+                        updateHeader('cardReview', { ...(activeProject.cardReview || {}), ...decisions });
+                        setCardReview(null);
+                        runMasterGen(applyReview(text, flags, decisions));
+                    }}
+                />
             )}
             {showOperatingContext && activeProject && (
                 <OperatingContextModal

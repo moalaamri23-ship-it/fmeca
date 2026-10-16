@@ -188,6 +188,8 @@ export interface Project {
   subsystems: Subsystem[];
   /** Stated operating context (JA1011 Q1); absent until the user records it. */
   operatingContext?: OperatingContext;
+  /** Engineer's decisions on the knowledge-card review, keyed by flag id (services/CardReview.ts). */
+  cardReview?: Record<string, { action: 'add'; cls: 'primary' | 'containment' | 'protection' | 'control' | 'support' } | { action: 'ignore' | 'move' | 'keep' }>;
   /** Last RCM Studio feedback import: what was applied and the FMECA-facing gaps to resolve. */
   rcmFeedback?: {
     importedAt: string;
