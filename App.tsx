@@ -17,7 +17,10 @@ import { CitationModal, type CitationGroup } from './components/CitationModal';
 import { BulkCiteButton, type CiteState } from './components/CiteButton';
 import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
-import { AIService, TieredModels, buildAllocationBlock, allocationFor, findSubsystemPlan } from './services/AIService';
+import { AIService, TieredModels } from './services/AIService';
+import { subsystemsFromKnowledge } from './services/KnowledgeCards';
+import { reviewKnowledge, dutyCandidates, applyReview, isDecided, type ReviewFlag, type ReviewDecision } from './services/CardReview';
+import { CardReviewModal } from './components/CardReviewModal';
 import { LocalFileSystemProvider, sanitizeName, isCancellation } from './services/FileSystem';
 import { requestFullscreenViaHost, notifyHostFullscreenReleased } from './services/ShellFullscreen';
 import { RICH_LIBRARY } from './constants';
@@ -2206,8 +2209,7 @@ syncFitBtn();
         const decomposed = await AIService.decomposeFunction(
             sub.func, sub.name, activeProject!.name,
             apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', sub.specs || '', newConversationId(),
-            siblingSubsystemNames(sId),
-            allocationFor(activeProject!.functionPlan, sub.name)
+            siblingSubsystemNames(sId)
         );
         const rows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
         if (rows.length > 0) {
@@ -2385,16 +2387,13 @@ syncFitBtn();
             const existingFFs = sub.failures.map(f => f.desc).filter(Boolean);
             const modeSystemContext = scopedSystemContext(name, specs, func);
             const modeTags = hybridSourceTags(Boolean(modeSystemContext));
-            // The allocation MasterGen made, when this subsystem was part of it.
-            const allocation = allocationFor(activeProject.functionPlan, name);
-            const allocationBlock = allocation?.block || '';
             let workingFunc = (func || '').trim();
             if (!workingFunc) {
-                workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId), allocationBlock }, aiProvider, azureEndpoint, '', powerAutomateUrl, runSession) || '').trim();
+                workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId) }, aiProvider, azureEndpoint, '', powerAutomateUrl, runSession) || '').trim();
             }
             const siblings = siblingSubsystemNames(sId);
             const rows = workingFunc
-                ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '', runSession, siblings, allocation)).map(r => ({ ...r, id: generateId() }))
+                ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '', runSession, siblings)).map(r => ({ ...r, id: generateId() }))
                 : [];
             if (!rows.length) {
                 alert("Auto-Fill could not decompose the function.");
@@ -2416,8 +2415,7 @@ syncFitBtn();
                 // what decides whether a function's failure is found on demand.
                 systemContext: modeSystemContext,
                 sessionId: runSession,
-                siblingSubsystems: siblings,
-                allocationBlock
+                siblingSubsystems: siblings
             });
             if (ffBatch.rejected.length) {
                 console.warn(`[Auto-Fill] ${ffBatch.rejected.length} functional failures were unusable and were dropped, not replaced.`, ffBatch.rejected);
@@ -2538,7 +2536,7 @@ syncFitBtn();
         setMasterProgress(prev => ({ ...prev, step: 'Cancelling — waiting for in-flight requests to return...' }));
     };
 
-    const masterGen = async () => {
+    const runMasterGen = async (knowledge: string) => {
         if (!apiKey && aiProvider !== 'copilot') return alert("API Key required.");
         if (!activeProject?.name) return alert("Enter System Name.");
         if ((activeProject.subsystems || []).length > 0) return alert("MasterGen is available only when the FMECA is empty. Delete all subsystems first.");
@@ -2555,7 +2553,13 @@ syncFitBtn();
         let wasCancelled = false;
 
         try {
-            const rawSubs = await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, masterSystemContext, powerAutomateUrl, runSession);
+            // A knowledge file written in subsystem-card layout already decided the
+            // subsystems, their specs and their functions from the full documents.
+            // Taking them as written avoids a second, disagreeing decision.
+            const cardSubs = aiSourceMode !== 'ai' ? subsystemsFromKnowledge(knowledge) : [];
+            const rawSubs = cardSubs.length
+                ? cardSubs.map(s => ({ ...s, funcFromCard: true }))
+                : await AIService.generateMasterStructure(activeProject.name, activeProject.desc, apiKey, modelName, aiSourceMode, knowledge, aiProvider, azureEndpoint, masterSystemContext, powerAutomateUrl, runSession);
             if (masterCancelRef.current) { wasCancelled = true; return; }
             if (!rawSubs || !Array.isArray(rawSubs) || rawSubs.length === 0) { alert("Generation failed."); return; }
 
@@ -2566,9 +2570,9 @@ syncFitBtn();
                 ? `${activeProject.name}: ${activeProject.desc}`
                 : activeProject.name;
             const tags = hybridSourceTags();
-            // The function plan, then six steps per subsystem: function, breakdown,
-            // functional failures, failure modes, RPN, and the subsystem itself.
-            const progressTotal = 2 + rawSubs.length * 6;
+            // Six steps per subsystem: function, breakdown, functional failures,
+            // failure modes, RPN, and the subsystem itself.
+            const progressTotal = 1 + rawSubs.length * 6;
             let progressDone = 1;
             let subsDone = 0;
             const mark = (step: string, units = 0, subsystemFinished = false) => {
@@ -2578,36 +2582,6 @@ syncFitBtn();
                 setMasterProgress(prev => ({ percent: Math.max(prev.percent, percent), done: subsDone, total: rawSubs.length, step }));
             };
             mark('Subsystem skeleton ready');
-
-            // Allocate the system's functions before the subsystems split up into
-            // the pool. Each worker sees only its own entry, so without this every
-            // subsystem claimed every duty and stream property in the package
-            // description. A failed plan is not fatal: the workers fall back to
-            // sibling names, which is how MasterGen ran before this step.
-            mark('Allocating functions across subsystems');
-            const functionPlan = await AIService.planSystemFunctions({
-                sysName: activeProject.name,
-                sysDesc: activeProject.desc,
-                subsystems: rawSubs.map((o: any) => ({ name: o.name, specs: o.specs })),
-                operatingContext: activeProject.operatingContext,
-                key: apiKey,
-                modelName,
-                mode: aiSourceMode,
-                refText: globalFileText,
-                aiProvider,
-                azureEndpoint,
-                powerAutomateUrl,
-                sessionId: runSession
-            });
-            if (masterCancelRef.current) { wasCancelled = true; return; }
-            if (!functionPlan) issues.push('System function plan could not be made; subsystems were generated with sibling names only');
-            // The plan moves spec lines to the subsystem they describe. A subsystem
-            // the plan returned no specs for keeps the ones step one gave it.
-            const subs: any[] = rawSubs.map((o: any) => {
-                const planned = findSubsystemPlan(functionPlan, o.name)?.specs;
-                return planned ? { ...o, specs: planned } : o;
-            });
-            mark('Function plan ready', 1);
 
             const runPool = async <T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> => {
                 const results: R[] = new Array(items.length);
@@ -2622,25 +2596,36 @@ syncFitBtn();
             };
 
             const poolLimit = MASTERGEN_CONCURRENCY[aiProvider as AIProvider] ?? DEFAULT_MASTERGEN_CONCURRENCY;
-            const completedSubs: any[] = await runPool(subs, poolLimit, (async (s: any) => {
+            const completedSubs: any[] = await runPool(rawSubs, poolLimit, (async (s: any) => {
                 if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                 // This subsystem's own thread — its steps build on each other,
                 // and it must not queue behind the other pool workers.
                 const subSession = newConversationId();
-                const subSiblings = subs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean);
-                const allocation = allocationFor(functionPlan, s.name);
-                const allocationBlock = allocation?.block || '';
                 try {
                     mark('Generating functions');
-                    const funcDesc = await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: s.name, specs: s.specs, siblingSubsystems: subSiblings, allocationBlock }, aiProvider, azureEndpoint, '', powerAutomateUrl, subSession);
+                    const funcDesc = s.funcFromCard
+                        ? s.func
+                        : await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, knowledge, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: s.name, specs: s.specs, siblingSubsystems: rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean) }, aiProvider, azureEndpoint, '', powerAutomateUrl, subSession);
                     if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                     const func = (funcDesc || s.func || '').trim();
                     mark('Functions ready', 1);
 
+                    const subSiblings = rawSubs.filter((o: any) => o !== s).map((o: any) => (o.name || '').trim()).filter(Boolean);
                     let breakdown: BreakdownRow[] = [];
-                    if (func) {
+                    if (s.funcFromCard && s.rows?.length) {
+                        // The card's function lines are the rows: each states one
+                        // owned duty with its standard, so re-deriving them would
+                        // only re-add duties other subsystems own.
+                        breakdown = s.rows.map((r: any) => ({ ...r, snippet: r.function, id: generateId() }));
+                        const open = breakdown.filter(r => !r.failureShape);
+                        if (open.length) {
+                            mark('Classifying failure shapes');
+                            const shapes = await AIService.classifyFailureShapes({ subsystemName: s.name, subsystemSpecs: s.specs || '', rows: open, key: apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, sessionId: subSession });
+                            open.forEach((r, i) => { if (shapes[i].length) { r.failureShape = shapes[i][0]; r.failureShapes = shapes[i]; } });
+                        }
+                    } else if (func) {
                         mark('Decomposing functions');
-                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '', subSession, subSiblings, allocation);
+                        const rows = await AIService.decomposeFunction(func, s.name, projectContext, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', s.specs || '', subSession, subSiblings);
                         if (masterCancelRef.current) return { ...s, cancelled: true, failures: [] };
                         breakdown = rows.map(r => ({ ...r, id: generateId() }));
                     }
@@ -2667,8 +2652,7 @@ syncFitBtn();
                             // step is where they decide whether a failure is found on demand.
                             systemContext: masterSystemContext,
                             sessionId: subSession,
-                            siblingSubsystems: subSiblings,
-                            allocationBlock
+                            siblingSubsystems: subSiblings
                         });
                         if (ffBatch.rejected.length) {
                             issues.push(`${s.name}: ${ffBatch.rejected.length} functional failures were unusable and were dropped`);
@@ -2712,7 +2696,7 @@ syncFitBtn();
                             key: apiKey,
                             modelName,
                             mode: aiSourceMode,
-                            refText: globalFileText,
+                            refText: knowledge,
                             aiProvider,
                             azureEndpoint,
                             systemContext: subModeSystemContext,
@@ -2767,10 +2751,6 @@ syncFitBtn();
                 funcHashAtBreakdown: s.breakdown?.length ? String(s.func || '').split('').reduce((h: number, c: string) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0).toString(36) : undefined,
                 failures: (s.failures || []).map((f: any) => ({
                     id: f.id || generateId(), desc: f.desc, sourceTags: f.sourceTags, sourceBreakdownRowId: f.sourceBreakdownRowId, sourceSnippet: f.sourceSnippet,
-                    // The audit tags travel with the failure. Dropping them here left every
-                    // MasterGen export without its failed states, so neither the coverage
-                    // check nor a reviewer could see what the derivation step had decided.
-                    failedState: f.failedState, parameter: f.parameter, needsReview: f.needsReview,
                     // Scores arrive with the modes now. A mode the batch scorer
                     // skipped still falls back to a blank, so an unscored row
                     // stays visibly unscored rather than inheriting a neighbour.
@@ -2790,7 +2770,7 @@ syncFitBtn();
                     }))
                 }))
             }));
-            setActiveProject(p => p ? (p.subsystems.length === 0 ? touchProject({ ...p, subsystems: newSubs, functionPlan: functionPlan ?? undefined }) : p) : null);
+            setActiveProject(p => p ? (p.subsystems.length === 0 ? touchProject({ ...p, subsystems: newSubs }) : p) : null);
             setMasterProgress(prev => ({ percent: 100, done: prev.total, total: prev.total, step: 'Complete' }));
             if (issues.length > 0) alert(`Master generation finished with issues:\n${issues.join('\n')}`);
         } catch (e: any) {
@@ -2803,6 +2783,50 @@ syncFitBtn();
             masterCancelRef.current = false;
         }
     };
+
+    // Before MasterGen reads a knowledge file's subsystem cards, the engineer
+    // reviews what the extraction agent may have dropped or misfiled
+    // (services/CardReview.ts). Decisions are kept on the project, so a rerun
+    // asks only about flags it has not seen.
+    const [cardReview, setCardReview] = useState<{ text: string; flags: ReviewFlag[]; suggested: Set<string> } | null>(null);
+    const [reviewing, setReviewing] = useState(false);
+    // The model's suggestions for one knowledge text: closing the review and
+    // reopening it must not spend another call on the same file.
+    const lastReviewRef = useRef<{ text: string; flags: ReviewFlag[]; suggested: Set<string> } | null>(null);
+
+    const masterGen = async () => {
+        if (!apiKey && aiProvider !== 'copilot') return alert("API Key required.");
+        if (!activeProject?.name) return alert("Enter System Name.");
+        if ((activeProject.subsystems || []).length > 0) return alert("MasterGen is available only when the FMECA is empty. Delete all subsystems first.");
+        const text = globalFileText;
+        const flags = aiSourceMode !== 'ai' && subsystemsFromKnowledge(text).length ? reviewKnowledge(text) : [];
+        if (!flags.length) return runMasterGen(text);
+
+        if (lastReviewRef.current?.text === text) return setCardReview(lastReviewRef.current);
+        setReviewing(true);
+        try {
+            const picks = await AIService.selectMissingDuties({ cards: dutyCandidates(text, flags), key: apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, sessionId: newConversationId() });
+            const byId = new Map(picks.map(p => [p.id, p.cls]));
+            const withClass = flags.map(f => f.kind === 'uncovered' && byId.has(f.id) ? { ...f, suggestedClass: byId.get(f.id) } : f);
+            const saved = activeProject.cardReview || {};
+            const pending = withClass.filter(f => (f.kind === 'foreign' || byId.has(f.id)) && !isDecided(f, saved));
+            if (!pending.length) return runMasterGen(applyReview(text, withClass, saved));
+            lastReviewRef.current = { text, flags: withClass, suggested: new Set(byId.keys()) };
+            setCardReview(lastReviewRef.current);
+        } finally {
+            setReviewing(false);
+        }
+    };
+
+    const downloadCorrectedKnowledge = (text: string, flags: ReviewFlag[], decisions: Record<string, ReviewDecision>) => {
+        const blob = new Blob([applyReview(text, flags, decisions)], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = (globalFileName || 'knowledge.txt').replace(/(\.txt)?$/i, '_reviewed.txt');
+        a.click();
+        URL.revokeObjectURL(a.href);
+    };
+
     const injectLib = (item: LibraryItem) => { if(!activeProject) return; if(activeProject.subsystems.length === 0) return alert("Add Subsystem"); let targetSubId = activeSubId || activeProject.subsystems[0].id; const targetIndex = activeProject.subsystems.findIndex(s => s.id === targetSubId); if(targetIndex === -1) return; const nm: Mode = {id: generateId(), mode: item.mode, effect: item.effect || "", cause: item.cause, currentControls: "", mitigation: item.task, rpn: blankRpn(), rpnStatus: "unscored"}; const nf: Failure = {id: generateId(), desc: item.fail || `Failure`, modes: [nm]}; const newSubs = [...activeProject.subsystems]; newSubs[targetIndex] = {...newSubs[targetIndex], failures: [...newSubs[targetIndex].failures, nf]}; setActiveProject({...activeProject, subsystems: newSubs}); };
     const getRpnColor = (r: number | "") => r === "" ? "bg-slate-100 text-slate-500" : r >= 100 ? "bg-red-100 text-red-800" : r >= 40 ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800";
     const getSubRowSpan = (sub: Subsystem) => { if (sub.failures.length === 0) return 1; return sub.failures.reduce((acc, f) => acc + (f.modes.length || 1), 0); };
@@ -3188,7 +3212,7 @@ syncFitBtn();
                                         </button>
 	                                        <button
 	                                            onClick={loadingMaster ? cancelMasterGen : masterGen}
-	                                            disabled={!loadingMaster && activeProject.subsystems.length > 0}
+	                                            disabled={reviewing || (!loadingMaster && activeProject.subsystems.length > 0)}
 	                                            title={!loadingMaster && activeProject.subsystems.length > 0 ? "Available only when the FMECA is empty" : undefined}
 	                                            className={`px-4 py-2 rounded shadow font-bold text-xs inline-flex items-center whitespace-nowrap transition ${
 	                                                loadingMaster
@@ -3202,8 +3226,8 @@ syncFitBtn();
 	                                                <span>Cancel</span>
 	                                            ) : (
 	                                                <>
-	                                                    <Icon name="bolt" />
-	                                                    <span className="whitespace-nowrap ml-1">Generate</span>
+	                                                    <Icon name={reviewing ? 'spinner' : 'bolt'} className={`w-5 h-5 ${reviewing ? 'animate-spin' : ''}`} />
+	                                                    <span className="whitespace-nowrap ml-1">{reviewing ? 'Reviewing knowledge…' : 'Generate'}</span>
 	                                                </>
 	                                            )}
 	                                        </button>
@@ -3279,7 +3303,7 @@ syncFitBtn();
                                         </div>
                                         {!sub.collapsed && (
                                             <div className="animate-enter">
-                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" locked={subsystemLocked(sub.id)} labelAddon={<button onClick={(e) => { e.stopPropagation(); setBreakdownSubId(sub.id); }} title="View Function Breakdown" className="text-slate-400 hover:text-brand-600 transition text-[11px] leading-none">⊞</button>} value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} {...citeProps({subId: sub.id, field: 'func', label: 'Function'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, projectDescription: activeProject.desc, subsystem: sub.name, specs: sub.specs, siblingSubsystems: siblingSubsystemNames(sub.id), allocationBlock: buildAllocationBlock(activeProject.functionPlan, sub.name)}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} disabled={genBusy.has(sub.id)} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">{genBusy.has(sub.id) ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
+                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" locked={subsystemLocked(sub.id)} labelAddon={<button onClick={(e) => { e.stopPropagation(); setBreakdownSubId(sub.id); }} title="View Function Breakdown" className="text-slate-400 hover:text-brand-600 transition text-[11px] leading-none">⊞</button>} value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} {...citeProps({subId: sub.id, field: 'func', label: 'Function'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, projectDescription: activeProject.desc, subsystem: sub.name, specs: sub.specs, siblingSubsystems: siblingSubsystemNames(sub.id)}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} disabled={genBusy.has(sub.id)} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">{genBusy.has(sub.id) ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full text-left text-sm border-collapse">
                                                         <thead className="bg-slate-50 text-slate-500 text-xs font-bold uppercase"><tr><th className="p-2 border-r w-1/5">Functional Failure</th><th className="p-2 border-r w-1/6">Mode</th><th className="p-2 border-r w-1/6">Effect</th><th className="p-2 border-r w-1/6">Cause</th><th className="p-2 border-r w-1/5">Controls &amp; Mitigation</th>{showRPN && <th className="p-2 text-center">RPN</th>}<th className="p-2 text-center">Edit</th></tr></thead>
@@ -3618,6 +3642,22 @@ syncFitBtn();
                         </div>
                     )}
                 </div>
+            )}
+            {cardReview && activeProject && (
+                <CardReviewModal
+                    flags={cardReview.flags}
+                    suggested={cardReview.suggested}
+                    initial={activeProject.cardReview || {}}
+                    onClose={() => setCardReview(null)}
+                    onDownload={decisions => downloadCorrectedKnowledge(cardReview.text, cardReview.flags, decisions)}
+                    onGenerateAnyway={() => { const text = cardReview.text; setCardReview(null); runMasterGen(text); }}
+                    onGenerate={decisions => {
+                        const { text, flags } = cardReview;
+                        updateHeader('cardReview', { ...(activeProject.cardReview || {}), ...decisions });
+                        setCardReview(null);
+                        runMasterGen(applyReview(text, flags, decisions));
+                    }}
+                />
             )}
             {showOperatingContext && activeProject && (
                 <OperatingContextModal

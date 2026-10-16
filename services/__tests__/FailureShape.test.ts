@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { allowedFailedStates, normalizeFailureShape } from '../FailureShape';
+import { allowedFailedStates, allowedStatesForRow, normalizeFailureShape } from '../FailureShape';
 import { AIService } from '../AIService';
 import { checkRow } from '../CoverageCheck';
 import { BreakdownRow, Failure } from '../../types';
@@ -58,8 +58,32 @@ describe('generateFFsForBreakdownRows with a declared shape', () => {
         ] }));
         const out = await AIService.generateFFsForBreakdownRows(args);
         expect(out.failures.map(f => `${f.rowId}:${f.failedState}`)).toEqual(['r1:total', 'r1:partial', 'r2:total', 'r3:on_demand']);
-        expect(out.rejected.map(r => r.rowId).sort()).toEqual(['r1', 'r2']);
+        // r1: speed-below (a second partial) and the erratic one; r2's partial was
+        // relabelled to the binary row's only state and then deduplicated.
+        expect(out.rejected.map(r => r.rowId)).toEqual(['r1']);
         expect(chat).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * Deployed run: a dryer's drying duty (conformance) came back with "does not
+     * dry" tagged total and "dew point above -15 deg C" tagged partial. The first
+     * was out of shape, the second's "above" read as contradicting "partial", and
+     * the primary function of the subsystem ended with no failure at all.
+     */
+    it('never leaves a shaped row empty, and does not apply the wording check to a single-state row', async () => {
+        vi.spyOn(AIService, 'chat').mockResolvedValue(JSON.stringify({ failures: [
+            { rowId: 'd1', parameter: 'dew point', failedState: 'total', desc: 'Does not dry the compressed air' },
+            { rowId: 'd1', parameter: 'dew point', failedState: 'partial', desc: 'Delivers air with dew point above -15 deg C' },
+            { rowId: 'p1', parameter: '', failedState: 'intermittent', desc: 'Delivers flow erratically to the header' },
+        ] }));
+        const out = await AIService.generateFFsForBreakdownRows({
+            ...args,
+            rows: [
+                { id: 'd1', function: 'dry compressed air', standard: 'dew point -15 deg C', snippet: 's', evidence: 'evident', failureShape: 'conformance', standardParameters: [] },
+                { id: 'p1', function: 'deliver flow', standard: '510 Sm3/hr', snippet: 's', evidence: 'evident', failureShape: 'below', standardParameters: [] },
+            ],
+        });
+        expect(out.failures.map(f => `${f.rowId}:${f.failedState}`)).toEqual(['d1:partial', 'p1:total']);
     });
 });
 
@@ -78,5 +102,13 @@ describe('checkRow with a declared shape', () => {
     it('reports a missing expected state and a state the shape cannot reach', () => {
         expect(checkRow(row({}), [fail('total')]).map(f => f.label)).toContain('Expected state missing');
         expect(checkRow(row({ failureShape: 'binary', standardParameters: [] }), [fail('total'), fail('partial')]).map(f => f.label)).toContain('State outside failure shape');
+    });
+});
+
+describe('allowedStatesForRow', () => {
+    it('unions the states of every requirement in the standard', () => {
+        expect(allowedStatesForRow({ failureShapes: ['below', 'above'], evidence: 'evident' })?.sort()).toEqual(['partial', 'total', 'upper_limit']);
+        expect(allowedStatesForRow({ failureShape: 'binary', evidence: 'hidden' })).toEqual(['on_demand']);
+        expect(allowedStatesForRow({ evidence: 'evident' })).toBeNull();
     });
 });

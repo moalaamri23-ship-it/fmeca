@@ -41,3 +41,17 @@ export function normalizeFailureShape(value: unknown): FailureShape | undefined 
     const v = String(value ?? '').toLowerCase().trim() as FailureShape;
     return FAILURE_SHAPES.includes(v) ? v : undefined;
 }
+
+/**
+ * The states a row can reach across all its independent requirements. A duty
+ * that must deliver an amount AND keep a quality under a limit (a flow and a
+ * dew point) fails short on the first and over on the second; forcing one shape
+ * on the whole row erased one of them.
+ */
+export function allowedStatesForRow(row: { failureShape?: FailureShape; failureShapes?: FailureShape[]; evidence?: 'evident' | 'hidden' }): FailedStateType[] | null {
+    const shapes = row.failureShapes?.length ? row.failureShapes : row.failureShape ? [row.failureShape] : [];
+    if (!shapes.length) return null;
+    const states = new Set<FailedStateType>();
+    for (const shape of shapes) for (const st of allowedFailedStates(shape, row.evidence) || []) states.add(st);
+    return [...states];
+}

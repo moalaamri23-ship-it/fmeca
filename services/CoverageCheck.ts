@@ -1,5 +1,5 @@
 import { BreakdownRow, Failure, StandardParameter, Project, Subsystem } from '../types';
-import { allowedFailedStates } from './FailureShape';
+import { allowedFailedStates, allowedStatesForRow } from './FailureShape';
 
 /**
  * Coverage checking for a subsystem's function breakdown and its functional
@@ -173,7 +173,7 @@ export function checkRow(row: BreakdownRow, failures: Failure[]): CoverageFindin
         }
         // With a declared failure shape, parameters quantify states rather than
         // generate them; coverage is judged per state below, not per parameter.
-        if (row.failureShape) continue;
+        if (row.failureShape || row.failureShapes?.length) continue;
         const missing = credibleDirections(p).filter(d => !covered.has(`${p.name}|${d}`));
         // Only report a parameter with NO coverage at all. Reporting each missing
         // direction turns the panel into the same six-per-function checklist the
@@ -193,7 +193,7 @@ export function checkRow(row: BreakdownRow, failures: Failure[]): CoverageFindin
         }
     }
 
-    const allowed = allowedFailedStates(row.failureShape, row.evidence);
+    const allowed = allowedStatesForRow(row);
     if (allowed) {
         // Hunting on a control loop and a spurious protective action are states
         // the shape admits but does not always have; only the rest are expected.
@@ -392,67 +392,7 @@ export function checkProject(project: Project): CoverageFinding[] {
             }
         }
     }
-    for (const claim of duplicateClaims(project)) {
-        const shown = claim.sightings.map(s => `${s.subsystem} ("${s.parameter}")`).join('; ');
-        for (const sight of claim.sightings) {
-            findings.push({
-                rowId: sight.rowId,
-                severity: 'info',
-                label: 'Claimed by several subsystems',
-                detail: `${claim.value} is a requirement of more than one subsystem — ${shown}. One owner, or genuinely separate duties?`,
-            });
-        }
-    }
     return findings;
-}
-
-export interface DuplicateClaim {
-    /** The shared value with its unit, e.g. "510 sm3/hr". */
-    value: string;
-    sightings: Array<{ subsystem: string; rowId: string; parameter: string }>;
-}
-
-/** Units normalise loosely so "deg C", "°C" and "degC" meet. */
-function unitKey(unit?: string | null): string {
-    return String(unit ?? '').toLowerCase().replace(/°\s*/g, 'deg ').replace(/\s+/g, '');
-}
-
-/**
- * The same measured requirement claimed by more than one subsystem.
- *
- * Subsystems are generated in parallel, and each one used to claim every
- * stream property it could see: one flow and one pressure turned up as
- * requirements of the machine that produces them and of every vessel and
- * conditioner they pass through. Those rows rarely share a parameter NAME
- * ("flow at battery limit", "outlet capacity"), so this keys on value and unit
- * instead. A value can legitimately repeat -- two identical vessels -- so this
- * reports and never decides; it is also the number a live validation run is
- * scored on. Only directional parameters count: a conformance requirement has
- * no magnitude to share, and a protective trip point is the protective device's
- * own, whatever it protects.
- */
-export function duplicateClaims(project: Project): DuplicateClaim[] {
-    const byValue = new Map<string, DuplicateClaim['sightings']>();
-    for (const sub of project.subsystems as Subsystem[]) {
-        for (const row of sub.functionBreakdown ?? []) {
-            if (row.functionClass === 'protection') continue;
-            for (const p of row.standardParameters ?? []) {
-                if (p.bound === 'spec') continue;
-                const magnitude = magnitudeOf(p.value);
-                const unit = unitKey(p.unit);
-                if (magnitude === null || !unit) continue;
-                const key = `${magnitude} ${unit}`;
-                if (!byValue.has(key)) byValue.set(key, []);
-                byValue.get(key)!.push({ subsystem: sub.name, rowId: row.id, parameter: p.name });
-            }
-        }
-    }
-    const claims: DuplicateClaim[] = [];
-    for (const [value, sightings] of byValue) {
-        if (new Set(sightings.map(s => s.subsystem)).size < 2) continue;
-        claims.push({ value, sightings });
-    }
-    return claims;
 }
 
 /** Findings grouped by rowId, for rendering beside each row. */
