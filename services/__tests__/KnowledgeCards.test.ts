@@ -94,6 +94,24 @@ describe('knowledge cards', () => {
         expect(pump.rows[0].standard).toBe('120 m3/h at 6.5 barg to Discharge Header');
     });
 
+    it('does not judge a pass-through subsystem against values its source produces', () => {
+        const text = `SECTION 3/1 - SUBSYSTEM: Dryer
+Delivers: 510 Sm3/hr at 8.0 barg to Receiver
+Functions:
+- primary: dry air to 510 Sm3/hr at 8.0 barg
+
+SECTION 3/2 - SUBSYSTEM: Receiver
+Receives: dry air from Dryer
+Delivers: 510 Sm3/hr at 8.0 barg to header
+Functions:
+- primary: deliver 510 Sm3/hr at 8.0 barg to the header
+`;
+        const [dryer, receiver] = subsystemsFromKnowledge(text);
+        expect(dryer.rows[0].standard).toBe('510 Sm3/hr at 8.0 barg to Receiver');
+        expect(receiver.rows[0].standard).toBe('required');
+        expect(receiver.rows[0].failureShape).toBe('binary');
+    });
+
     it('returns nothing for a file without the card layout', () => {
         expect(subsystemsFromKnowledge('SECTION 5 - BREAKDOWN\n- Pump P-101 [S1 p.3]')).toEqual([]);
         expect(subsystemsFromKnowledge(FILE)).toHaveLength(3);

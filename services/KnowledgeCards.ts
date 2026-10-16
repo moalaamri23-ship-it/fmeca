@@ -28,7 +28,10 @@ export interface KnowledgeCard {
     functions: CardFunction[];
     specs: string[];
     delivers: string[];
+    receives: string[];
     limits: CardLimit[];
+    /** Its Delivers values are all produced by the subsystem it receives from. */
+    passThrough?: boolean;
     /** Name plus Items lines, for matching an "executed by" entry to this card. */
     itemsText: string;
 }
@@ -102,7 +105,7 @@ export function parseKnowledgeCards(text: string): KnowledgeCard[] {
         const line = raw.trim();
         const header = line.match(SUBSYSTEM_HEADER);
         if (header) {
-            current = { name: header[1].trim(), functions: [], specs: [], delivers: [], limits: [], itemsText: header[1].trim() };
+            current = { name: header[1].trim(), functions: [], specs: [], delivers: [], receives: [], limits: [], itemsText: header[1].trim() };
             cards.push(current);
             inFunctions = false;
             continue;
@@ -122,6 +125,8 @@ export function parseKnowledgeCards(text: string): KnowledgeCard[] {
         if (spec) { current.specs.push(spec[1].trim()); continue; }
         const delivers = line.match(/^Delivers\s*:\s*(.+)$/i);
         if (delivers) { current.delivers.push(delivers[1].trim()); continue; }
+        const receives = line.match(/^Receives\s*:\s*(.+)$/i);
+        if (receives) { current.receives.push(receives[1].trim()); continue; }
         const limit = line.match(/^Limits\s*:\s*(.+)$/i);
         if (limit) { const l = parseLimit(limit[1]); if (l) current.limits.push(l); continue; }
         const items = line.match(/^Items\s*:\s*(.+)$/i);
@@ -184,6 +189,20 @@ export function cleanCards(cards: KnowledgeCard[]): KnowledgeCard[] {
             if (target) target.limits.push(limit);
         }
     });
+    // A subsystem that hands on exactly the values it receives (a buffer vessel
+    // between a producer and the boundary) does not produce them. Judging it
+    // against them writes the producer's shortfall a second time.
+    const numbers = (s: string) => new Set((s.replace(SOURCE_REF, '').match(/\d+(?:\.\d+)?/g) || []));
+    for (const card of kept) {
+        const own = numbers(card.delivers.join(' '));
+        if (!own.size) continue;
+        const received = card.receives.join(' ').toLowerCase();
+        const sources = kept.filter(o => o !== card && received.includes(o.name.toLowerCase()));
+        card.passThrough = sources.some(src => {
+            const theirs = numbers(src.delivers.join(' '));
+            return [...own].every(n => theirs.has(n));
+        });
+    }
     return kept;
 }
 
@@ -207,7 +226,7 @@ export function cardToSubsystem(card: KnowledgeCard): CardSubsystem {
         .join('; ');
     const rows = CLASS_ORDER
         .flatMap(cls => card.functions.filter(f => f.cls === cls))
-        .map(f => toRow(f, tidy(card.delivers[0] || '').replace(/[.;\s]+$/, '')))
+        .map(f => toRow(f, tidy(card.delivers[0] || '').replace(/[.;\s]+$/, ''), !!card.passThrough))
         .filter((r): r is CardRow => !!r);
     return { name: card.name.replace(TAG, '').replace(/\s{2,}/g, ' ').trim(), specs, func, rows };
 }
@@ -226,20 +245,19 @@ const SHAPE_BY_CLASS: Partial<Record<FunctionClass, FailureShape>> = {
     support: 'binary',
 };
 
-// A buffer passes on the flow it receives; the throughput on its Delivers line
-// is produced upstream and would fail there a second time.
-const STORAGE_DUTY = /^(buffer|store|hold|collect|accumulat)/i;
-function toRow(f: CardFunction, delivers: string): CardRow | null {
+function toRow(f: CardFunction, delivers: string, passThrough: boolean): CardRow | null {
     const text = tidy(f.text).replace(/[.;,\s]+$/, '');
     if (!text) return null;
     // A primary function is judged against what this subsystem itself hands on:
     // its Delivers line. Its own wording can name a variable another subsystem
     // produces ("maintain air pressure and quality" on a controller whose output
     // is commands), and every failure written against that variable duplicates
-    // the producer's. A buffer is the exception: the throughput it passes on is
-    // produced upstream, so it keeps its own wording.
-    const ownOutput = f.cls === 'primary' && delivers && !STORAGE_DUTY.test(text);
-    const standard = ownOutput ? delivers
+    // the producer's. A pass-through subsystem (see cleanCards) produces none of
+    // its Delivers values, so they are no standard of its own.
+    if (f.cls === 'primary' && passThrough) {
+        return { function: text.charAt(0).toUpperCase() + text.slice(1), standard: 'required', functionClass: f.cls, quantified: false, evidence: 'evident', failureShape: 'binary' };
+    }
+    const standard = f.cls === 'primary' && delivers ? delivers
         : /\d/.test(text) ? text
         : 'required';
     return {
@@ -250,7 +268,10 @@ function toRow(f: CardFunction, delivers: string): CardRow | null {
         // A protective device is only called on demand; its failure is hidden
         // until the demand arrives (JA1011 5.2).
         evidence: f.cls === 'protection' ? 'hidden' : 'evident',
-        failureShape: SHAPE_BY_CLASS[f.cls],
+        // A primary duty with no stated amount cannot fall short of one: "less"
+        // has no standard to be judged against (JA1011 5.1.2), so it is done or
+        // not done.
+        failureShape: SHAPE_BY_CLASS[f.cls] ?? (f.cls === 'primary' && !/\d/.test(standard) ? 'binary' : undefined),
     };
 }
 
