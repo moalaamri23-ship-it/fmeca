@@ -21,6 +21,7 @@ describe('team owners', () => {
             '6- Monitor oil-filter differential pressure for restriction (Instrument team)',
             '7- UT thickness measurement of wet air receiver shell for corrosion (Mechanical team)',
             '8- Inspect coupling elements for cracks (Mechanical team)',
+            '9- Trend insulation resistance and schedule rewind [Tag: 66-KM-127451] (Operations team)',
         ].join('\n'));
         expect(out.split('\n')).toEqual([
             '1- Grease motor DE and NDE bearings at 8000 h (Mechanical team)',
@@ -31,6 +32,7 @@ describe('team owners', () => {
             '6- Monitor oil-filter differential pressure for restriction (Operations team)',
             '7- UT thickness measurement of wet air receiver shell for corrosion (MI team)',
             '8- Inspect coupling elements for cracks (Mechanical team)',
+            '9- Trend insulation resistance and schedule rewind [Tag: 66-KM-127451] (Electrical team)',
         ]);
     });
 

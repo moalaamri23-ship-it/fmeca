@@ -305,7 +305,9 @@ const FAILURE_MODE_TECHNICAL_RULES = `Failure mode / cause / effect rules:
 - "mode" must be more specific than the functional failure and must not include cause wording: due to, because of, caused by, resulting from, as a result of.
 - "mode" must not include effect/control wording: equipment shutdown, production loss, trip, alarm, inspection, PM, maintenance, mitigation, recommendation, or monitoring action.
 - "cause": why the mode occurs; do not repeat the mode unless no deeper cause is available; do not write an effect or mitigation.
-- "effect": consequence after the mode occurs; preserve the required Local/End format; do not write a cause, control, or mitigation.`;
+- "effect": consequence after the mode occurs; preserve the required Local/End format; do not write a cause, control, or mitigation.
+- Each mode belongs under the functional failure it directly produces. A breach of the pressure or fluid boundary (leakage, rupture, a drain or vent stuck open) is a mode of the containment failure only, even though it also reduces delivery: never list it again under a delivery, supply or buffering failure.
+- Under a failure to act on demand, list only what stops the device acting. Acting too early, below its setting or when not required is a different failure, never a mode of this one.`;
 
 const OPERATIONAL_HISTORY_GUIDANCE_RULES = `Operational failure history rules:
 - Treat component-scoped history as advisory occurrence evidence, never as an output template or naming authority.

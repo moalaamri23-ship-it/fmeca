@@ -21,8 +21,20 @@ const CASES: Array<{ sub: string; ff: string }> = process.env.CASES ? JSON.parse
     { sub: 'Common Control, MCC and Instrumentation', ff: 'Does not issue trip command on protective demand' },
 ];
 
+describe('live modes batch', () => {
+    // BATCH='{"sub":"...","ffs":["..."]}' runs one subsystem's failures in one call, as MasterGen does.
+    it.runIf(!!process.env.BATCH)('one subsystem batch', { timeout: 900000 }, async () => {
+        const text = readFileSync(process.env.KNOWLEDGE_FILE!, 'utf8');
+        const checklist = process.env.CHECKLIST_FILE ? readFileSync(process.env.CHECKLIST_FILE, 'utf8') : '';
+        const b = JSON.parse(process.env.BATCH!);
+        const card = findCardSubsystem(text, b.sub)!;
+        const res = await AIService.generateModesForFailuresBatch({ project: 'Instrument Air Compressor Package in Thulailat', subName: b.sub, subSpecs: card.specs, subFunc: card.func, failures: b.ffs.map((desc: string, i: number) => ({ id: `f${i}`, desc })), key: '', modelName: '', mode: 'file', refText: text, aiProvider: 'copilot', checklistText: checklist, powerAutomateUrl: envUrl(), sessionId: `batch-${Date.now()}` });
+        writeFileSync(`${process.env.OUT_DIR}/batch.json`, JSON.stringify(res.failures.map(f => ({ ff: b.ffs[Number(f.failureId.slice(1))], modes: f.modes.map((m: any) => ({ mode: m.mode, cause: m.cause, mitigation: m.mitigation })) })), null, 2));
+    });
+});
+
 describe('live modes', () => {
-    it('with and without boundary', { timeout: 900000 }, async () => {
+    it.runIf(!process.env.BATCH)('with and without boundary', { timeout: 900000 }, async () => {
         const text = readFileSync(process.env.KNOWLEDGE_FILE!, 'utf8');
         const checklist = process.env.CHECKLIST_FILE ? readFileSync(process.env.CHECKLIST_FILE, 'utf8') : '';
         const url = envUrl();

@@ -52,12 +52,15 @@ function forcedTeam(action: string): Team | null {
     const STATIC = /\b(vessel|receiver|tank|column|tower|shell|piping|pipe|pipework|nozzle|drum|separator vessel|exchanger|support|structure|base ?frame|weld)/i;
     const INTEGRITY = /\b(corros|crack|pitting|thickness|wall (loss|thinning)|ndt|ultrason|\but\b|radiograph|dye penetrant|magnetic particle|integrity|external inspection|internal inspection)/i;
     if (STATIC.test(action) && INTEGRITY.test(action) && !/\b(repair|replace|weld repair)\b/i.test(action)) return 'MI';
-    // Watching a reading is a round, not instrument maintenance.
-    if (/^(monitor|trend|log|record|observe|watch)\b/i.test(action.trim()) && !/\b(calibrat|loop|replace|repair|install)/i.test(action)) return 'Operations';
     // A motor's electrical side is the Electrical team's, whatever heading the
-    // checklist filed it under.
-    if (/\bmotor/i.test(action) && /\b(winding|insulation|megg|terminal|earth|cable gland|running current|starter|feeder|overload)/i.test(action)) return 'Electrical';
+    // checklist filed it under -- and winding or insulation testing is
+    // electrical work even when the line names the motor only by its tag.
+    if (/\b(winding|insulation resistance|megg|rewind)/i.test(action)) return 'Electrical';
+    if (/\bmotor/i.test(action) && /\b(terminal|earth|cable gland|running current|starter|feeder|overload)/i.test(action)) return 'Electrical';
     if (/(relief|safety) valve|\b(psv|prv)\b/i.test(action) && /\b(test|recertif|overhaul|calibrat|pop|bench|set pressure)/i.test(action)) return 'PRV';
+    // Watching a reading is a round, not instrument maintenance. Checked last:
+    // trending a test result (insulation resistance) is still the tester's work.
+    if (/^(monitor|trend|log|record|observe|watch)\b/i.test(action.trim()) && !/\b(calibrat|loop|replace|repair|install)/i.test(action)) return 'Operations';
     return null;
 }
 
