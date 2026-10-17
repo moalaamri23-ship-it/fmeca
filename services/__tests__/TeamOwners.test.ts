@@ -7,6 +7,7 @@ describe('team owners', () => {
         expect(canonicalTeam('Operation team')).toBe('Operations');
         expect(canonicalTeam('PSV team')).toBe('PRV');
         expect(canonicalTeam('Electrical Low Voltage Motor PM')).toBe('Electrical');
+        expect(canonicalTeam('Material Integrity')).toBe('MI');
         expect(canonicalTeam('Hi: 10 barg')).toBeNull();
     });
 
@@ -18,6 +19,8 @@ describe('team owners', () => {
             '4- Calibrate PDT [Tag: 66-PDT-127373 (Hi: 0.2 bar)] (Instrument team)',
             '5- Drain condensate from receiver weekly (Operation team)',
             '6- Monitor oil-filter differential pressure for restriction (Instrument team)',
+            '7- UT thickness measurement of wet air receiver shell for corrosion (Mechanical team)',
+            '8- Inspect coupling elements for cracks (Mechanical team)',
         ].join('\n'));
         expect(out.split('\n')).toEqual([
             '1- Grease motor DE and NDE bearings at 8000 h (Mechanical team)',
@@ -26,6 +29,8 @@ describe('team owners', () => {
             '4- Calibrate PDT [Tag: 66-PDT-127373 (Hi: 0.2 bar)] (Instrument team)',
             '5- Drain condensate from receiver weekly (Operations team)',
             '6- Monitor oil-filter differential pressure for restriction (Operations team)',
+            '7- UT thickness measurement of wet air receiver shell for corrosion (MI team)',
+            '8- Inspect coupling elements for cracks (Mechanical team)',
         ]);
     });
 
