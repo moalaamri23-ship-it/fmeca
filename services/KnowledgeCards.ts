@@ -29,6 +29,7 @@ export interface KnowledgeCard {
     specs: string[];
     delivers: string[];
     receives: string[];
+    excludes: string[];
     limits: CardLimit[];
     /** Its Delivers values are all produced by the subsystem it receives from. */
     passThrough?: boolean;
@@ -64,6 +65,12 @@ export interface CardSubsystem {
     specs: string;
     func: string;
     rows: CardRow[];
+    /**
+     * What crosses the subsystem's boundary and what lies outside it, for the
+     * AI steps that work on one subsystem at a time (a field's wand, failure
+     * modes): without it they re-attribute neighbouring equipment's duties.
+     */
+    boundary: string;
 }
 
 const SUBSYSTEM_HEADER = /^SECTION\s+3\/\d+\s*-\s*SUBSYSTEM:\s*(.+?)\s*$/i;
@@ -113,7 +120,7 @@ export function parseKnowledgeCards(text: string): KnowledgeCard[] {
         const line = raw.trim();
         const header = line.match(SUBSYSTEM_HEADER);
         if (header) {
-            current = { name: header[1].trim(), functions: [], specs: [], delivers: [], receives: [], limits: [], itemsText: header[1].trim(), items: [] };
+            current = { name: header[1].trim(), functions: [], specs: [], delivers: [], receives: [], excludes: [], limits: [], itemsText: header[1].trim(), items: [] };
             cards.push(current);
             inFunctions = false;
             continue;
@@ -135,6 +142,8 @@ export function parseKnowledgeCards(text: string): KnowledgeCard[] {
         if (delivers) { current.delivers.push(delivers[1].trim()); continue; }
         const receives = line.match(/^Receives\s*:\s*(.+)$/i);
         if (receives) { current.receives.push(receives[1].trim()); continue; }
+        const excludes = line.match(/^Excludes\s*:\s*(.+)$/i);
+        if (excludes) { current.excludes.push(excludes[1].trim()); continue; }
         const limit = line.match(/^Limits\s*:\s*(.+)$/i);
         if (limit) { const l = parseLimit(limit[1]); if (l) current.limits.push(l); continue; }
         const items = line.match(/^Items\s*:\s*(.+)$/i);
@@ -249,7 +258,12 @@ export function cardToSubsystem(card: KnowledgeCard): CardSubsystem {
             return toRow(f, mission ? delivers : '', !!card.passThrough && mission);
         })
         .filter((r): r is CardRow => !!r);
-    return { name: card.name.replace(TAG, '').replace(/\s{2,}/g, ' ').trim(), specs, func, rows };
+    const boundary = [
+        ...card.receives.map(r => `Receives: ${tidy(r)}`),
+        ...card.delivers.map(d => `Delivers: ${tidy(d)}`),
+        ...card.excludes.map(e => `Outside this subsystem: ${tidy(e)}`),
+    ].join('\n');
+    return { name: card.name.replace(TAG, '').replace(/\s{2,}/g, ' ').trim(), specs, func, rows, boundary };
 }
 
 // The card already states each function once with its standard. Re-deriving
@@ -304,4 +318,19 @@ function toRow(f: CardFunction, delivers: string, passThrough: boolean): CardRow
 export function subsystemsFromKnowledge(text: string): CardSubsystem[] {
     const subs = cleanCards(parseKnowledgeCards(text)).map(cardToSubsystem).filter(s => s.name && s.func);
     return subs.length >= 2 ? subs : [];
+}
+
+const normalName = (s: string) => s.toLowerCase().replace(TAG, '').replace(/[^a-z0-9]+/g, ' ').trim();
+
+/** The card for a subsystem name as MasterGen wrote it, or null when renamed or absent. */
+export function findCardSubsystem(text: string, name: string | undefined): CardSubsystem | null {
+    if (!text || !name) return null;
+    const want = normalName(name);
+    return subsystemsFromKnowledge(text).find(s => normalName(s.name) === want) || null;
+}
+
+/** The boundary block a single-subsystem prompt carries in file and hybrid mode. */
+export function boundaryBlock(text: string, name: string | undefined): string {
+    const card = findCardSubsystem(text, name);
+    return card?.boundary ? `Subsystem boundary (from the knowledge file):\n${card.boundary}\nDescribe only what happens inside this boundary; equipment outside it belongs to another subsystem.` : '';
 }

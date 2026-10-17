@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { toPng, toJpeg } from 'html-to-image';
 import XLSX from 'xlsx-js-style';
 import { Icon } from './components/Icon';
@@ -18,7 +18,7 @@ import { BulkCiteButton, type CiteState } from './components/CiteButton';
 import { Chatbot } from './components/Chatbot';
 import { ModelSelector } from './components/ModelSelector';
 import { AIService, TieredModels } from './services/AIService';
-import { subsystemsFromKnowledge } from './services/KnowledgeCards';
+import { subsystemsFromKnowledge, findCardSubsystem } from './services/KnowledgeCards';
 import { reviewKnowledge, dutyCandidates, applyReview, isDecided, type ReviewFlag, type ReviewDecision } from './services/CardReview';
 import { CardReviewModal } from './components/CardReviewModal';
 import { LocalFileSystemProvider, sanitizeName, isCancellation } from './services/FileSystem';
@@ -155,6 +155,15 @@ const App = () => {
     const [showHybridSourceLabels, setShowHybridSourceLabels] = useState(true);
     const [globalFileText, setGlobalFileText] = useState('');
     const [globalFileName, setGlobalFileName] = useState('');
+    // The knowledge text every AI step reads: the uploaded file with the
+    // engineer's card review applied, so a wand or Auto-Fill sees the same
+    // subsystem boundaries MasterGen used.
+    const knowledgeForAI = useMemo(() => {
+        if (aiSourceMode === 'ai' || !globalFileText) return globalFileText;
+        const decisions = activeProject?.cardReview;
+        if (!decisions || !Object.keys(decisions).length) return globalFileText;
+        return applyReview(globalFileText, reviewKnowledge(globalFileText), decisions);
+    }, [globalFileText, aiSourceMode, activeProject?.cardReview]);
     const [checklistText, setChecklistText] = useState('');
     const [checklistFileName, setChecklistFileName] = useState('');
     const [tab, setTab] = useState<'build' | 'viewTable' | 'map'>('build');
@@ -2163,7 +2172,7 @@ syncFitBtn();
                 key: apiKey,
                 modelName,
                 modeSource: aiSourceMode as any,
-                refText: globalFileText || "",
+                refText: knowledgeForAI || "",
                 aiProvider,
                 azureEndpoint,
                 systemContext: modeSystemContext,
@@ -2200,18 +2209,35 @@ syncFitBtn();
 
     const setBusy = (id: string, on: boolean) => setRpnBusy(prev => { const next = new Set(prev); on ? next.add(id) : next.delete(id); return next; });
 
+    // A subsystem whose function still reads as its knowledge card wrote it takes
+    // the card's rows, as MasterGen does: re-deriving them lets the model add
+    // duties from the operating context to a subsystem that does not own them.
+    // An edited function is the engineer's own wording and is decomposed afresh.
+    const cardRowsFor = async (name: string, func: string, sessionId: string): Promise<BreakdownRow[] | null> => {
+        if (aiSourceMode === 'ai') return null;
+        const card = findCardSubsystem(knowledgeForAI, name);
+        if (!card?.rows.length || (func.trim() && func.trim() !== card.func.trim())) return null;
+        const rows: BreakdownRow[] = card.rows.map(r => ({ ...r, snippet: r.function, id: generateId() }));
+        const open = rows.filter(r => !r.failureShape);
+        if (open.length) {
+            const shapes = await AIService.classifyFailureShapes({ subsystemName: name, subsystemSpecs: card.specs, rows: open, key: apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, sessionId });
+            open.forEach((r, i) => { if (shapes[i].length) { r.failureShape = shapes[i][0]; r.failureShapes = shapes[i]; } });
+        }
+        return rows;
+    };
+
     const redecomposeFunction = async (sId: string) => {
         const sub = activeProject?.subsystems.find(s => s.id === sId);
         if (!sub?.func?.trim() || (!apiKey && aiProvider !== 'copilot')) return;
         if (redecomposeBusy.has(sId) || subsystemLocked(sId)) return;
         setRedecomposeBusyFor(sId, true);
         try {
-        const decomposed = await AIService.decomposeFunction(
+        const session = newConversationId();
+        const rows: BreakdownRow[] = (await cardRowsFor(sub.name, sub.func, session)) ?? (await AIService.decomposeFunction(
             sub.func, sub.name, activeProject!.name,
-            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', sub.specs || '', newConversationId(),
+            apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', sub.specs || '', session,
             siblingSubsystemNames(sId)
-        );
-        const rows: BreakdownRow[] = decomposed.map(r => ({ ...r, id: generateId() }));
+        )).map(r => ({ ...r, id: generateId() }));
         if (rows.length > 0) {
             setActiveProject(p => p ? touchProject({
                 ...p,
@@ -2348,7 +2374,7 @@ syncFitBtn();
             key: apiKey,
             modelName,
             modeSource: aiSourceMode as any,
-            refText: globalFileText,
+            refText: knowledgeForAI,
             aiProvider,
             azureEndpoint,
             systemContext,
@@ -2389,11 +2415,11 @@ syncFitBtn();
             const modeTags = hybridSourceTags(Boolean(modeSystemContext));
             let workingFunc = (func || '').trim();
             if (!workingFunc) {
-                workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, globalFileText, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId) }, aiProvider, azureEndpoint, '', powerAutomateUrl, runSession) || '').trim();
+                workingFunc = (await AIService.generate("Function", "", apiKey, modelName, aiSourceMode, knowledgeForAI, { project: activeProject.name, projectDescription: activeProject.desc, subsystem: name, specs, siblingSubsystems: siblingSubsystemNames(sId) }, aiProvider, azureEndpoint, '', powerAutomateUrl, runSession) || '').trim();
             }
             const siblings = siblingSubsystemNames(sId);
             const rows = workingFunc
-                ? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '', runSession, siblings)).map(r => ({ ...r, id: generateId() }))
+                ? (await cardRowsFor(name, workingFunc, runSession)) ?? (await AIService.decomposeFunction(workingFunc, name, activeProject.name, apiKey, modelName, aiProvider, azureEndpoint, powerAutomateUrl, '', 'detailed', specs || '', runSession, siblings)).map(r => ({ ...r, id: generateId() }))
                 : [];
             if (!rows.length) {
                 alert("Auto-Fill could not decompose the function.");
@@ -2446,7 +2472,7 @@ syncFitBtn();
                 key: apiKey,
                 modelName,
                 mode: aiSourceMode,
-                refText: globalFileText,
+                refText: knowledgeForAI,
                 aiProvider,
                 azureEndpoint,
                 systemContext: scopedSystemContext(name, specs, workingFunc),
@@ -2510,7 +2536,7 @@ syncFitBtn();
         try {
         if (activeProject) {
             const existingModes = activeProject.subsystems.find(s => s.id === sId)?.failures.flatMap(f => f.modes.map(m => m.mode)).filter(Boolean) || [];
-            const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, globalFileText, aiProvider, azureEndpoint, scopedSystemContext(name, specs, func), checklistText, powerAutomateUrl, existingModes, newConversationId());
+            const modes = await AIService.generateModesForFailure(failDesc, name, specs, func, activeProject.name, apiKey, modelName, aiSourceMode, knowledgeForAI, aiProvider, azureEndpoint, scopedSystemContext(name, specs, func), checklistText, powerAutomateUrl, existingModes, newConversationId());
             const tags = hybridSourceTags(Boolean(scopedSystemContext(name, specs, func)));
             if (modes) setActiveProject(p => p ? touchProject({
                 ...p,
@@ -2914,7 +2940,7 @@ syncFitBtn();
 	    azureEndpoint={azureEndpoint}
 	    systemContext={systemContext}
 	    powerAutomateUrl={powerAutomateUrl}
-	    referenceFileText={globalFileText}
+	    referenceFileText={knowledgeForAI}
 	    referenceFileName={globalFileName}
 	    checklistText={checklistText}
 	    checklistFileName={checklistFileName}
@@ -3247,7 +3273,7 @@ syncFitBtn();
 	                                            </div>
 	                                        </div>
 	                                    )}
-	                                    <SmartInput label="Context" value={activeProject.desc} onChange={v => updateHeader('desc', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} />
+	                                    <SmartInput label="Context" value={activeProject.desc} onChange={v => updateHeader('desc', v)} isTextArea apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={knowledgeForAI} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} />
                                 </div>
                                 {activeProject.subsystems.map((sub, i) => (
                                     <div key={sub.id} draggable={dragAllowed===i||dragId===i} onDragStart={(e)=>handleDragStart(e,i)} onDragEnd={handleDragEnd} onDragOver={(e)=>e.preventDefault()} onDragEnter={()=>handleDragEnter(i)} onDrop={(e)=>{ e.preventDefault(); setDragId(null); setDragAllowed(null); }} onClick={()=>setActiveSubId(sub.id)} className={`bg-white rounded border shadow-sm mb-8 overflow-hidden animate-enter transition-all cursor-pointer border-2 ${activeSubId===sub.id?'border-brand-500 ring-2 ring-brand-100':'border-slate-200'} ${dragId===i?'is-dragging opacity-50 border-dashed border-brand-500':''} ${dragId!==null&&dragId!==i?'':' '}`}>
@@ -3257,11 +3283,11 @@ syncFitBtn();
 	                                                    <div className="text-slate-400 cursor-grab hover:text-brand-600 drag-handle p-1" title="Reorder" onMouseEnter={()=>setDragAllowed(i)} onMouseLeave={()=>{ if(dragId===null) setDragAllowed(null); }}><Icon name="move"/></div>
 	                                                    <button onClick={(e) => {e.stopPropagation(); toggleSub(sub.id)}} className="text-slate-400"><Icon name={sub.collapsed ? "chevronDown" : "chevronUp"} /></button>
 	                                                    <div className="flex-1">
-	                                                        <SmartInput label="Subsystem" labelAddon={<BulkCiteButton {...bulkCiteProps(sub)} />} locked={subsystemLocked(sub.id)} value={sub.name} onChange={v => updateSub(sub.id, 'name', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} />
+	                                                        <SmartInput label="Subsystem" labelAddon={<BulkCiteButton {...bulkCiteProps(sub)} />} locked={subsystemLocked(sub.id)} value={sub.name} onChange={v => updateSub(sub.id, 'name', v)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={knowledgeForAI} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name}} />
 	                                                        <SourceBadges tags={sub.sourceTags} />
 	                                                    </div>
 	                                                </div>
-                                                <SmartInput label="Specs" locked={subsystemLocked(sub.id)} value={sub.specs} onChange={v => updateSub(sub.id, 'specs', v)} {...citeProps({subId: sub.id, field: 'specs', label: 'Specs'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, subsystemFunction: sub.func, siblingSubsystems: siblingSubsystemNames(sub.id)}} />
+                                                <SmartInput label="Specs" locked={subsystemLocked(sub.id)} value={sub.specs} onChange={v => updateSub(sub.id, 'specs', v)} {...citeProps({subId: sub.id, field: 'specs', label: 'Specs'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={knowledgeForAI} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, subsystemFunction: sub.func, siblingSubsystems: siblingSubsystemNames(sub.id)}} />
                                                 <div className="mt-2 space-y-1">
                                                     <div className="text-[10px] font-semibold uppercase text-slate-500">Subsystem image (AI)</div>
                                                     <div className="flex items-center gap-2 flex-nowrap">
@@ -3303,7 +3329,7 @@ syncFitBtn();
                                         </div>
                                         {!sub.collapsed && (
                                             <div className="animate-enter">
-                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" locked={subsystemLocked(sub.id)} labelAddon={<button onClick={(e) => { e.stopPropagation(); setBreakdownSubId(sub.id); }} title="View Function Breakdown" className="text-slate-400 hover:text-brand-600 transition text-[11px] leading-none">⊞</button>} value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} {...citeProps({subId: sub.id, field: 'func', label: 'Function'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, projectDescription: activeProject.desc, subsystem: sub.name, specs: sub.specs, siblingSubsystems: siblingSubsystemNames(sub.id)}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} disabled={genBusy.has(sub.id)} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">{genBusy.has(sub.id) ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
+                                                <div className="p-4 border-b bg-slate-50/30 flex items-end gap-4"><div className="flex-1"><SmartInput label="Function" locked={subsystemLocked(sub.id)} labelAddon={<button onClick={(e) => { e.stopPropagation(); setBreakdownSubId(sub.id); }} title="View Function Breakdown" className="text-slate-400 hover:text-brand-600 transition text-[11px] leading-none">⊞</button>} value={sub.func} onChange={v => updateSub(sub.id, 'func', v)} {...citeProps({subId: sub.id, field: 'func', label: 'Function'}, sub)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={knowledgeForAI} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, projectDescription: activeProject.desc, subsystem: sub.name, specs: sub.specs, siblingSubsystems: siblingSubsystemNames(sub.id)}} /></div><button onClick={(e) => {e.stopPropagation(); autoGen(sub.id, sub.name, sub.specs, sub.func)}} disabled={genBusy.has(sub.id)} className="h-9 px-3 border bg-white rounded text-xs font-bold text-brand-600 hover:bg-brand-50 transition border-brand-200 flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">{genBusy.has(sub.id) ? "..." : <span><Icon name="wand"/> Auto-Fill</span>}</button></div>
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full text-left text-sm border-collapse">
                                                         <thead className="bg-slate-50 text-slate-500 text-xs font-bold uppercase"><tr><th className="p-2 border-r w-1/5">Functional Failure</th><th className="p-2 border-r w-1/6">Mode</th><th className="p-2 border-r w-1/6">Effect</th><th className="p-2 border-r w-1/6">Cause</th><th className="p-2 border-r w-1/5">Controls &amp; Mitigation</th>{showRPN && <th className="p-2 text-center">RPN</th>}<th className="p-2 text-center">Edit</th></tr></thead>
@@ -3315,7 +3341,7 @@ syncFitBtn();
                                                                             <div className="flex items-start p-2 gap-2 group">
                                                                                 <button onClick={(e)=>{e.stopPropagation(); toggleFail(sub.id, fail.id)}} className="mt-1 text-slate-400"><Icon name={fail.collapsed?"chevronDown":"chevronUp"}/></button>
                                                                                 <div className="flex-1">
-	                                                                                    <SmartInput label="Functional Failure" locked={subsystemLocked(sub.id)} value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func}} />
+	                                                                                    <SmartInput label="Functional Failure" locked={subsystemLocked(sub.id)} value={fail.desc} onChange={v => updateFail(sub.id, fail.id, v)} isTextArea placeholder="Functional Failure..." apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={knowledgeForAI} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func}} />
 	                                                                                    <SourceBadges tags={fail.sourceTags} />
                                                                                     {(fail.failedState || fail.parameter || fail.needsReview) && (
                                                                                         <div className="flex flex-wrap items-center gap-1 mt-1">
@@ -3348,10 +3374,10 @@ syncFitBtn();
                                                                     {!fail.collapsed && fail.modes.map((mode, mIdx) => (
                                                                         <tr key={mode.id} className="group hover:bg-slate-50">
                                                                             <td className="p-2 border-r bg-slate-50/10 text-right text-xs text-slate-300">M{mIdx+1}</td>
-	                                                                            <td className="p-2 border-r"><SmartInput label="Failure Mode" locked={subsystemLocked(sub.id)} value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={scopedSystemContext(sub.name, sub.specs, sub.func)} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /><SourceBadges tags={mode.sourceTags} /></td>
-                                                                            <td className="p-2 border-r"><SmartInput label="Failure Effect" locked={subsystemLocked(sub.id)} value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
-                                                                            <td className="p-2 border-r"><SmartInput label="Failure Cause" locked={subsystemLocked(sub.id)} value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
-	                                                                            <td className="p-2 border-r"><div className="mb-2"><MitigationBuilder label="Current Controls" locked={subsystemLocked(sub.id)} placeholder="Existing controls (D scored against these)..." value={mode.currentControls || ""} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'currentControls', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'currentControls', label: 'Current Controls'}, mode)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></div><MitigationBuilder locked={subsystemLocked(sub.id)} value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'mitigation', label: 'Mitigation'}, mode)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={globalFileText} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, detectionScore: Number(mode.rpn?.d) || 5, currentControls: mode.currentControls || "", siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
+	                                                                            <td className="p-2 border-r"><SmartInput label="Failure Mode" locked={subsystemLocked(sub.id)} value={mode.mode} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mode', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={knowledgeForAI} aiProvider={aiProvider} azureEndpoint={azureEndpoint} systemContext={scopedSystemContext(sub.name, sub.specs, sub.func)} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /><SourceBadges tags={mode.sourceTags} /></td>
+                                                                            <td className="p-2 border-r"><SmartInput label="Failure Effect" locked={subsystemLocked(sub.id)} value={mode.effect} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'effect', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} placeholder="Consequence..." aiSourceMode={aiSourceMode} referenceFileText={knowledgeForAI} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
+                                                                            <td className="p-2 border-r"><SmartInput label="Failure Cause" locked={subsystemLocked(sub.id)} value={mode.cause} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'cause', v)} isTextArea heightClass="min-h-[150px]" apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={knowledgeForAI} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
+	                                                                            <td className="p-2 border-r"><div className="mb-2"><MitigationBuilder label="Current Controls" locked={subsystemLocked(sub.id)} placeholder="Existing controls (D scored against these)..." value={mode.currentControls || ""} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'currentControls', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'currentControls', label: 'Current Controls'}, mode)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={knowledgeForAI} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></div><MitigationBuilder locked={subsystemLocked(sub.id)} value={mode.mitigation} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'mitigation', v)} {...citeProps({subId: sub.id, failId: fail.id, modeId: mode.id, field: 'mitigation', label: 'Mitigation'}, mode)} apiKey={apiKey} modelName={modelName} aiSourceMode={aiSourceMode} referenceFileText={knowledgeForAI} aiProvider={aiProvider} azureEndpoint={azureEndpoint} powerAutomateUrl={powerAutomateUrl} contextData={{project: activeProject.name, subsystem: sub.name, specs: sub.specs, subsystemFunction: sub.func, functionalFailure: fail.desc, failureMode: mode.mode, failureEffect: mode.effect, failureCause: mode.cause, checklistText: checklistText, detectionScore: Number(mode.rpn?.d) || 5, currentControls: mode.currentControls || "", siblingFailureModes: fail.modes.filter(other => other.id !== mode.id).map(other => ({ mode: other.mode, cause: other.cause, effect: other.effect }))}} /></td>
                                                                             {showRPN && <td className="p-2 text-center"><div className="flex justify-center gap-0.5 mb-1"><RpnScoreInput mode={mode} scoreKey="s" value={mode.rpn.s} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, s:v})}/><RpnScoreInput mode={mode} scoreKey="o" value={mode.rpn.o} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, o:v})}/><RpnScoreInput mode={mode} scoreKey="d" value={mode.rpn.d} onChange={v=>updateMode(sub.id, fail.id, mode.id, 'rpn', {...mode.rpn, d:v})}/></div><RpnTotalBadge mode={mode} colorClass={getRpnColor(rpnTotal(mode.rpn))} /></td>}
                                                                             <td className="p-2 text-center opacity-0 group-hover:opacity-100"><div className="flex flex-col items-center gap-1"><button onClick={(e)=>{e.stopPropagation();deleteMode(sub.id,fail.id,mode.id)}} className="text-red-500 mb-2"><Icon name="trash"/></button><button onClick={(e)=>{e.stopPropagation();aiScoreModeRpn(sub.id,fail.id,mode.id)}} disabled={rpnBusy.has(String(mode.id)) || subsystemLocked(sub.id)} className={`text-blue-500 text-sm disabled:cursor-not-allowed ${rpnBusy.has(String(mode.id)) ? "animate-pulse scale-110 drop-shadow-[0_0_6px_rgba(59,130,246,0.6)]" : subsystemLocked(sub.id) ? "opacity-40" : ""}`} title={subsystemLocked(sub.id) ? "Auto-Fill is running on this subsystem" : "AI score S/O/D"}>🤖</button></div></td>
                                                                         </tr>

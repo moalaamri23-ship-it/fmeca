@@ -117,3 +117,35 @@ Functions:
         expect(subsystemsFromKnowledge(FILE)).toHaveLength(3);
     });
 });
+
+describe('card lookup for single-subsystem steps', () => {
+    const TEXT = `SECTION 3/1 - SUBSYSTEM: Wet Air Receiver
+Receives: compressed air from Compressor
+Delivers: buffered air to Dryer
+Excludes: moisture separator -> Compressor
+Functions:
+- primary: deliver buffered air to the dryer
+Specifications: Capacity 8.5 m3 [S1 p.4]
+
+SECTION 3/2 - SUBSYSTEM: Dryer
+Functions:
+- primary: dry air to -15 deg C dew point
+`;
+    it('finds a card by the name MasterGen wrote, ignoring case and punctuation', async () => {
+        const { findCardSubsystem, boundaryBlock } = await import('../KnowledgeCards');
+        expect(findCardSubsystem(TEXT, 'wet air receiver')?.specs).toBe('Capacity 8.5 m3');
+        expect(findCardSubsystem(TEXT, 'Renamed Vessel')).toBeNull();
+        expect(boundaryBlock(TEXT, 'Wet Air Receiver')).toContain('Outside this subsystem: moisture separator -> Compressor');
+    });
+
+    it('fills a blank Function or Specs field from the card without a model call', async () => {
+        const { AIService } = await import('../AIService');
+        const { vi } = await import('vitest');
+        const chat = vi.spyOn(AIService, 'chat');
+        const ctx = { subsystem: 'Wet Air Receiver' } as any;
+        expect(await AIService.generate('Function', '', '', '', 'file', TEXT, ctx, 'copilot', '', '', 'https://flow')).toBe('Deliver buffered air to the dryer.');
+        expect(await AIService.generate('Specs', '', '', '', 'file', TEXT, ctx, 'copilot', '', '', 'https://flow')).toBe('Capacity 8.5 m3');
+        expect(chat).not.toHaveBeenCalled();
+        chat.mockRestore();
+    });
+});

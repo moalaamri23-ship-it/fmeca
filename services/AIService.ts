@@ -1,5 +1,6 @@
 import { ContextData, FunctionClass, FailedStateType, StandardParameter, FailureShape } from '../types';
 import { allowedFailedStates, allowedStatesForRow, normalizeFailureShape } from './FailureShape';
+import { findCardSubsystem, boundaryBlock } from './KnowledgeCards';
 import { RICH_LIBRARY } from '../constants';
 import { buildCopilotPrompt, parseCopilotReply, getCopilotSessionId } from './copilotHelper';
 import {
@@ -1389,6 +1390,22 @@ export const AIService = {
         const isCauseField = lowerLabel.includes("cause");
         const isFunctionDescriptionField = lowerLabel.includes("function") && !isFunctionalFailureField;
         const isFMECAContentField = isFunctionDescriptionField || isFunctionalFailureField || isFailureModeField || isEffectField || isCauseField;
+
+        // A knowledge file in subsystem-card layout already states this
+        // subsystem's function and specs, decided from the full documents and
+        // reviewed by the engineer. A blank Function or Specs field takes them as
+        // written, so the wand agrees with MasterGen instead of re-deciding the
+        // boundary. Every other field carries the card's boundary.
+        if (mode !== 'ai' && refText) {
+            const isSpecsField = !isFMECAContentField && lowerLabel.includes('spec');
+            if (wordCount === 0 && (isFunctionDescriptionField || isSpecsField)) {
+                const card = findCardSubsystem(refText, contextData.subsystem);
+                const fromCard = card ? (isSpecsField ? card.specs : card.func) : '';
+                if (fromCard) return fromCard;
+            }
+            const boundary = boundaryBlock(refText, contextData.subsystem);
+            if (boundary) systemContext = systemContext ? `${systemContext}\n\n${boundary}` : boundary;
+        }
         const failureContext = `Context:
 - System: "${contextData.project || 'Unknown'}"
 - Subsystem: "${contextData.subsystem || 'Unknown'}"
@@ -1740,6 +1757,10 @@ ${formatRule}`;
     },
 
     async generateModesForFailure(failDesc: string, subName: string, subSpecs: string, subFunc: string, project: string, key: string, modelName: string, mode: string = 'ai', refText: string = '', aiProvider: string = '', azureEndpoint: string = '', systemContext: string = '', checklistText: string = '', powerAutomateUrl: string = '', existingModes: string[] = [], sessionId?: string): Promise<any[]> {
+        // Failure modes are physical mechanisms of this subsystem's own
+        // equipment; the card's boundary keeps a neighbour's parts out of them.
+        const boundary = mode !== 'ai' ? boundaryBlock(refText, subName) : '';
+        if (boundary) systemContext = systemContext ? `${systemContext}\n\n${boundary}` : boundary;
         // eslint-disable-next-line
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Local: Effect; End: System effect", cause: "Cause", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: blankGeneratedRpn(), rpnStatus: "unscored" }]; }
@@ -2185,7 +2206,10 @@ Return ONLY strict JSON: { "failures": [ { "rowId": "...", "parameter": "...", "
         existingModes?: string[];
         sessionId?: string;
     }): Promise<{ failures: Array<{ failureId: string; modes: any[] }> }> {
-        const { project, subName, subSpecs, subFunc, failures, key, modelName, mode = 'ai', refText = '', aiProvider = '', azureEndpoint = '', systemContext = '', checklistText = '', powerAutomateUrl = '', existingModes = [], sessionId } = args;
+        const { project, subName, subSpecs, subFunc, failures, key, modelName, mode = 'ai', refText = '', aiProvider = '', azureEndpoint = '', checklistText = '', powerAutomateUrl = '', existingModes = [], sessionId } = args;
+        let systemContext = args.systemContext || '';
+        const boundary = mode !== 'ai' ? boundaryBlock(refText, subName) : '';
+        if (boundary) systemContext = systemContext ? `${systemContext}\n\n${boundary}` : boundary;
         if (!failures.length) return { failures: [] };
         if ((!key || key.length < 10) && aiProvider !== 'copilot') {
             return { failures: failures.map(f => ({ failureId: f.id, modes: [{ mode: "Simulated", effect: "Local: Effect; End: System effect", cause: "Cause", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: blankGeneratedRpn(), rpnStatus: "unscored" }] })) };
