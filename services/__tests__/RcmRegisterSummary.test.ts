@@ -89,12 +89,12 @@ describe('buildDescriptionPrompt', () => {
 });
 
 describe('buildRegisterPayload', () => {
-    it('writes the summary to the column whose internal name is fixed', () => {
+    it('writes the summary to the Summary column', () => {
         const payload = buildRegisterPayload(project, {
             engineerEmail: '', status: 'FMECA', startDate: '2026-10-01', summary: 'Edited summary',
             fileName: 'a.xlsx', fileContentBase64: 'x', jsonFileName: 'a.json', jsonContentBase64: 'y',
         });
-        expect(REGISTER_LIST.columns.summary).toBe('SummaryofActions');
-        expect(payload.fields.SummaryofActions).toBe('Edited summary');
+        expect(REGISTER_LIST.columns.summary).toBe('Summary');
+        expect(payload.fields.Summary).toBe('Edited summary');
     });
 });

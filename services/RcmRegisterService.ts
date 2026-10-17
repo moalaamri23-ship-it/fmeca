@@ -77,9 +77,9 @@ export const REGISTER_LIST = {
         startDate: 'StartDate',
         engineerName: 'EngineerName',   // Person column — needs $expand to read the email
         status: 'Status',
-        // Shown as "Summary" in the list. The internal name was fixed when the column was
-        // created as "Summary of Actions" and cannot change. RCM Studio overwrites it.
-        summary: 'SummaryofActions',
+        // Replaced the old "Summary of Actions" (SummaryofActions) column. RCM Studio
+        // overwrites it once the study becomes a full RCM report.
+        summary: 'Summary',
     },
 } as const;
 
