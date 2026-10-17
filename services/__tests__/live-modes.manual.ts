@@ -15,7 +15,8 @@ const envUrl = () => {
     return (lines.pop() || '').slice('COPILOT_URL='.length).trim().replace(/^['"]|['"]$/g, '');
 };
 
-const CASES = [
+// CASES='[{"sub":"...","ff":"..."}]' overrides the default pair.
+const CASES: Array<{ sub: string; ff: string }> = process.env.CASES ? JSON.parse(process.env.CASES) : [
     { sub: 'Wet Air Receiver', ff: 'Does not contain compressed wet air, loses containment' },
     { sub: 'Common Control, MCC and Instrumentation', ff: 'Does not issue trip command on protective demand' },
 ];
@@ -28,11 +29,11 @@ describe('live modes', () => {
         const out: any[] = [];
         await Promise.all(CASES.flatMap(c => {
             const card = findCardSubsystem(text, c.sub)!;
-            return [true, false].map(async withBoundary => {
+            return (process.env.ONLY_BOUNDARY ? [true] : [true, false]).map(async withBoundary => {
                 // Without: a name the card lookup cannot match, same everything else.
                 const name = withBoundary ? c.sub : `${c.sub} `.replace(/ $/, ' (unmatched)');
                 const modes = await AIService.generateModesForFailure(c.ff, name, card.specs, card.func, 'Instrument Air Compressor Package in Thulailat', '', '', 'file', text, 'copilot', '', '', checklist, url, [], `modes-${Date.now()}-${withBoundary}`);
-                out.push({ sub: c.sub, withBoundary, modes: modes.map((m: any) => ({ mode: m.mode, cause: m.cause })) });
+                out.push({ sub: c.sub, withBoundary, modes: modes.map((m: any) => ({ mode: m.mode, cause: m.cause, controls: m.currentControls, mitigation: m.mitigation })) });
             });
         }));
         writeFileSync(`${process.env.OUT_DIR}/modes.json`, JSON.stringify(out, null, 2));

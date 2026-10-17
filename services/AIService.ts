@@ -1,6 +1,7 @@
 import { ContextData, FunctionClass, FailedStateType, StandardParameter, FailureShape } from '../types';
 import { allowedFailedStates, allowedStatesForRow, normalizeFailureShape } from './FailureShape';
 import { findCardSubsystem, boundaryBlock } from './KnowledgeCards';
+import { TEAM_OWNER_RULES, normalizeMitigationOwners, stripControlOwners } from './TeamOwners';
 import { RICH_LIBRARY } from '../constants';
 import { buildCopilotPrompt, parseCopilotReply, getCopilotSessionId } from './copilotHelper';
 import {
@@ -375,10 +376,10 @@ ${controlsKnowledgeAvailable
 ${LIBRARY_EXAMPLES}`;
 
 const MODE_ACTION_FORMAT_RULES = `Current controls format — return as a numbered string per mode without the words "Existing control":
-"1- [Tag: TAGNO (limit if stated)] (Owner)" or "1- Action [Tag: TAGNO (limit if stated)] (Owner)\\n2- ..."
+"1- [Tag: TAGNO (limit if stated)]" or "1- Action [Tag: TAGNO (limit if stated)]\\n2- ..." -- no owner: a control states that a barrier exists, it is not a task.
 Mitigation format — return as a numbered string per mode:
 "1- Action [Tag: TAGNO (Hi: X, Hi-Hi: Y) if applicable] (Owner)\\n2- ..."
-Owner rules: sensor/transmitter/tag → (Instrument team) | lubrication/mechanical → (Mechanical team) | PLC/interlock/control → (Automation team) | rounds/monitoring → (Operation team)
+${TEAM_OWNER_RULES}
 Use checklist knowledge for PM tasks and reference data for instrument tags and limits only when they pass the failure-mode-specific barrier filter.
 ${FAILURE_MODE_BARRIER_FILTER}`;
 
@@ -1361,8 +1362,8 @@ export const AIService = {
         const cleaned = this.cleanNumberedActionList(text);
         const lines = cleaned.split('\n').filter(Boolean);
         if (!lines.length) return '';
-        // A real control names a tag or an owning team; a narrated null answer names neither.
-        const looksLikeControl = (l: string) => /\[Tag:/i.test(l) || /\([^)]*team\)/i.test(l);
+        // A real control usually names a tag; a narrated null answer never does.
+        const looksLikeControl = (l: string) => /\[Tag:/i.test(l);
         // Anchored to the start of the line so an action that merely contains "no" —
         // "Verify no blockage in strainer" — is never mistaken for a null answer.
         const readsAsNothingFound = (l: string) =>
@@ -1436,8 +1437,8 @@ ${existingNote}Task: List ONLY existing controls that are currently deployed for
 ${FMECA_HIERARCHY_RULES}
 ${FMECA_CONCISE_WORDING_RULES}
 Include:
-- Relevant PM/checklist tasks that directly prevent the stated cause, detect the stated cause, detect this mode's specific failure signature, or limit the stated effect. Use the checklist section name as owner.
-- Deployed instrument/protection controls from the reference data, such as temperature, pressure, level, flow, vibration, speed, differential pressure, alarms, trips, interlocks, shutdowns, transmitters, switches, or monitoring points. Include tag numbers and alarm/trip limits when stated. Use (Instrument team) for instrument controls unless the source states another owner.
+- Relevant PM/checklist tasks that directly prevent the stated cause, detect the stated cause, detect this mode's specific failure signature, or limit the stated effect. Do not assign a team: a control states what exists, not a task to do.
+- Deployed instrument/protection controls from the reference data, such as temperature, pressure, level, flow, vibration, speed, differential pressure, alarms, trips, interlocks, shutdowns, transmitters, switches, or monitoring points. Include tag numbers and alarm/trip limits when stated.
 Rules:
 - Match controls to THIS Functional Failure + Failure Mode + Cause + Effect only.
 - Do NOT include tasks for sibling failure modes in the checklist.
@@ -1446,11 +1447,11 @@ Rules:
 - If nothing is evidenced for this failure mode, reply with exactly <no_evidence/> and nothing else. Do not describe the absence in words.
 ${FAILURE_MODE_BARRIER_FILTER}
 Output contract:
-- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
+- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)]" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)]" when task text is needed. No owner or team on a control.
 - Never write the words "Existing control".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const controlsOutputContract = `FINAL OUTPUT CONTRACT:
-- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)] (Owner)" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)] (Owner)" when task text is needed.
+- Return ONLY numbered lines. Use "1- [Tag: TAGNO (limit if stated)]" for tag-only controls, or "1- Action description [Tag: TAGNO (limit if stated)]" when task text is needed. No owner or team on a control.
 - Never write the words "Existing control".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
             const controlsContent = controlsPrompt + '\n\n' + controlsOutputContract;
@@ -1466,7 +1467,7 @@ Output contract:
                 apiKey: key,
                 responseFormat: 'text'
             });
-            return this.cleanControlsList(controlsRes);
+            return stripControlOwners(this.cleanControlsList(controlsRes));
         }
         // --- END CURRENT CONTROLS SPECIALIST ---
 
@@ -1495,7 +1496,7 @@ Output contract:
                 : d <= 3
                 ? `Detection is already good (D=${d}/10). Focus on preventive maintenance actions.`
                 : `Detection score is moderate (D=${d}/10). Balance preventive tasks with detection controls.`;
-            const ownerRules = `Owner assignment (add team in parentheses after each action):\n- Sensor, transmitter, switch, monitor, level/pressure/vibration/flow tag → (Instrument team)\n- Lubrication, alignment, bearing, seal, coupling, mechanical inspection → (Mechanical team)\n- Control system, PLC, SCADA, interlock, delay, communication → (Automation team)\n- Operational round, manual monitoring, log, operator check → (Operation team)`;
+            const ownerRules = TEAM_OWNER_RULES;
             const formatRule = `Output contract:
 - Return ONLY numbered lines in this exact form: "1- Action description [Tag: TAGNO (Hi: X unit, Hi-Hi: Y unit) if applicable] (Owner)".
 - No introduction, no summary, no "based on", no "here are", no reference/source commentary, no markdown.`;
@@ -1549,7 +1550,7 @@ ${formatRule}`;
                 apiKey: key,
                 responseFormat: 'text'
             });
-            return this.cleanNumberedActionList(mitigationRes);
+            return normalizeMitigationOwners(this.cleanNumberedActionList(mitigationRes));
         }
         // --- END MITIGATION SPECIALIST ---
 
@@ -1765,7 +1766,7 @@ ${formatRule}`;
         const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         if ((!key || key.length < 10) && aiProvider !== 'copilot') { await new Promise(r => setTimeout(r, 1000)); return [{ id: generateId(), mode: "Simulated", effect: "Local: Effect; End: System effect", cause: "Cause", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: blankGeneratedRpn(), rpnStatus: "unscored" }]; }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
-            ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText}\n"""\n\n` : '';
+            ? `PM CHECKLIST KNOWLEDGE (section headings hint which team performs a task; write owners from the team list, never the heading):\n"""\n${checklistText}\n"""\n\n` : '';
         const controlsKnowledgeAvailable = (mode === 'file' || mode === 'hybrid') && (Boolean(checklistText?.trim()) || Boolean(refText?.trim()));
         const existingBlock = existingModes.length > 0
             ? `Failure Modes already defined in this subsystem (DO NOT repeat or closely resemble any of them; reject controls/mitigations that belong more strongly to these sibling modes):\n${existingModes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n` : '';
@@ -1805,7 +1806,11 @@ ${formatRule}`;
                 if (!modes.length) throw new Error('mode-generation: empty result');
                 // currentControls require checklist/reference evidence — forced empty otherwise.
                 if (!controlsKnowledgeAvailable) modes.forEach((m: any) => { m.currentControls = ''; });
-                modes.forEach((m: any) => { m.rpn = blankGeneratedRpn(); m.rpnStatus = 'unscored'; });
+                modes.forEach((m: any) => {
+                    m.currentControls = stripControlOwners(String(m.currentControls ?? ''));
+                    m.mitigation = normalizeMitigationOwners(String(m.mitigation ?? ''));
+                    m.rpn = blankGeneratedRpn(); m.rpnStatus = 'unscored';
+                });
                 return modes;
             } catch(e) {
                 lastErr = e;
@@ -2215,7 +2220,7 @@ Return ONLY strict JSON: { "failures": [ { "rowId": "...", "parameter": "...", "
             return { failures: failures.map(f => ({ failureId: f.id, modes: [{ mode: "Simulated", effect: "Local: Effect; End: System effect", cause: "Cause", currentControls: "", mitigation: "1- Scheduled inspection (Mechanical team)", rpn: blankGeneratedRpn(), rpnStatus: "unscored" }] })) };
         }
         const checklistBlock = (checklistText?.trim() && (mode === 'file' || mode === 'hybrid'))
-            ? `PM CHECKLIST KNOWLEDGE (use section names as team owners for mitigation tasks):\n"""\n${checklistText}\n"""\n\n` : '';
+            ? `PM CHECKLIST KNOWLEDGE (section headings hint which team performs a task; write owners from the team list, never the heading):\n"""\n${checklistText}\n"""\n\n` : '';
         const controlsKnowledgeAvailable = (mode === 'file' || mode === 'hybrid') && (Boolean(checklistText?.trim()) || Boolean(refText?.trim()));
         const existingBlock = existingModes.length > 0
             ? `Failure Modes already defined in this subsystem (DO NOT repeat or closely resemble any of them; reject controls/mitigations that belong more strongly to these sibling modes):\n${existingModes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n\n` : '';
@@ -2261,6 +2266,8 @@ Return ONLY strict JSON:
                         const modes = Array.isArray(row?.modes) ? row.modes : [];
                         modes.forEach((m: any) => {
                             if (!controlsKnowledgeAvailable) m.currentControls = '';
+                            m.currentControls = stripControlOwners(String(m.currentControls ?? ''));
+                            m.mitigation = normalizeMitigationOwners(String(m.mitigation ?? ''));
                             m.rpn = blankGeneratedRpn();
                             m.rpnStatus = 'unscored';
                         });
