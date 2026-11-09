@@ -1,6 +1,6 @@
 import { Project } from '../types';
 import { normalizeProjectDates, rpnTotal, tryIso } from './ProjectUtils';
-import { routeFlowCall, hasFlowRoute, type RouterTask } from './AIRouter';
+import { routeFlowCall, hasFlowRoute, MISSING_FLOW_URL, type RouterTask } from './AIRouter';
 
 // Must match the Status Choice values on the SharePoint RCM Register list exactly.
 export const RCM_STATUS_OPTIONS = [
@@ -363,13 +363,12 @@ export function buildRegisterPayload(project: Project, opts: BuildRegisterPayloa
 }
 
 /**
- * POSTs one request to the Power Automate flow backing the SharePoint RCM register and
- * returns its parsed JSON reply. Every action (create / list / fetch) shares this URL;
- * the flow switches on `action`.
+ * POSTs one request through the OXY Connection Flow and returns its parsed JSON reply.
+ * Publishing is task `sp_register`; list / fetch are task `sp_read`, switching on `action`.
  */
 async function postToFlow(flowUrl: string, task: RouterTask, body: object): Promise<any> {
-    if (!hasFlowRoute(flowUrl)) throw new Error('Set the RCM Register flow URL in Settings.');
-    // With the AI Router URL set, the same body goes to the router tagged with its task.
+    if (!hasFlowRoute(flowUrl)) throw new Error(MISSING_FLOW_URL);
+    // Every action goes through the OXY Connection Flow, tagged with its task.
     const route = routeFlowCall(flowUrl, task, body);
 
     // Body is JSON, but the Content-Type is text/plain on purpose: it keeps this a CORS
@@ -421,8 +420,8 @@ const REGISTER_SELECT = `ID,${C.rcmInternalNumber},${C.system},${C.status},${C.s
  * SharePoint fields under `{ items: [...] }`; a bare array or `{ value: [...] }` is accepted
  * too, since that is what a "Get items" style flow returns.
  */
-export async function listRegisterProjects(readerUrl: string): Promise<RcmRegisterRow[]> {
-    const parsed = await postToFlow(readerUrl, 'sp_read', {
+export async function listRegisterProjects(flowUrl: string): Promise<RcmRegisterRow[]> {
+    const parsed = await postToFlow(flowUrl, 'sp_read', {
         action: 'list',
         site: REGISTER_LIST.site,
         list: REGISTER_LIST.list,
@@ -467,8 +466,8 @@ export function fromBase64Utf8(base64: string): string {
  * Validation that the parsed object really is an FMECA project stays with the caller, which
  * already owns that guard for file imports.
  */
-export async function fetchRegisterProjectJson(readerUrl: string, itemId: number): Promise<any> {
-    const parsed = await postToFlow(readerUrl, 'sp_read', {
+export async function fetchRegisterProjectJson(flowUrl: string, itemId: number): Promise<any> {
+    const parsed = await postToFlow(flowUrl, 'sp_read', {
         action: 'fetch',
         site: REGISTER_LIST.site,
         list: REGISTER_LIST.list,

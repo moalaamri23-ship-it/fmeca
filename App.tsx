@@ -140,10 +140,10 @@ const App = () => {
     const [aiSourceMode, setAiSourceMode] = useState('ai');
     const [aiProvider, setAiProvider] = useState<AIProvider>('gemini');
     const [azureEndpoint, setAzureEndpoint] = useState('');
-    const [powerAutomateUrl, setPowerAutomateUrl] = useState('');
-    const [rcmRegisterUrl, setRcmRegisterUrl] = useState('');
-    const [rcmReaderUrl, setRcmReaderUrl] = useState('');
+    /** OXY Connection Flow URL: the one URL every Power Automate call goes through, tagged with its task. */
     const [aiRouterUrl, setAiRouterUrl] = useState('');
+    /** The AI layer takes the flow URL under this name. */
+    const powerAutomateUrl = aiRouterUrl;
     const [engineerEmail, setEngineerEmail] = useState('');
     const [liveModels, setLiveModels] = useState<Record<string, TieredModels>>(() => {
         try { return JSON.parse(localStorage.getItem('fmeca_models_cache') || '{}'); } catch { return {}; }
@@ -691,9 +691,6 @@ setProjects(
     setAiProvider(initialProvider);
     if (initialProvider !== storedProvider) setModelName(DEFAULT_MODELS[initialProvider]);
     setAzureEndpoint(localStorage.getItem('rcm_azure_endpoint') || '');
-    setPowerAutomateUrl(localStorage.getItem('rcm_power_automate_url') || '');
-    setRcmRegisterUrl(localStorage.getItem('rcm_register_flow_url') || '');
-    setRcmReaderUrl(localStorage.getItem('rcm_reader_flow_url') || '');
     setAiRouterUrl(localStorage.getItem(AI_ROUTER_URL_KEY) || '');
     setEngineerEmail(localStorage.getItem('rcm_engineer_email') || '');
     setEnableChatbot(localStorage.getItem('rcm_enable_chatbot') !== 'false');
@@ -780,9 +777,6 @@ setProjects(
         localStorage.setItem('rcm_ai_provider', aiProvider);
         localStorage.setItem('fmeca_send_files_v1', sendFilesMode);
         localStorage.setItem('rcm_azure_endpoint', azureEndpoint);
-        localStorage.setItem('rcm_power_automate_url', powerAutomateUrl);
-        localStorage.setItem('rcm_register_flow_url', rcmRegisterUrl);
-        localStorage.setItem('rcm_reader_flow_url', rcmReaderUrl);
         localStorage.setItem(AI_ROUTER_URL_KEY, aiRouterUrl);
         localStorage.setItem('rcm_engineer_email', engineerEmail);
         localStorage.setItem('rcm_enable_chatbot', String(enableChatbot));
@@ -795,7 +789,7 @@ setProjects(
         localStorage.setItem('rcm_system_type', systemType);
         localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
-    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, sendFilesMode, azureEndpoint, powerAutomateUrl, rcmRegisterUrl, rcmReaderUrl, aiRouterUrl, engineerEmail, enableChatbot, chatbotStyle, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
+    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, sendFilesMode, azureEndpoint, aiRouterUrl, engineerEmail, enableChatbot, chatbotStyle, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
 
     const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic', 'openrouter'] as const;
     type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
@@ -840,7 +834,7 @@ setProjects(
      * study does not fill the dashboard with copies.
      */
     const openRegisterRow = async (row: RcmRegisterRow) => {
-        const parsed = await fetchRegisterProjectJson(rcmReaderUrl, row.itemId);
+        const parsed = await fetchRegisterProjectJson(aiRouterUrl, row.itemId);
         if (!isFmecaProject(parsed)) {
             throw new Error(`The attachment on ${row.rcmInternalNumber || `row #${row.itemId}`} is not an FMECA project file.`);
         }
@@ -1365,7 +1359,7 @@ setProjects(
 
     const openRegisterModal = () => {
         if(!activeProject) return;
-        if(!rcmRegisterUrl.trim() && !aiRouterUrl.trim()) { alert('Set the RCM Register flow URL in Settings before publishing.'); return; }
+        if(!aiRouterUrl.trim()) { alert('Set the OXY Connection Flow URL in Settings before publishing.'); return; }
         const start = () => {
             const wb = buildProjectWorkbook();
             if(!wb || !activeProject) return;
@@ -1418,7 +1412,7 @@ setProjects(
             jsonContentBase64: registerAttachment.jsonBase64,
             extraAttachments: registerAttachment.extra,
         });
-        const result = await publishToRcmRegister(rcmRegisterUrl, payload);
+        const result = await publishToRcmRegister(aiRouterUrl, payload);
         setActiveProject(prev => prev ? { ...prev, rcmRegister: { ...result, publishedAt: nowIso(), status: values.status } } : prev);
         return result;
     };
@@ -2989,12 +2983,6 @@ syncFitBtn();
                                                 <input type="text" value={azureEndpoint} onChange={e => setAzureEndpoint(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://your-resource.openai.azure.com"/>
                                             </div>
                                         )}
-                                        {aiProvider === 'copilot' && (
-                                            <div>
-                                                <label className="block text-xs font-semibold text-slate-500 mb-1">Power Automate URL</label>
-                                                <input type="text" value={powerAutomateUrl} onChange={e => setPowerAutomateUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://prod-xx.westus.logic.azure.com/workflows/..."/>
-                                            </div>
-                                        )}
                                         {aiProvider === 'copilot' ? (
                                             <p className="text-xs text-slate-400 mt-1">Model selection is managed by Copilot Studio. No model ID is required here.</p>
                                         ) : aiProvider === 'azure' ? (
@@ -3089,15 +3077,6 @@ syncFitBtn();
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
                                     <h2 className="text-lg font-semibold mb-4">RCM Register</h2>
                                     <div className="space-y-3">
-                                        <div>
-                                            <label className="block text-xs font-semibold text-slate-500 mb-1">Register flow URL</label>
-                                            <input type="password" value={rcmRegisterUrl} onChange={e => setRcmRegisterUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://prod-xx.westus.logic.azure.com/workflows/..."/>
-                                        </div>
-                                        <div>
-                                            <label className="block text-xs font-semibold text-slate-500 mb-1">SharePoint Reader flow URL</label>
-                                            <input type="password" value={rcmReaderUrl} onChange={e => setRcmReaderUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://...powerplatform.com/.../triggers/manual/paths/invoke?..."/>
-                                            <p className="text-xs text-slate-400 mt-1">Read-only flow used to browse the RCM list and load a study's FMECA attachment.</p>
-                                        </div>
                                         <div>
                                             <label className="block text-xs font-semibold text-slate-500 mb-1">OXY Connection Flow URL</label>
                                             <input type="password" value={aiRouterUrl} onChange={e => setAiRouterUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://..."/>
@@ -3715,7 +3694,7 @@ syncFitBtn();
             )}
             {showImportPicker && (
                 <ImportProjectModal
-                    readerFlowUrl={rcmReaderUrl}
+                    flowUrl={aiRouterUrl}
                     onPickLocal={() => { setShowImportPicker(false); importInputRef.current?.click(); }}
                     onPickRegisterRow={openRegisterRow}
                     onClose={() => setShowImportPicker(false)}

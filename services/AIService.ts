@@ -15,7 +15,7 @@ import {
 import { runExclusive } from './CopilotQueue';
 import { pngAttachmentName, toPngPayload } from './imagePng';
 import type { SystemMode } from './SystemModesService';
-import { routeFlowCall, hasFlowRoute } from './AIRouter';
+import { routeFlowCall, hasFlowRoute, MISSING_FLOW_URL } from './AIRouter';
 
 /*
   -------------------------------------------------------------------------
@@ -432,7 +432,7 @@ export interface AIRequestPayload {
     feature: string; // Identifier for the feature calling the service
     provider: 'openai' | 'gemini' | 'anthropic' | 'azure' | 'openrouter' | 'copilot';
     azureEndpoint?: string;
-    powerAutomateUrl?: string; // HTTP trigger endpoint for Power Automate (Copilot provider)
+    powerAutomateUrl?: string; // OXY Connection Flow URL (Copilot provider); calls carry task "chat"
     model: string;
     messages: AIMessage[];
     mode: 'ai' | 'file' | 'hybrid';
@@ -830,7 +830,7 @@ export const AIService = {
             // the same tool_calls shape the native providers produce.
             if (req.provider === 'copilot') {
                 if (!hasFlowRoute(req.powerAutomateUrl)) {
-                    throw new Error('Power Automate URL is required for Copilot provider.');
+                    throw new Error(MISSING_FLOW_URL);
                 }
                 const postPrompt = async (messages: AIMessage[]): Promise<string> => {
                     const route = routeFlowCall(req.powerAutomateUrl, 'chat', {
@@ -2858,7 +2858,7 @@ Output format:
      */
     async _powerAutomateRequest(req: AIRequestPayload): Promise<string> {
         if (!hasFlowRoute(req.powerAutomateUrl)) {
-            throw new Error('Power Automate URL is required for Copilot provider.');
+            throw new Error(MISSING_FLOW_URL);
         }
         return this._powerAutomateTurn(req);
     },
@@ -2910,7 +2910,7 @@ Output format:
                 console.log(`[AIService] Copilot: ${attachments.length} attachment(s) already held by this conversation`);
             }
 
-            // Classic AI flow (Execute Agent: attachments + per-session memory) → router target "flow".
+            // Classic AI flow (Execute Agent: attachments + per-session memory) → target "flow".
             const route = routeFlowCall(req.powerAutomateUrl, 'chat', payload, 'flow');
             const res = await fetch(route.url, {
                 method: 'POST',

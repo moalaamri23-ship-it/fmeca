@@ -1,11 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { Icon } from './Icon';
 import { listRegisterProjects, type RcmRegisterRow } from '../services/RcmRegisterService';
-import { hasFlowRoute } from '../services/AIRouter';
 
 interface ImportProjectModalProps {
-    /** Empty when the reader flow URL is not configured — the SharePoint option is then disabled. */
-    readerFlowUrl: string;
+    /** OXY Connection Flow URL; empty disables the SharePoint option. */
+    flowUrl: string;
     /** Opens the existing file picker (same handler as the Import button). */
     onPickLocal: () => void;
     /** Loads the FMECA JSON attached to the chosen register row. */
@@ -20,7 +19,7 @@ const fmtDate = (iso: string) => {
 };
 
 export const ImportProjectModal: React.FC<ImportProjectModalProps> = ({
-    readerFlowUrl,
+    flowUrl,
     onPickLocal,
     onPickRegisterRow,
     onClose
@@ -38,12 +37,12 @@ export const ImportProjectModal: React.FC<ImportProjectModalProps> = ({
         let cancelled = false;
         setLoading(true);
         setError('');
-        listRegisterProjects(readerFlowUrl)
+        listRegisterProjects(flowUrl)
             .then(list => { if (!cancelled) setRows(list); })
             .catch(e => { if (!cancelled) setError(e?.message || String(e)); })
             .finally(() => { if (!cancelled) setLoading(false); });
         return () => { cancelled = true; };
-    }, [source, readerFlowUrl]);
+    }, [source, flowUrl]);
 
     const confirm = async () => {
         if (!selected) return;
@@ -85,16 +84,16 @@ export const ImportProjectModal: React.FC<ImportProjectModalProps> = ({
                     {source === 'choose' ? (
                         <div className="grid sm:grid-cols-2 gap-4">
                             <button
-                                onClick={() => { if (hasFlowRoute(readerFlowUrl)) setSource('sharepoint'); }}
-                                disabled={!hasFlowRoute(readerFlowUrl)}
+                                onClick={() => { if (flowUrl.trim()) setSource('sharepoint'); }}
+                                disabled={!flowUrl.trim()}
                                 className="text-left rounded-lg border border-slate-200 p-4 hover:border-brand-500 hover:bg-brand-50/40 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-200 disabled:hover:bg-transparent"
                             >
                                 <div className="text-brand-600 mb-2"><Icon name="table" className="w-6 h-6" /></div>
                                 <div className="font-bold text-sm text-slate-800">SharePoint RCM List</div>
                                 <p className="text-xs text-slate-500 mt-1">
-                                    {hasFlowRoute(readerFlowUrl)
+                                    {flowUrl.trim()
                                         ? 'Browse registered studies by RCM internal number and load the attached FMECA.'
-                                        : 'Set the SharePoint Reader flow URL in Settings to enable this.'}
+                                        : 'Set the OXY Connection Flow URL in Settings to enable this.'}
                                 </p>
                             </button>
                             <button
