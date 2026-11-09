@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Icon } from './Icon';
 import { listRegisterProjects, type RcmRegisterRow } from '../services/RcmRegisterService';
+import { hasFlowRoute } from '../services/AIRouter';
 
 interface ImportProjectModalProps {
     /** Empty when the reader flow URL is not configured — the SharePoint option is then disabled. */
@@ -84,14 +85,14 @@ export const ImportProjectModal: React.FC<ImportProjectModalProps> = ({
                     {source === 'choose' ? (
                         <div className="grid sm:grid-cols-2 gap-4">
                             <button
-                                onClick={() => { if (readerFlowUrl.trim()) setSource('sharepoint'); }}
-                                disabled={!readerFlowUrl.trim()}
+                                onClick={() => { if (hasFlowRoute(readerFlowUrl)) setSource('sharepoint'); }}
+                                disabled={!hasFlowRoute(readerFlowUrl)}
                                 className="text-left rounded-lg border border-slate-200 p-4 hover:border-brand-500 hover:bg-brand-50/40 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-200 disabled:hover:bg-transparent"
                             >
                                 <div className="text-brand-600 mb-2"><Icon name="table" className="w-6 h-6" /></div>
                                 <div className="font-bold text-sm text-slate-800">SharePoint RCM List</div>
                                 <p className="text-xs text-slate-500 mt-1">
-                                    {readerFlowUrl.trim()
+                                    {hasFlowRoute(readerFlowUrl)
                                         ? 'Browse registered studies by RCM internal number and load the attached FMECA.'
                                         : 'Set the SharePoint Reader flow URL in Settings to enable this.'}
                                 </p>

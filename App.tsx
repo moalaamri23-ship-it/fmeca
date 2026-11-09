@@ -43,6 +43,7 @@ import {
     sanitizeStoredSystemModes,
     type SystemMode,
 } from './services/SystemModesService';
+import { AI_ROUTER_URL_KEY } from './services/AIRouter';
 
 // Utility functions
 const safeGet = (k: string, f: any) => { try { const i = localStorage.getItem(k); return i ? JSON.parse(i) : f; } catch (e) { return f; } };
@@ -142,6 +143,7 @@ const App = () => {
     const [powerAutomateUrl, setPowerAutomateUrl] = useState('');
     const [rcmRegisterUrl, setRcmRegisterUrl] = useState('');
     const [rcmReaderUrl, setRcmReaderUrl] = useState('');
+    const [aiRouterUrl, setAiRouterUrl] = useState('');
     const [engineerEmail, setEngineerEmail] = useState('');
     const [liveModels, setLiveModels] = useState<Record<string, TieredModels>>(() => {
         try { return JSON.parse(localStorage.getItem('fmeca_models_cache') || '{}'); } catch { return {}; }
@@ -692,6 +694,7 @@ setProjects(
     setPowerAutomateUrl(localStorage.getItem('rcm_power_automate_url') || '');
     setRcmRegisterUrl(localStorage.getItem('rcm_register_flow_url') || '');
     setRcmReaderUrl(localStorage.getItem('rcm_reader_flow_url') || '');
+    setAiRouterUrl(localStorage.getItem(AI_ROUTER_URL_KEY) || '');
     setEngineerEmail(localStorage.getItem('rcm_engineer_email') || '');
     setEnableChatbot(localStorage.getItem('rcm_enable_chatbot') !== 'false');
     setSendFilesMode(localStorage.getItem('fmeca_send_files_v1') === 'all' ? 'all' : 'text');
@@ -780,6 +783,7 @@ setProjects(
         localStorage.setItem('rcm_power_automate_url', powerAutomateUrl);
         localStorage.setItem('rcm_register_flow_url', rcmRegisterUrl);
         localStorage.setItem('rcm_reader_flow_url', rcmReaderUrl);
+        localStorage.setItem(AI_ROUTER_URL_KEY, aiRouterUrl);
         localStorage.setItem('rcm_engineer_email', engineerEmail);
         localStorage.setItem('rcm_enable_chatbot', String(enableChatbot));
         localStorage.setItem('rcm_chatbot_style', chatbotStyle);
@@ -791,7 +795,7 @@ setProjects(
         localStorage.setItem('rcm_system_type', systemType);
         localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
-    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, sendFilesMode, azureEndpoint, powerAutomateUrl, rcmRegisterUrl, rcmReaderUrl, engineerEmail, enableChatbot, chatbotStyle, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
+    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, sendFilesMode, azureEndpoint, powerAutomateUrl, rcmRegisterUrl, rcmReaderUrl, aiRouterUrl, engineerEmail, enableChatbot, chatbotStyle, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
 
     const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic', 'openrouter'] as const;
     type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
@@ -1361,7 +1365,7 @@ setProjects(
 
     const openRegisterModal = () => {
         if(!activeProject) return;
-        if(!rcmRegisterUrl.trim()) { alert('Set the RCM Register flow URL in Settings before publishing.'); return; }
+        if(!rcmRegisterUrl.trim() && !aiRouterUrl.trim()) { alert('Set the RCM Register flow URL in Settings before publishing.'); return; }
         const start = () => {
             const wb = buildProjectWorkbook();
             if(!wb || !activeProject) return;
@@ -3093,6 +3097,11 @@ syncFitBtn();
                                             <label className="block text-xs font-semibold text-slate-500 mb-1">SharePoint Reader flow URL</label>
                                             <input type="password" value={rcmReaderUrl} onChange={e => setRcmReaderUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://...powerplatform.com/.../triggers/manual/paths/invoke?..."/>
                                             <p className="text-xs text-slate-400 mt-1">Read-only flow used to browse the RCM list and load a study's FMECA attachment.</p>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 mb-1">AI Router URL</label>
+                                            <input type="password" value={aiRouterUrl} onChange={e => setAiRouterUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://...powerplatform.com/.../triggers/manual/paths/invoke?..."/>
+                                            <p className="text-xs text-slate-400 mt-1">When set, Copilot and register calls go through the router; the flow URLs above are used when it is empty.</p>
                                         </div>
                                         <div>
                                             <label className="block text-xs font-semibold text-slate-500 mb-1">Default engineer email</label>

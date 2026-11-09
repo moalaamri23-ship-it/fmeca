@@ -1,5 +1,6 @@
 import { Project } from '../types';
 import { normalizeProjectDates, rpnTotal, tryIso } from './ProjectUtils';
+import { routeFlowCall, hasFlowRoute, type RouterTask } from './AIRouter';
 
 // Must match the Status Choice values on the SharePoint RCM Register list exactly.
 export const RCM_STATUS_OPTIONS = [
@@ -366,17 +367,19 @@ export function buildRegisterPayload(project: Project, opts: BuildRegisterPayloa
  * returns its parsed JSON reply. Every action (create / list / fetch) shares this URL;
  * the flow switches on `action`.
  */
-async function postToFlow(flowUrl: string, body: unknown): Promise<any> {
-    if (!flowUrl.trim()) throw new Error('Set the RCM Register flow URL in Settings.');
+async function postToFlow(flowUrl: string, task: RouterTask, body: object): Promise<any> {
+    if (!hasFlowRoute(flowUrl)) throw new Error('Set the RCM Register flow URL in Settings.');
+    // With the AI Router URL set, the same body goes to the router tagged with its task.
+    const route = routeFlowCall(flowUrl, task, body);
 
     // Body is JSON, but the Content-Type is text/plain on purpose: it keeps this a CORS
     // "simple request" so the browser skips the preflight. Power Automate's HTTP trigger
     // does not answer OPTIONS, so an application/json POST never reaches the flow.
     // The flow must therefore parse the body with json(triggerBody()).
-    const res = await fetch(flowUrl.trim(), {
+    const res = await fetch(route.url, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(route.body),
     });
 
     if (!res.ok) {
@@ -395,7 +398,7 @@ async function postToFlow(flowUrl: string, body: unknown): Promise<any> {
  * The flow — not this app — computes the RCM internal number and returns it.
  */
 export async function publishToRcmRegister(flowUrl: string, payload: RcmRegisterPayload): Promise<RcmRegisterResult> {
-    const parsed = await postToFlow(flowUrl, payload);
+    const parsed = await postToFlow(flowUrl, 'sp_register', payload);
     // `number` is what the registry flow returns; `rcmInternalNumber` was the older flow's name.
     const rcmInternalNumber = String(parsed?.number ?? parsed?.rcmInternalNumber ?? '').trim();
     const itemId = Number(parsed?.itemId);
@@ -419,7 +422,7 @@ const REGISTER_SELECT = `ID,${C.rcmInternalNumber},${C.system},${C.status},${C.s
  * too, since that is what a "Get items" style flow returns.
  */
 export async function listRegisterProjects(readerUrl: string): Promise<RcmRegisterRow[]> {
-    const parsed = await postToFlow(readerUrl, {
+    const parsed = await postToFlow(readerUrl, 'sp_read', {
         action: 'list',
         site: REGISTER_LIST.site,
         list: REGISTER_LIST.list,
@@ -465,7 +468,7 @@ export function fromBase64Utf8(base64: string): string {
  * already owns that guard for file imports.
  */
 export async function fetchRegisterProjectJson(readerUrl: string, itemId: number): Promise<any> {
-    const parsed = await postToFlow(readerUrl, {
+    const parsed = await postToFlow(readerUrl, 'sp_read', {
         action: 'fetch',
         site: REGISTER_LIST.site,
         list: REGISTER_LIST.list,

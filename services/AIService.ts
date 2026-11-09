@@ -15,6 +15,7 @@ import {
 import { runExclusive } from './CopilotQueue';
 import { pngAttachmentName, toPngPayload } from './imagePng';
 import type { SystemMode } from './SystemModesService';
+import { routeFlowCall, hasFlowRoute } from './AIRouter';
 
 /*
   -------------------------------------------------------------------------
@@ -828,18 +829,19 @@ export const AIService = {
             // reply with a ```tool fence; parseCopilotReply converts it back into
             // the same tool_calls shape the native providers produce.
             if (req.provider === 'copilot') {
-                if (!req.powerAutomateUrl) {
+                if (!hasFlowRoute(req.powerAutomateUrl)) {
                     throw new Error('Power Automate URL is required for Copilot provider.');
                 }
                 const postPrompt = async (messages: AIMessage[]): Promise<string> => {
-                    const res = await fetch(req.powerAutomateUrl as string, {
+                    const route = routeFlowCall(req.powerAutomateUrl, 'chat', {
+                        sessionId: req.sessionId ?? getCopilotSessionId(),
+                        prompt: buildCopilotPrompt(messages, tools),
+                        responseFormat: 'text'
+                    }, 'flow');
+                    const res = await fetch(route.url, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            sessionId: req.sessionId ?? getCopilotSessionId(),
-                            prompt: buildCopilotPrompt(messages, tools),
-                            responseFormat: 'text'
-                        })
+                        body: JSON.stringify(route.body)
                     });
                     if (!res.ok) {
                         const errText = await res.text();
@@ -2855,7 +2857,7 @@ Output format:
      * `CopilotQueue` for what goes wrong when it does.
      */
     async _powerAutomateRequest(req: AIRequestPayload): Promise<string> {
-        if (!req.powerAutomateUrl) {
+        if (!hasFlowRoute(req.powerAutomateUrl)) {
             throw new Error('Power Automate URL is required for Copilot provider.');
         }
         return this._powerAutomateTurn(req);
@@ -2908,10 +2910,12 @@ Output format:
                 console.log(`[AIService] Copilot: ${attachments.length} attachment(s) already held by this conversation`);
             }
 
-            const res = await fetch(req.powerAutomateUrl!, {
+            // Classic AI flow (Execute Agent: attachments + per-session memory) → router target "flow".
+            const route = routeFlowCall(req.powerAutomateUrl, 'chat', payload, 'flow');
+            const res = await fetch(route.url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
+                body: JSON.stringify(route.body),
             });
 
             if (!res.ok) {
