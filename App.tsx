@@ -3099,9 +3099,9 @@ syncFitBtn();
                                             <p className="text-xs text-slate-400 mt-1">Read-only flow used to browse the RCM list and load a study's FMECA attachment.</p>
                                         </div>
                                         <div>
-                                            <label className="block text-xs font-semibold text-slate-500 mb-1">AI Router URL</label>
-                                            <input type="password" value={aiRouterUrl} onChange={e => setAiRouterUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://...powerplatform.com/.../triggers/manual/paths/invoke?..."/>
-                                            <p className="text-xs text-slate-400 mt-1">When set, Copilot and register calls go through the router; the flow URLs above are used when it is empty.</p>
+                                            <label className="block text-xs font-semibold text-slate-500 mb-1">OXY Connection Flow URL</label>
+                                            <input type="password" value={aiRouterUrl} onChange={e => setAiRouterUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://..."/>
+                                            <p className="text-xs text-slate-400 mt-1">One URL for all OXY flows.</p>
                                         </div>
                                         <div>
                                             <label className="block text-xs font-semibold text-slate-500 mb-1">Default engineer email</label>
