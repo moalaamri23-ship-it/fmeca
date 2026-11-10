@@ -97,9 +97,10 @@ type ChatbotResponseStyle = "normal" | "concise" | "tldr";
 type AIProvider = 'gemini' | 'openai' | 'anthropic' | 'azure' | 'openrouter' | 'copilot';
 
 const PROVIDER_LABELS: Record<AIProvider, string> = { gemini: 'Gemini', openai: 'OpenAI', anthropic: 'Anthropic', azure: 'Azure', openrouter: 'OpenRouter', copilot: 'Copilot' };
-// Deployed (production) build exposes only Copilot + OpenRouter; local dev exposes all providers.
+// Deployed (production) build exposes only Copilot, reached through the OXY Connection Flow URL;
+// local dev exposes all providers.
 const VISIBLE_PROVIDERS: AIProvider[] = import.meta.env.PROD
-    ? ['copilot', 'openrouter']
+    ? ['copilot']
     : (Object.keys(PROVIDER_LABELS) as AIProvider[]);
 const PROVIDER_MODELS: Record<string, string[]> = {
     gemini: ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
@@ -2964,12 +2965,28 @@ syncFitBtn();
                         ) : (
                             <>
                                 <div className="bg-white p-6 rounded border max-w-xl">
+                                    <h2 className="text-lg font-semibold mb-4">OXY Connection</h2>
+                                    <div className="space-y-3">
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 mb-1">OXY Connection Flow URL</label>
+                                            <input type="password" value={aiRouterUrl} onChange={e => setAiRouterUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://..."/>
+                                            <p className="text-xs text-slate-400 mt-1">One URL for all OXY flows.</p>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 mb-1">Default engineer email</label>
+                                            <input type="text" value={engineerEmail} onChange={e => setEngineerEmail(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="name@company.com"/>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="bg-white p-6 rounded border max-w-xl mt-4">
                                     <h2 className="text-lg font-semibold mb-4">AI Provider</h2>
+                                    {VISIBLE_PROVIDERS.length > 1 && (
                                     <div className="flex flex-wrap gap-1 bg-slate-100 p-1 rounded mb-5">
                                         {VISIBLE_PROVIDERS.map(p => (
                                             <button key={p} onClick={() => { setAiProvider(p); setModelName(DEFAULT_MODELS[p]); }} className={`px-3 py-1.5 rounded text-xs font-bold transition ${aiProvider === p ? 'bg-brand-600 text-white shadow' : 'text-slate-500 hover:text-slate-700 hover:bg-white'}`}>{PROVIDER_LABELS[p]}</button>
                                         ))}
                                     </div>
+                                    )}
                                     <div className="space-y-3">
                                         {aiProvider !== 'copilot' && (
                                         <div>
@@ -2984,7 +3001,7 @@ syncFitBtn();
                                             </div>
                                         )}
                                         {aiProvider === 'copilot' ? (
-                                            <p className="text-xs text-slate-400 mt-1">Model selection is managed by Copilot Studio. No model ID is required here.</p>
+                                            <p className="text-xs text-slate-400 mt-1">Copilot runs through the OXY Connection Flow URL. Model selection is managed by Copilot Studio.</p>
                                         ) : aiProvider === 'azure' ? (
                                             <div>
                                                 <label className="block text-xs font-semibold text-slate-500 mb-1">Deployment Name</label>
@@ -3073,20 +3090,6 @@ syncFitBtn();
                                     <p className="text-xs text-slate-500 mt-2">
                                         RPN arrives scored by the AI. Scored rows are marked as AI-scored, so a reviewer can tell them from anything entered by hand — re-score any single row with the robot button.
                                     </p>
-                                </div>
-                                <div className="bg-white p-6 rounded border max-w-xl mt-4">
-                                    <h2 className="text-lg font-semibold mb-4">RCM Register</h2>
-                                    <div className="space-y-3">
-                                        <div>
-                                            <label className="block text-xs font-semibold text-slate-500 mb-1">OXY Connection Flow URL</label>
-                                            <input type="password" value={aiRouterUrl} onChange={e => setAiRouterUrl(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="https://..."/>
-                                            <p className="text-xs text-slate-400 mt-1">One URL for all OXY flows.</p>
-                                        </div>
-                                        <div>
-                                            <label className="block text-xs font-semibold text-slate-500 mb-1">Default engineer email</label>
-                                            <input type="text" value={engineerEmail} onChange={e => setEngineerEmail(e.target.value)} className="w-full border border-slate-200 rounded px-3 py-2 text-sm font-mono outline-none focus:border-brand-500" placeholder="name@company.com"/>
-                                        </div>
-                                    </div>
                                 </div>
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
                                     <h2 className="text-lg font-semibold mb-4">Chatbot</h2>
