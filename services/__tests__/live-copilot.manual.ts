@@ -8,7 +8,7 @@
  * whether the rules still produce a sane analysis. Run this after any edit to
  * FUNCTION_BREAKDOWN_TECHNICAL_RULES or JA1011_FAILED_STATE_RULES:
  *
- *   OUT_DIR=/tmp/fmeca-live COPILOT_URL='<power automate flow url>' \
+ *   OUT_DIR=/tmp/fmeca-live COPILOT_URL='<OXY Connection Flow URL>' \
  *     npx vitest run services/__tests__/live-copilot.manual.ts \
  *     --testTimeout=900000 --include '**\/*.manual.ts'
  *
