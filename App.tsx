@@ -2978,15 +2978,15 @@ syncFitBtn();
                                         </div>
                                     </div>
                                 </div>
+                                {/* Production offers Copilot only, through the OXY Connection Flow URL: nothing to choose. */}
+                                {VISIBLE_PROVIDERS.length > 1 && (
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
                                     <h2 className="text-lg font-semibold mb-4">AI Provider</h2>
-                                    {VISIBLE_PROVIDERS.length > 1 && (
                                     <div className="flex flex-wrap gap-1 bg-slate-100 p-1 rounded mb-5">
                                         {VISIBLE_PROVIDERS.map(p => (
                                             <button key={p} onClick={() => { setAiProvider(p); setModelName(DEFAULT_MODELS[p]); }} className={`px-3 py-1.5 rounded text-xs font-bold transition ${aiProvider === p ? 'bg-brand-600 text-white shadow' : 'text-slate-500 hover:text-slate-700 hover:bg-white'}`}>{PROVIDER_LABELS[p]}</button>
                                         ))}
                                     </div>
-                                    )}
                                     <div className="space-y-3">
                                         {aiProvider !== 'copilot' && (
                                         <div>
@@ -3045,6 +3045,7 @@ syncFitBtn();
                                         )}
                                     </div>
                                 </div>
+                                )}
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
                                     <h2 className="text-lg font-semibold mb-4">Send files to agent</h2>
                                     <div className="space-y-2">
