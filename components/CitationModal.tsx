@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
-import type { LocalFileSystemProvider } from '../services/FileSystem';
+import type { AttachmentProvider } from '../services/FileSystem';
 import type { CiteSource } from '../services/CitationCorpus';
 import type { SmartSearchConfig } from '../services/SmartSearchService';
 import type { SendFilesMode } from '../types';
@@ -32,7 +32,7 @@ export type { CitationGroup };
 export const CitationModal: React.FC<{
     isOpen: boolean;
     onClose: () => void;
-    provider: LocalFileSystemProvider | null;
+    provider: AttachmentProvider | null;
     sources: CiteSource[];
     /** One section per cited field, in the order they appear on the card. */
     groups: CitationGroup[];

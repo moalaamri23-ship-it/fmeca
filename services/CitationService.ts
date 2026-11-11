@@ -36,7 +36,7 @@ import { citationLabel, isDuplicateCheck, maxPerClaimPerSource, readPromptFor } 
 import { categoryFor } from '../components/viewer/util';
 import { lineAtOffset, locateText, pageAtOffset, snippetAround } from '../components/viewer/locate';
 import { findMatches, normalizeQuery } from '../components/viewer/textSearch';
-import type { LocalFileSystemProvider } from './FileSystem';
+import type { AttachmentProvider } from './FileSystem';
 import type { FieldCitations, FieldClaim, ViewerCitation } from '../types';
 
 /** Sources read at once. Quick enough to watch, gentle enough on rate limits. */
@@ -76,7 +76,7 @@ function pageFromReason(why: string): number | undefined {
 /** One source's text, read from disk or carried in the source itself. */
 async function readSourceText(
     source: CiteSource,
-    provider: LocalFileSystemProvider | null
+    provider: AttachmentProvider | null
 ): Promise<{ text: string; bytes: ArrayBuffer | null }> {
     if (source.text != null) return { text: source.text, bytes: null };
     if (!provider || !source.entry) return { text: '', bytes: null };
@@ -98,7 +98,7 @@ export interface CiteFieldRequest {
     fieldLabel: string;
     fieldText: string;
     sources: CiteSource[];
-    provider: LocalFileSystemProvider | null;
+    provider: AttachmentProvider | null;
     ai: SmartSearchConfig;
     sendFiles: 'text' | 'all';
     onProgress?: (progress: CiteProgress) => void;

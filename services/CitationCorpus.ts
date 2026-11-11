@@ -15,7 +15,7 @@
  */
 
 import { sanitizeName } from './FileSystem';
-import type { LocalFileSystemProvider } from './FileSystem';
+import type { AttachmentProvider } from './FileSystem';
 import type { CitableField } from './FieldClaims';
 import type { CitedSourceKind, CitedSourceRef, FileEntry } from '../types';
 
@@ -65,7 +65,7 @@ export const failurePath = (subName: string, failDesc: string): string[] => [
 
 /** A folder's files, or none — an unlinked project and a missing folder are the same thing here. */
 async function listOrEmpty(
-    provider: LocalFileSystemProvider,
+    provider: AttachmentProvider,
     projectId: string,
     pathParts: string[]
 ): Promise<FileEntry[]> {
@@ -91,7 +91,7 @@ function textSource(kind: 'knowledge' | 'checklist', name: string, text: string)
 }
 
 export interface CorpusRequest {
-    provider: LocalFileSystemProvider | null;
+    provider: AttachmentProvider | null;
     projectId: string | null;
     subName: string;
     /** Set for a field that belongs to a functional failure. */

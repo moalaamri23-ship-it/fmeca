@@ -55,6 +55,29 @@ export interface WriteSession {
     isLive: () => boolean;
 }
 
+/**
+ * What the Attachments panel, the file viewer and citations need from a store of
+ * project files. LocalFileSystemProvider keeps them in a folder on this computer;
+ * SharePointStorageProvider (services/SharePointStorage.ts) in SharePoint.
+ */
+export interface AttachmentProvider {
+    readonly kind: 'local' | 'sharepoint';
+    /** True when writes need the helper window (local folders inside a frame). */
+    readonly embedded: boolean;
+    isLinkedSync(projectId: string): boolean;
+    hasRoot(projectId: string): Promise<boolean>;
+    rootName(projectId: string): Promise<string | null>;
+    chooseRoot(projectId: string): Promise<unknown>;
+    beginPick(projectId: string): WriteSession & { picked: Promise<unknown> };
+    beginWrite(projectId: string): WriteSession;
+    describeWrite(session: WriteSession, text: string): Promise<void>;
+    ensureFolderForEntity(projectId: string, pathParts: string[], session?: WriteSession): Promise<void>;
+    writeChosenFiles(projectId: string, pathParts: string[], files: File[], session?: WriteSession): Promise<number>;
+    deleteFile(projectId: string, pathParts: string[], name: string, session?: WriteSession): Promise<void>;
+    listFiles(projectId: string, pathParts: string[]): Promise<FileEntry[]>;
+    readFile(entry: FileEntry): Promise<Blob>;
+}
+
 export const isCancellation = (err: any): boolean =>
     !!err && (err.name === 'AbortError' || err.name === 'FolderSelectionCancelled');
 
@@ -118,7 +141,8 @@ const walk = async (
     return curr;
 };
 
-export class LocalFileSystemProvider {
+export class LocalFileSystemProvider implements AttachmentProvider {
+    readonly kind = 'local' as const;
     /** True when the browser bars this context from writing to disk directly. */
     readonly embedded: boolean = IN_IFRAME;
 

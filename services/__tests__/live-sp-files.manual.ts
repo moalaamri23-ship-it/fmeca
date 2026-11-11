@@ -48,3 +48,32 @@ describe.skipIf(!URL)('SharePoint client, live', () => {
         expect(gone.code).toBe('not_found');
     });
 });
+
+describe.skipIf(!URL)('SharePoint attachments provider, live', () => {
+    it('links a folder, uploads to an entity, lists, reads and deletes', async () => {
+        const { SharePointStorageProvider } = await import('../SharePointStorage');
+        const client = SharePointFiles.forFlow(URL);
+        const projectRoot = joinSpPath(ROOT, `_fmeca_attach_test_${Date.now()}`);
+        let root: { site: string; path: string } | null = null;
+        const p = new SharePointStorageProvider({
+            client,
+            getRoot: () => root,
+            setRoot: (_id, r) => { root = r; },
+            pickFolder: async () => ({ site: SITE, path: projectRoot }),
+        });
+        try {
+            await client.mkdir(SITE, projectRoot);
+            await p.chooseRoot('p1');
+            const parts = ['Subsystems', 'Pump / Seal'];
+            expect(await p.listFiles('p1', parts)).toEqual([]);   // entity folder not created yet
+            expect(await p.writeChosenFiles('p1', parts, [new File(['seal datasheet'], 'datasheet.txt')])).toBe(1);
+            const files = await p.listFiles('p1', parts);
+            expect(files.map(f => f.name)).toEqual(['datasheet.txt']);
+            expect(await (await p.readFile(files[0])).text()).toBe('seal datasheet');
+            await p.deleteFile('p1', parts, 'datasheet.txt');
+            expect(await p.listFiles('p1', parts)).toEqual([]);
+        } finally {
+            await client.remove(SITE, projectRoot);
+        }
+    });
+});

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
-import { LocalFileSystemProvider, WriteSession, sanitizeName, isCancellation, describePickerFailure } from '../services/FileSystem';
+import { AttachmentProvider, WriteSession, sanitizeName, isCancellation, describePickerFailure } from '../services/FileSystem';
 import { FileEntry, SendFilesMode, ViewerCitation } from '../types';
 import { fileKey, forgetFileBytes } from './viewer/useFileBytes';
 import type { SmartSearchConfig } from '../services/SmartSearchService';
@@ -15,7 +15,7 @@ interface AttachmentModalProps {
     onClose: () => void;
     entityType: string | null;
     entityName: string | null;
-    provider: LocalFileSystemProvider | null;
+    provider: AttachmentProvider | null;
     pathParts: string[];
     projectId: string | null;
     /** Live AI settings, for the viewer's smart search. */
@@ -336,7 +336,9 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                 {hasRoot === false && (
                     <div className="p-4 bg-slate-50 rounded border mb-4">
                         <div className="text-xs text-slate-500 mb-2">
-                            No project folder is linked yet. Choose where this project's files should live on your computer.
+                            {provider?.kind === 'sharepoint'
+                                ? "No SharePoint folder is linked to this project yet. Choose (or create) the folder where its files should live."
+                                : "No project folder is linked yet. Choose where this project's files should live on your computer."}
                         </div>
                         <button onClick={handlePickRoot} className="bg-slate-900 text-white px-4 py-2 rounded font-bold text-sm">
                             Select Project Folder
@@ -352,7 +354,7 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                     </div>
                 )}
 
-                {loading ? <div className="p-4 text-center text-slate-400">Loading...</div> : (
+                {loading ? <div className="p-4 text-center text-slate-400">{provider?.kind === 'sharepoint' ? 'Loading from SharePoint…' : 'Loading...'}</div> : (
                     <div className="space-y-2">
                         {files.length === 0 ? <div className="text-sm text-slate-400 italic">No files found.</div> :
                             files.map((f, i) => (

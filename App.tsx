@@ -21,7 +21,10 @@ import { AIService, TieredModels } from './services/AIService';
 import { subsystemsFromKnowledge, findCardSubsystem } from './services/KnowledgeCards';
 import { reviewKnowledge, dutyCandidates, applyReview, isDecided, type ReviewFlag, type ReviewDecision } from './services/CardReview';
 import { CardReviewModal } from './components/CardReviewModal';
-import { LocalFileSystemProvider, sanitizeName, isCancellation } from './services/FileSystem';
+import { LocalFileSystemProvider, AttachmentProvider, sanitizeName, isCancellation, isInIframe } from './services/FileSystem';
+import { SharePointStorageProvider } from './services/SharePointStorage';
+import { SharePointFiles, SpLocation } from './services/SharePointFiles';
+import { SharePointPicker } from './components/SharePointPicker';
 import { requestFullscreenViaHost, notifyHostFullscreenReleased } from './services/ShellFullscreen';
 import { RICH_LIBRARY } from './constants';
 import { Project, Subsystem, Failure, Mode, RichLibrary, LibraryItem, BreakdownRow, BreakdownMatch, SendFilesMode, FieldCitations } from './types';
@@ -661,7 +664,23 @@ const mergeProjects = (projects: any[]): any => {
 };
 
     /* ATTACHMENT STATE */
-    const [storageProvider, setStorageProvider] = useState<LocalFileSystemProvider | null>(null);
+    // Attachments live in SharePoint inside a frame (relshell, Teams: no popups, no
+    // local folders there). Outside a frame the user chooses; SharePoint by default.
+    const [attachmentStorage, setAttachmentStorage] = useState<'sharepoint' | 'local'>('sharepoint');
+    const embeddedInFrame = isInIframe();
+    const effectiveStorage: 'sharepoint' | 'local' = embeddedInFrame ? 'sharepoint' : attachmentStorage;
+    const localProvider = useMemo(() => new LocalFileSystemProvider(), []);
+    const spClient = useMemo(() => SharePointFiles.forFlow(aiRouterUrl), [aiRouterUrl]);
+    // The SharePoint folder lives on the project; the provider reads the latest one
+    // through activeProjectRef (declared below, read only when the provider is called).
+    const [spPick, setSpPick] = useState<{ initial: SpLocation | null; resolve: (loc: SpLocation | null) => void } | null>(null);
+    const spProvider = useMemo(() => new SharePointStorageProvider({
+        client: spClient,
+        getRoot: id => (activeProjectRef.current?.id === id ? activeProjectRef.current.spAttachmentRoot : null) || null,
+        setRoot: (id, root) => setActiveProject(p => p && p.id === id ? touchProject({ ...p, spAttachmentRoot: root }) : p),
+        pickFolder: (_id, current) => new Promise(resolve => setSpPick({ initial: current, resolve })),
+    }), [spClient]);
+    const storageProvider: AttachmentProvider | null = effectiveStorage === 'sharepoint' ? spProvider : localProvider;
     const [attachModal, setAttachModal] = useState<{ open: boolean, type: 'sub' | 'fail' | null, entity: any, sub: Subsystem | null }>({ open: false, type: null, entity: null, sub: null });
     
     // 1) Initial load (projects, settings, storage)
@@ -709,10 +728,7 @@ setProjects(
     setSystemType(localStorage.getItem('rcm_system_type') || '');
     setSystemModes(sanitizeStoredSystemModes(safeGet('rcm_system_modes', [])));
     setSystemContextEnabled(localStorage.getItem('rcm_system_context_enabled') !== 'false');
-    
-
-    // Init Storage Provider
-    setStorageProvider(new LocalFileSystemProvider());
+    setAttachmentStorage(localStorage.getItem('fmeca_attachment_storage') === 'local' ? 'local' : 'sharepoint');
     }, []);
 
 
@@ -790,7 +806,8 @@ setProjects(
         localStorage.setItem('rcm_system_type', systemType);
         localStorage.setItem('rcm_system_modes', JSON.stringify(systemModes));
         localStorage.setItem('rcm_system_context_enabled', String(systemContextEnabled));
-    }, [projects, apiKey, modelName, aiSourceMode, aiProvider, sendFilesMode, azureEndpoint, aiRouterUrl, engineerEmail, enableChatbot, chatbotStyle, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
+        localStorage.setItem('fmeca_attachment_storage', attachmentStorage);
+    }, [attachmentStorage, projects, apiKey, modelName, aiSourceMode, aiProvider, sendFilesMode, azureEndpoint, aiRouterUrl, engineerEmail, enableChatbot, chatbotStyle, showHybridSourceLabels, globalFileText, globalFileName, checklistText, checklistFileName, systemType, systemModes, systemContextEnabled]);
 
     const FETCHABLE_PROVIDERS = ['gemini', 'openai', 'anthropic', 'openrouter'] as const;
     type FetchableProvider = typeof FETCHABLE_PROVIDERS[number];
@@ -2978,6 +2995,25 @@ syncFitBtn();
                                         </div>
                                     </div>
                                 </div>
+                                <div className="bg-white p-6 rounded border max-w-xl mt-4">
+                                    <h2 className="text-lg font-semibold mb-1">Attachments storage</h2>
+                                    {embeddedInFrame ? (
+                                        <p className="text-xs text-slate-500">FMECA Studio is running inside another page (Reliability Shell or Teams), so attachments are kept in SharePoint through the OXY Connection Flow.</p>
+                                    ) : (
+                                        <>
+                                            <p className="text-xs text-slate-500 mb-4">Where each project's reference files are kept. Inside Reliability Shell or Teams it is always SharePoint.</p>
+                                            <div className="flex gap-1 bg-slate-100 p-1 rounded w-fit" role="radiogroup" aria-label="Attachments storage">
+                                                {([['sharepoint', 'SharePoint'], ['local', 'Local folder']] as const).map(([value, label]) => (
+                                                    <button key={value} role="radio" aria-checked={attachmentStorage === value} onClick={() => setAttachmentStorage(value)}
+                                                        className={`px-3 py-1.5 rounded text-xs font-bold transition ${attachmentStorage === value ? 'bg-brand-600 text-white shadow' : 'text-slate-500 hover:text-slate-700 hover:bg-white'}`}>{label}</button>
+                                                ))}
+                                            </div>
+                                            <p className="text-xs text-slate-400 mt-2">{attachmentStorage === 'sharepoint'
+                                                ? 'Same files in the browser and in Teams. Needs the OXY Connection Flow URL above.'
+                                                : 'A folder on this computer, as before. Not available inside Reliability Shell or Teams.'}</p>
+                                        </>
+                                    )}
+                                </div>
                                 {/* Production offers Copilot only, through the OXY Connection Flow URL: nothing to choose. */}
                                 {VISIBLE_PROVIDERS.length > 1 && (
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
@@ -3621,6 +3657,15 @@ syncFitBtn();
                         pathParts={getAttachmentPath()}
                         ai={{ apiKey, model: modelName, provider: aiProvider, azureEndpoint, powerAutomateUrl }}
                         sendFiles={sendFilesMode}
+                    />
+                    <SharePointPicker
+                        isOpen={!!spPick}
+                        mode="folder"
+                        client={spClient}
+                        title="Choose this project's SharePoint folder"
+                        initial={spPick?.initial ?? null}
+                        onClose={() => { spPick?.resolve(null); setSpPick(null); }}
+                        onPickFolder={loc => { spPick?.resolve({ site: loc.site, path: loc.path }); setSpPick(null); }}
                     />
                     {citeModal && (() => {
                         const subName = activeProject.subsystems.find(s => s.id === citeModal.targets[0]?.subId)?.name || '';

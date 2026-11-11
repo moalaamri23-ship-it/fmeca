@@ -12,7 +12,7 @@ import { extractDocumentText } from '../../services/DocumentText';
 import { buildDocumentPayload } from '../../services/DocumentPayload';
 import type { DocumentPayload } from '../../services/DocumentPayload';
 import type { SmartSearchConfig } from '../../services/SmartSearchService';
-import type { LocalFileSystemProvider } from '../../services/FileSystem';
+import type { AttachmentProvider } from '../../services/FileSystem';
 import type { FieldClaim, FileEntry, SendFilesMode, ViewerCitation } from '../../types';
 
 function locationLabel(citation: ViewerCitation): string {
@@ -306,7 +306,7 @@ const ReferencePanel: React.FC<{
 export const FileViewerModal: React.FC<{
     isOpen: boolean;
     onClose: () => void;
-    provider: LocalFileSystemProvider | null;
+    provider: AttachmentProvider | null;
     /** Every file in the open folder — a citation names one of these. */
     files: FileEntry[];
     pathParts: string[];

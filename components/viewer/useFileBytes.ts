@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { FileEntry } from '../../types';
-import type { LocalFileSystemProvider } from '../../services/FileSystem';
+import type { AttachmentProvider } from '../../services/FileSystem';
 
 // Reads go through the folder handle the project is linked to, which works even
 // when the app is embedded — Chromium only refuses WRITES through a transferred
@@ -22,7 +22,7 @@ export const fileKey = (pathParts: string[], name: string): string => [...pathPa
  * files of the same name in different folders never collide.
  */
 export function useFileBytes(
-    provider: LocalFileSystemProvider | null,
+    provider: AttachmentProvider | null,
     entry: FileEntry | null,
     key: string
 ): BytesState {

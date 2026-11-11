@@ -198,6 +198,8 @@ export interface Project {
     updatedModes: number;
     gaps: Array<{ code: string; severity: 'Blocking' | 'Major' | 'Minor'; subsystemId?: string; modeId?: string; text: string }>;
   };
+  /** SharePoint folder holding this project's attachments (services/SharePointStorage.ts). */
+  spAttachmentRoot?: { site: string; path: string };
   /** Set after a successful publish to the SharePoint RCM register. */
   rcmRegister?: {
     rcmInternalNumber: string;
