@@ -1,5 +1,5 @@
 /manual/*
-  Content-Security-Policy: frame-ancestors https://relshell.moalaamri23.workers.dev
+  Content-Security-Policy: frame-ancestors https://relshell.moalaamri23.workers.dev https://teams.microsoft.com https://*.teams.microsoft.com https://teams.cloud.microsoft https://*.cloud.microsoft
 
 /manual/index.html
   Content-Type: text/html; charset=utf-8

@@ -9,7 +9,7 @@ export default {
     r.headers.set(
       'Content-Security-Policy',
       isManual
-        ? 'frame-ancestors https://relshell.moalaamri23.workers.dev'
+        ? 'frame-ancestors https://relshell.moalaamri23.workers.dev https://teams.microsoft.com https://*.teams.microsoft.com https://teams.cloud.microsoft https://*.cloud.microsoft'
         : 'frame-ancestors *',
     )
 
