@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teams Probe</title>
+<!--
+  Phase 0 probe for the SharePoint connector plan. Open it the way users will:
+  Teams -> Reliability Shell -> a tile whose URL is this page. It tests what the
+  Teams iframe allows (popups, folder picker, file input, downloads, new-tab links)
+  and calls the OXY Connection router from inside it. Nothing here writes to
+  SharePoint: the router calls are sp_read "lists" and an unknown task, which the
+  router rejects with 400 before any child flow runs.
+-->
+<style>
+  :root { --bg:#f8fafc; --card:#fff; --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --ok:#047857; --bad:#b91c1c; --warn:#b45309; --brand:#2563eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f172a; --card:#1e293b; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --ok:#34d399; --bad:#f87171; --warn:#fbbf24; --brand:#60a5fa; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--ink); font:14px/1.45 Inter, system-ui, sans-serif; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  p.lead { margin:0 0 16px; color:var(--muted); }
+  .grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:12px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; margin:0 0 8px; color:var(--muted); }
+  button, .btn { font:inherit; font-weight:600; font-size:13px; padding:6px 10px; border-radius:4px; border:1px solid var(--line); background:var(--bg); color:var(--ink); cursor:pointer; margin:0 6px 6px 0; display:inline-block; text-decoration:none; }
+  button.primary { background:var(--brand); border-color:var(--brand); color:#fff; }
+  input[type=text] { width:100%; font:12px ui-monospace, monospace; padding:6px; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--ink); margin-bottom:6px; }
+  .note { color:var(--muted); font-size:12px; margin:4px 0 0; }
+  pre { margin:16px 0 0; padding:12px; background:var(--card); border:1px solid var(--line); border-radius:6px; white-space:pre-wrap; word-break:break-all; font:12px/1.5 ui-monospace, monospace; max-height:50vh; overflow:auto; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+</style>
+</head>
+<body>
+<h1>Teams iframe probe</h1>
+<p class="lead">Run each test, then press <b>Copy results</b> and paste them back to Claude. For the download tests, also say whether a file actually arrived.</p>
+
+<div class="grid">
+  <section>
+    <h2>1 · Environment</h2>
+    <button id="env">Run</button>
+    <p class="note">Frame depth, ancestor origins, storage, browser.</p>
+  </section>
+
+  <section>
+    <h2>2 · Popup (current helper)</h2>
+    <button id="popup">window.open</button>
+    <button id="dirpick">showDirectoryPicker</button>
+    <p class="note">Expected blocked in Teams. Confirms why the helper fails.</p>
+  </section>
+
+  <section>
+    <h2>3 · File input (upload source)</h2>
+    <input type="file" id="file" multiple>
+    <p class="note">Pick one or more files. Reads each as base64 and times it.</p>
+  </section>
+
+  <section>
+    <h2>4 · Downloads</h2>
+    <button id="dlblob">Blob, 1 KB</button>
+    <button id="dlbig">Blob, 5 MB</button>
+    <button id="dldata">data: URI</button>
+    <p class="note">Did a file arrive? Note it for each button.</p>
+  </section>
+
+  <section>
+    <h2>5 · New-tab link</h2>
+    <a class="btn" id="newtab" href="https://oxyinc.sharepoint.com/sites/AIProduction" target="_blank" rel="noopener noreferrer">Open SharePoint site</a>
+    <p class="note">For a future "Open in SharePoint" button. Did it open?</p>
+  </section>
+
+  <section>
+    <h2>6 · OXY Connection router</h2>
+    <input type="text" id="url" placeholder="OXY Connection Flow URL (read from FMECA settings if saved here)" autocomplete="off" spellcheck="false">
+    <button id="lists" class="primary">sp_read lists ×3</button>
+    <button id="up1">Upload 1 MB</button>
+    <button id="up5">Upload 5 MB</button>
+    <button id="upfile">Upload picked file</button>
+    <p class="note">Uploads go to an unknown task: the router answers 400 and runs no flow. The URL is never stored or printed.</p>
+  </section>
+</div>
+
+<button id="copy" class="primary" style="margin-top:16px">Copy results</button>
+<button id="clear">Clear</button>
+<pre id="log"></pre>
+
+<script>
+(function () {
+  var logEl = document.getElementById('log')
+  var picked = []
+  function line(cls, text) {
+    var s = document.createElement('span'); if (cls) s.className = cls
+    s.textContent = text + '\n'; logEl.appendChild(s); logEl.scrollTop = logEl.scrollHeight
+  }
+  var ok = function (t) { line('ok', 'OK    ' + t) }
+  var bad = function (t) { line('bad', 'FAIL  ' + t) }
+  var info = function (t) { line('', '      ' + t) }
+  var ms = function (t0) { return Math.round(performance.now() - t0) + ' ms' }
+  var mb = function (n) { return (n / 1048576).toFixed(2) + ' MB' }
+  function $(id) { return document.getElementById(id) }
+
+  // 1. Environment
+  $('env').onclick = function () {
+    var depth = 0, w = window
+    try { while (w !== w.parent && depth < 10) { w = w.parent; depth++ } } catch (e) {}
+    info('in iframe: ' + (window.self !== window.top) + ', depth: ' + depth)
+    info('this origin: ' + location.origin)
+    try { info('ancestorOrigins: ' + Array.prototype.join.call(location.ancestorOrigins || [], ' <- ')) } catch (e) { info('ancestorOrigins: n/a') }
+    info('referrer: ' + (document.referrer || '(none)'))
+    info('userAgent: ' + navigator.userAgent)
+    try { localStorage.setItem('__probe', '1'); localStorage.removeItem('__probe'); ok('localStorage writable') } catch (e) { bad('localStorage: ' + e.message) }
+    try { var r = indexedDB.open('__probe'); r.onsuccess = function () { r.result.close(); indexedDB.deleteDatabase('__probe'); ok('IndexedDB opens') }; r.onerror = function () { bad('IndexedDB: ' + r.error) } } catch (e) { bad('IndexedDB: ' + e.message) }
+    info('cookieEnabled: ' + navigator.cookieEnabled)
+    if (document.hasStorageAccess) document.hasStorageAccess().then(function (v) { info('hasStorageAccess: ' + v) })
+    info('showDirectoryPicker present: ' + (typeof window.showDirectoryPicker === 'function'))
+    try { var saved = localStorage.getItem('fmeca_ai_router_url'); info('FMECA router URL saved in this context: ' + (saved ? 'yes' : 'no')) } catch (e) {}
+  }
+
+  // 2. Popup and folder picker
+  $('popup').onclick = function () {
+    var w = null
+    try { w = window.open('about:blank', 'probe', 'popup=yes,width=200,height=120') } catch (e) { bad('window.open threw: ' + e.message); return }
+    if (w) { ok('window.open opened a window'); try { w.close() } catch (e) {} } else bad('window.open returned null (blocked)')
+  }
+  $('dirpick').onclick = function () {
+    if (typeof window.showDirectoryPicker !== 'function') { bad('showDirectoryPicker not available'); return }
+    window.showDirectoryPicker().then(function (h) { ok('showDirectoryPicker returned "' + h.name + '"') })
+      .catch(function (e) { bad('showDirectoryPicker: ' + e.name + ': ' + e.message) })
+  }
+
+  // 3. File input
+  function toBase64(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader()
+      r.onload = function () { resolve(String(r.result).split(',')[1] || '') }
+      r.onerror = function () { reject(r.error) }
+      r.readAsDataURL(file)
+    })
+  }
+  $('file').onchange = function (ev) {
+    var files = Array.prototype.slice.call(ev.target.files || [])
+    if (!files.length) { bad('file input: nothing picked (dialog cancelled or blocked)'); return }
+    picked = files
+    files.forEach(function (f) {
+      var t0 = performance.now()
+      toBase64(f).then(function (b64) { ok('read "' + f.name + '" ' + mb(f.size) + ' -> base64 ' + mb(b64.length) + ' in ' + ms(t0)) })
+        .catch(function (e) { bad('read "' + f.name + '": ' + e) })
+    })
+  }
+
+  // 4. Downloads
+  function download(href, name, label) {
+    var a = document.createElement('a'); a.href = href; a.download = name
+    document.body.appendChild(a); a.click(); a.remove()
+    info(label + ': click fired (no error). Check whether "' + name + '" arrived.')
+  }
+  $('dlblob').onclick = function () { download(URL.createObjectURL(new Blob(['probe '.repeat(170)], { type: 'text/plain' })), 'probe-1kb.txt', 'blob 1 KB') }
+  $('dlbig').onclick = function () { download(URL.createObjectURL(new Blob([new Uint8Array(5 * 1048576)], { type: 'application/octet-stream' })), 'probe-5mb.bin', 'blob 5 MB') }
+  $('dldata').onclick = function () { download('data:text/plain;charset=utf-8,' + encodeURIComponent('probe data uri'), 'probe-data.txt', 'data: URI') }
+
+  // 5. New tab
+  $('newtab').onclick = function () { info('new-tab link clicked. Did SharePoint open?') }
+
+  // 6. Router
+  try { var saved = localStorage.getItem('fmeca_ai_router_url'); if (saved) $('url').value = saved } catch (e) {}
+  function routerUrl() {
+    var u = $('url').value.trim()
+    if (!/^https:\/\//.test(u)) { bad('router: paste the OXY Connection Flow URL first'); return null }
+    return u
+  }
+  function post(u, body) {
+    // text/plain keeps it a CORS simple request (the trigger does not answer OPTIONS).
+    return fetch(u, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: body })
+  }
+  $('lists').onclick = function () {
+    var u = routerUrl(); if (!u) return
+    var body = JSON.stringify({ task: 'sp_read', action: 'lists', site: 'https://oxyinc.sharepoint.com/sites/AIProduction' })
+    var run = function (i) {
+      if (i > 3) return
+      var t0 = performance.now()
+      post(u, body).then(function (r) { return r.text().then(function (t) {
+        (r.ok ? ok : bad)('sp_read lists #' + i + ': HTTP ' + r.status + ' in ' + ms(t0) + ', reply ' + t.length + ' chars')
+        run(i + 1)
+      }) }).catch(function (e) { bad('sp_read lists #' + i + ': ' + e.message + ' (CORS, CSP or network)'); run(i + 1) })
+    }
+    run(1)
+  }
+  function upload(label, payloadChars) {
+    var u = routerUrl(); if (!u) return
+    var body = '{"task":"size_probe","blob":"' + payloadChars + '"}'
+    var t0 = performance.now()
+    post(u, body).then(function (r) {
+      var good = r.status === 400
+      ;(good ? ok : bad)(label + ' (' + mb(body.length) + '): HTTP ' + r.status + ' in ' + ms(t0) + (good ? ' (router rejected the unknown task, as expected)' : ''))
+    }).catch(function (e) { bad(label + ': ' + e.message) })
+  }
+  $('up1').onclick = function () { upload('upload 1 MB', 'A'.repeat(1048576)) }
+  $('up5').onclick = function () { upload('upload 5 MB', 'A'.repeat(5 * 1048576)) }
+  $('upfile').onclick = function () {
+    if (!picked.length) { bad('upload picked file: pick a file in test 3 first'); return }
+    toBase64(picked[0]).then(function (b64) { upload('upload "' + picked[0].name + '"', b64) })
+  }
+
+  // Results
+  $('copy').onclick = function () {
+    var text = logEl.textContent
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { info('results copied') }, function (e) { selectLog(); info('clipboard blocked (' + e.name + '): log selected, press Ctrl+C') })
+    } else { selectLog(); info('clipboard API missing: log selected, press Ctrl+C') }
+  }
+  function selectLog() { var r = document.createRange(); r.selectNodeContents(logEl); var s = getSelection(); s.removeAllRanges(); s.addRange(r) }
+  $('clear').onclick = function () { logEl.textContent = '' }
+})()
+</script>
+</body>
+</html>
