@@ -61,6 +61,30 @@ export const FSA_SUPPORTED =
  */
 export const IN_IFRAME = typeof window !== 'undefined' && window.self !== window.top;
 
+const TEAMS_HOST = /(^|\.)(teams\.microsoft\.com|teams\.live\.com|cloud\.microsoft|office\.com|microsoft365\.com)$/i;
+
+/** How many frames sit above this one (0 when top-level). Readable cross-origin. */
+const frameDepth = (): number => {
+    let depth = 0;
+    try { for (let w: Window = window; w !== w.parent && depth < 10; w = w.parent) depth++; } catch { /* stop counting */ }
+    return depth;
+};
+
+/**
+ * Whether the app runs inside Teams (or another Microsoft 365 host), where popups and
+ * local folders are blocked. Reliability Shell in a browser frames the app one level
+ * deep; Teams adds a level above the shell, so a frame two or more deep counts too
+ * (covers browsers without location.ancestorOrigins, and masked "null" origins).
+ */
+export const IN_TEAMS: boolean = (() => {
+    if (!IN_IFRAME) return false;
+    try {
+        const origins = Array.from(window.location.ancestorOrigins ?? []);
+        if (origins.some(o => { try { return TEAMS_HOST.test(new URL(o).hostname); } catch { return false; } })) return true;
+    } catch { /* fall through to depth */ }
+    return frameDepth() >= 2;
+})();
+
 /**
  * The name every helper window is opened under, and the tag on every message it
  * exchanges. Exported so the app can recognise a window meant for the helper —

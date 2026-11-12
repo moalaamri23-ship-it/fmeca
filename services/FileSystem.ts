@@ -3,6 +3,7 @@ import {
     DirHandleLike,
     FileHandleLike,
     IN_IFRAME,
+    IN_TEAMS,
     PICK_IN_BRIDGE,
     WritableRootBridge,
     hasPermission,
@@ -37,6 +38,9 @@ const markLinked = (projectId: string, linked: boolean): void => {
 };
 
 export const isInIframe = (): boolean => IN_IFRAME;
+
+/** Inside Teams: popups and local folders are blocked, so storage is SharePoint only. */
+export const isInTeams = (): boolean => IN_TEAMS;
 
 /** Thrown when the user closes the picker without choosing — callers ignore it. */
 export class FolderSelectionCancelled extends Error {

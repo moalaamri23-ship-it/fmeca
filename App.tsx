@@ -21,7 +21,7 @@ import { AIService, TieredModels } from './services/AIService';
 import { subsystemsFromKnowledge, findCardSubsystem } from './services/KnowledgeCards';
 import { reviewKnowledge, dutyCandidates, applyReview, isDecided, type ReviewFlag, type ReviewDecision } from './services/CardReview';
 import { CardReviewModal } from './components/CardReviewModal';
-import { LocalFileSystemProvider, AttachmentProvider, sanitizeName, isCancellation, isInIframe } from './services/FileSystem';
+import { LocalFileSystemProvider, AttachmentProvider, sanitizeName, isCancellation, isInTeams } from './services/FileSystem';
 import { SharePointStorageProvider } from './services/SharePointStorage';
 import { SharePointFiles, SpLocation } from './services/SharePointFiles';
 import { SharePointPicker } from './components/SharePointPicker';
@@ -664,11 +664,12 @@ const mergeProjects = (projects: any[]): any => {
 };
 
     /* ATTACHMENT STATE */
-    // Attachments live in SharePoint inside a frame (relshell, Teams: no popups, no
-    // local folders there). Outside a frame the user chooses; SharePoint by default.
+    // Attachments live in SharePoint inside Teams (no popups, no local folders there).
+    // Elsewhere, Reliability Shell in a browser included, the user chooses; SharePoint
+    // by default. A local folder inside the shell goes through the popup helper.
     const [attachmentStorage, setAttachmentStorage] = useState<'sharepoint' | 'local'>('sharepoint');
-    const embeddedInFrame = isInIframe();
-    const effectiveStorage: 'sharepoint' | 'local' = embeddedInFrame ? 'sharepoint' : attachmentStorage;
+    const inTeams = isInTeams();
+    const effectiveStorage: 'sharepoint' | 'local' = inTeams ? 'sharepoint' : attachmentStorage;
     const localProvider = useMemo(() => new LocalFileSystemProvider(), []);
     const spClient = useMemo(() => SharePointFiles.forFlow(aiRouterUrl), [aiRouterUrl]);
     // The SharePoint folder lives on the project; the provider reads the latest one
@@ -2997,11 +2998,11 @@ syncFitBtn();
                                 </div>
                                 <div className="bg-white p-6 rounded border max-w-xl mt-4">
                                     <h2 className="text-lg font-semibold mb-1">Attachments storage</h2>
-                                    {embeddedInFrame ? (
-                                        <p className="text-xs text-slate-500">FMECA Studio is running inside another page (Reliability Shell or Teams), so attachments are kept in SharePoint through the OXY Connection Flow.</p>
+                                    {inTeams ? (
+                                        <p className="text-xs text-slate-500">FMECA Studio is running inside Teams, which blocks local folders, so attachments are kept in SharePoint through the OXY Connection Flow.</p>
                                     ) : (
                                         <>
-                                            <p className="text-xs text-slate-500 mb-4">Where each project's reference files are kept. Inside Reliability Shell or Teams it is always SharePoint.</p>
+                                            <p className="text-xs text-slate-500 mb-4">Where each project's reference files are kept. Inside Teams it is always SharePoint.</p>
                                             <div className="flex gap-1 bg-slate-100 p-1 rounded w-fit" role="radiogroup" aria-label="Attachments storage">
                                                 {([['sharepoint', 'SharePoint'], ['local', 'Local folder']] as const).map(([value, label]) => (
                                                     <button key={value} role="radio" aria-checked={attachmentStorage === value} onClick={() => setAttachmentStorage(value)}
@@ -3010,7 +3011,7 @@ syncFitBtn();
                                             </div>
                                             <p className="text-xs text-slate-400 mt-2">{attachmentStorage === 'sharepoint'
                                                 ? 'Same files in the browser and in Teams. Needs the OXY Connection Flow URL above.'
-                                                : 'A folder on this computer, as before. Not available inside Reliability Shell or Teams.'}</p>
+                                                : 'A folder on this computer, as before. Inside Reliability Shell it opens a helper window. Not available in Teams.'}</p>
                                         </>
                                     )}
                                 </div>
