@@ -593,6 +593,11 @@ export class SharePointFiles {
         void this.store.putBlob(this.key(site, path), { etag, contentType: blob.type, blob });
     }
 
+    /** Forget stored bytes kept with `keepBlob`. */
+    dropBlob(site: string, path: string): void {
+        void this.store.deleteBlob(this.key(site, path));
+    }
+
     /** The session's listing of `path` when it is under a minute old, else null. Never calls. */
     async freshList(site: string, path: string): Promise<SpListing | null> {
         const hit = this.listings.get(this.key(site, path));
