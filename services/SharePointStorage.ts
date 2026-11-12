@@ -15,7 +15,8 @@ import type { FileEntry } from '../types';
 import type { AttachmentProvider, DirHandleLike, WriteSession } from './FileSystem';
 import { FolderSelectionCancelled, sanitizeName } from './FileSystem';
 import {
-    SharePointFiles, SpError, SpLocation, describeSpError, guessContentType, joinSpPath, spBaseName, SP_MAX_FILE_BYTES,
+    SharePointFiles, SpError, SpListing, SpLocation, describeSpError, guessContentType, joinSpPath, mapLimit, spBaseName,
+    SP_MAX_FILE_BYTES, SP_UPLOAD_CONCURRENCY,
 } from './SharePointFiles';
 
 export interface SharePointStorageOptions {
@@ -106,10 +107,10 @@ export class SharePointStorageProvider implements AttachmentProvider {
             throw new Error(`${tooBig.map(f => f.name).join(', ')}: over ${SP_MAX_FILE_BYTES / 1024 / 1024} MB, the SharePoint upload limit.`);
         }
         await plainly(async () => {
+            // Skipped without a call when the panel's listing already found the folder.
             await this.opts.client.mkdir(site, path);
-            for (const file of files) {
-                await this.opts.client.write(site, path, file.name, file, { overwrite: true });
-            }
+            await mapLimit(files, SP_UPLOAD_CONCURRENCY, file =>
+                this.opts.client.write(site, path, file.name, file, { overwrite: true }));
         });
         return files.length;
     }
@@ -135,6 +136,28 @@ export class SharePointStorageProvider implements AttachmentProvider {
             if (e instanceof SpError && e.code === 'not_found') return [];
             throw e instanceof SpError ? new Error(describeSpError(e)) : e;
         }
+        return this.entries(site, listing);
+    }
+
+    /**
+     * The folder's last known files, without a call, or null when this browser has
+     * never listed it. The panel shows these at once while `listFiles` refreshes.
+     */
+    async cachedFiles(projectId: string, pathParts: string[]): Promise<FileEntry[] | null> {
+        if (!this.opts.getRoot(projectId)) return null;
+        const { site, path } = this.folder(projectId, pathParts);
+        const listing = await this.opts.client.cachedList(site, path).catch(() => null);
+        return listing ? this.entries(site, listing) : null;
+    }
+
+    /** List the folder in the background, so opening its panel later finds it cached. */
+    prefetch(projectId: string, pathParts: string[]): void {
+        if (!this.opts.getRoot(projectId)) return;
+        const { site, path } = this.folder(projectId, pathParts);
+        this.opts.client.list(site, path).catch(() => {});
+    }
+
+    private entries(site: string, listing: SpListing): FileEntry[] {
         const client = this.opts.client;
         return listing.files
             .filter(f => !f.name.startsWith('.'))
@@ -147,7 +170,8 @@ export class SharePointStorageProvider implements AttachmentProvider {
                         if (f.size > SP_MAX_FILE_BYTES) {
                             throw new Error(`${f.name} is over ${SP_MAX_FILE_BYTES / 1024 / 1024} MB, too large to open through SharePoint here.`);
                         }
-                        const { blob } = await plainly(() => client.fetchBlob(site, f.path));
+                        // Opened before and unchanged since: no call.
+                        const blob = await plainly(() => client.readBlob(site, f.path, f.etag));
                         return new File([blob], f.name, { type: guessContentType(f.name) });
                     },
                 },

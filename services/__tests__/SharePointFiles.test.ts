@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
     SharePointFiles, SpError, SpTransport, joinSpPath, rootFor, spBaseName, spParent, toSpFileName,
-    describeSpError, SP_MAX_BATCH_FILES,
+    describeSpError, SP_MAX_BATCH_FILES, mapLimit,
 } from '../SharePointFiles';
+import { MemorySpCache } from '../SharePointCache';
 
 const SITE = 'https://x.sharepoint.com/sites/A';
 const ROOT = '/sites/A/Shared Documents';
@@ -41,7 +42,7 @@ describe('SharePoint paths', () => {
 });
 
 describe('SharePointFiles client', () => {
-    it('sends the op and site, and caches a listing until a write in that folder', async () => {
+    it('sends the op and site, caches a listing, and patches it after a write instead of listing again', async () => {
         const { calls, transport } = scripted(b => b.op === 'list'
             ? { status: 200, body: listing(b.path) }
             : { status: 200, body: { path: b.path + '/' + b.name, size: 1, etag: 'e1' } });
@@ -53,8 +54,90 @@ describe('SharePointFiles client', () => {
 
         await sp.write(SITE, ROOT, '50%.txt', btoa('x'));
         expect(calls[1]).toMatchObject({ op: 'write', path: ROOT, name: '50pct.txt', overwrite: false });
+        const after = await sp.list(SITE, ROOT);
+        expect(calls.filter(c => c.op === 'list')).toHaveLength(1);
+        expect(after.files.map(f => [f.name, f.etag])).toEqual([['50pct.txt', 'e1']]);
+
+        // Writing the same name again replaces the row, it does not add one.
+        await sp.write(SITE, ROOT, '50%.txt', btoa('y'), { overwrite: true });
+        expect((await sp.list(SITE, ROOT)).files).toHaveLength(1);
+    });
+
+    it('drops a deleted file from the cached listing without listing again', async () => {
+        const { calls, transport } = scripted(b => b.op === 'list'
+            ? { status: 200, body: { path: b.path, folders: [], files: [
+                { name: 'a.txt', path: b.path + '/a.txt', size: 1, modified: '', etag: 'e' },
+                { name: 'b.txt', path: b.path + '/b.txt', size: 1, modified: '', etag: 'e' },
+            ] } }
+            : { status: 200, body: { path: b.path, recycled: true } });
+        const sp = new SharePointFiles(transport);
         await sp.list(SITE, ROOT);
-        expect(calls.filter(c => c.op === 'list')).toHaveLength(2);
+        await sp.remove(SITE, ROOT + '/a.txt');
+        expect((await sp.list(SITE, ROOT)).files.map(f => f.name)).toEqual(['b.txt']);
+        expect(calls.filter(c => c.op === 'list')).toHaveLength(1);
+    });
+
+    it('skips mkdir for a folder it has seen exist, and asks again after a 404', async () => {
+        let missing = false;
+        const { calls, transport } = scripted(b => b.op === 'list'
+            ? (missing ? { status: 404, body: { error: 'not_found', message: 'gone' } } : { status: 200, body: listing(b.path) })
+            : { status: 200, body: { path: b.path, created: false } });
+        const sp = new SharePointFiles(transport);
+        await sp.list(SITE, ROOT + '/a');
+        expect(await sp.mkdir(SITE, ROOT + '/a')).toEqual({ path: ROOT + '/a', created: false });
+        expect(calls.filter(c => c.op === 'mkdir')).toHaveLength(0);
+
+        missing = true;
+        await sp.list(SITE, ROOT + '/a', { fresh: true }).catch(() => {});
+        await sp.mkdir(SITE, ROOT + '/a');
+        expect(calls.filter(c => c.op === 'mkdir')).toHaveLength(1);
+    });
+
+    it('keeps listings for the next page load and serves them before any call', async () => {
+        const store = new MemorySpCache();
+        const first = scripted(b => ({ status: 200, body: { path: b.path, folders: [], files: [
+            { name: 'a.txt', path: b.path + '/a.txt', size: 1, modified: '', etag: 'e' }] } }));
+        await new SharePointFiles(first.transport, store).list(SITE, ROOT);
+        await Promise.resolve();
+
+        const later = scripted(() => ({ status: 500, body: 'down' }));
+        const sp = new SharePointFiles(later.transport, store);
+        expect((await sp.cachedList(SITE, ROOT + '/'))?.files.map(f => f.name)).toEqual(['a.txt']);
+        expect(later.calls).toHaveLength(0);
+        expect(await sp.cachedList(SITE, ROOT + '/never')).toBeNull();
+    });
+
+    it('reads a file from the store while its etag matches, and through the flow when it changed', async () => {
+        const { calls, transport } = scripted(b => ({ status: 200, body: {
+            name: 'a.txt', path: b.path, size: 2, contentType: 'application/octet-stream', etag: 'e2', contentBase64: btoa('v2') } }));
+        const sp = new SharePointFiles(transport, new MemorySpCache());
+        // Uploaded bytes are stored under the etag the write returned.
+        const up = scripted(b => ({ status: 200, body: { path: b.path + '/' + b.name, size: 2, etag: 'e1' } }));
+        const store = new MemorySpCache();
+        const writer = new SharePointFiles(up.transport, store);
+        await writer.write(SITE, ROOT, 'a.txt', new Blob(['v1']));
+        await new Promise(r => setTimeout(r, 0));
+        expect(await (await writer.readBlob(SITE, ROOT + '/a.txt', 'e1')).text()).toBe('v1');
+        expect(up.calls.filter(c => c.op === 'fetch')).toHaveLength(0);
+
+        expect(await (await sp.readBlob(SITE, ROOT + '/a.txt', 'e2')).text()).toBe('v2');
+        await new Promise(r => setTimeout(r, 0));
+        expect(await (await sp.readBlob(SITE, ROOT + '/a.txt', 'e2')).text()).toBe('v2');
+        expect(calls).toHaveLength(1);
+        await sp.readBlob(SITE, ROOT + '/a.txt', 'e3');
+        expect(calls).toHaveLength(2);
+    });
+
+    it('mapLimit keeps order and never runs more than the limit at once', async () => {
+        let live = 0, peak = 0;
+        const out = await mapLimit([5, 1, 4, 2, 3], 2, async n => {
+            live++; peak = Math.max(peak, live);
+            await new Promise(r => setTimeout(r, n));
+            live--;
+            return n * 10;
+        });
+        expect(out).toEqual([50, 10, 40, 20, 30]);
+        expect(peak).toBe(2);
     });
 
     it('fresh skips the cache', async () => {

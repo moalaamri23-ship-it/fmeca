@@ -30,6 +30,12 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
     // Every hook must run on every render — bail out below the hook list, never above it.
     const [files, setFiles] = useState<FileEntry[]>([]);
     const [loading, setLoading] = useState(false);
+    // Showing the stored listing while a fresh one comes from SharePoint.
+    const [refreshing, setRefreshing] = useState(false);
+    // Names being uploaded, shown as rows until SharePoint confirms them.
+    const [uploading, setUploading] = useState<string[]>([]);
+    // Only the latest load may set the list: the panel can move to another entity mid-call.
+    const loadSeq = useRef(0);
     const [mode, setMode] = useState<'view' | 'create'>('view');
     const [customFolder, setCustomFolder] = useState("");
     const [msg, setMsg] = useState("");
@@ -49,18 +55,26 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
 
     const loadFiles = async () => {
         if(!provider || !projectId) return;
-        setLoading(true); setMsg("");
+        const seq = ++loadSeq.current;
+        const current = () => seq === loadSeq.current;
+        setLoading(true); setRefreshing(false); setMsg("");
         try {
             // Also warms the in-memory root, so the next click can open the write
             // window without awaiting IndexedDB and losing its user activation.
             setHasRoot(await provider.hasRoot(projectId));
             setRootName(await provider.rootName(projectId));
-            setFiles(await provider.listFiles(projectId, pathParts));
+            // A SharePoint call takes seconds: show what was there last time meanwhile.
+            const cached = provider.cachedFiles ? await provider.cachedFiles(projectId, pathParts) : null;
+            if(cached && current()) { setFiles(cached); setLoading(false); setRefreshing(true); }
+            const fresh = await provider.listFiles(projectId, pathParts);
+            if(current()) setFiles(fresh);
         } catch(e: any) {
-            setMsg(e?.message || "Folder not found or access denied.");
-            setFiles([]);
+            if(current()) {
+                setMsg(e?.message || "Folder not found or access denied.");
+                setFiles([]);
+            }
         }
-        setLoading(false);
+        if(current()) { setLoading(false); setRefreshing(false); }
     };
 
     useEffect(() => {
@@ -227,6 +241,7 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
     const writeFiles = async (picked: File[], session: WriteSession | null) => {
         if(!provider || !projectId) return;
         setMsg(`Saving ${picked.length} file${picked.length > 1 ? 's' : ''}...`);
+        setUploading(picked.map(f => f.name));
         try {
             const written = await provider.writeChosenFiles(projectId, pathParts, picked, session ?? undefined);
             // An upload can overwrite a file the viewer has already read.
@@ -244,6 +259,8 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                 return;
             }
             setMsg("Upload failed: " + (err?.message || err));
+        } finally {
+            setUploading([]);
         }
     };
 
@@ -354,10 +371,21 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                     </div>
                 )}
 
+                {uploading.length > 0 && (
+                    <div className="space-y-2 mb-2">
+                        {uploading.map(name => (
+                            <div key={'up-' + name} className="flex justify-between items-center p-2 border border-dashed border-brand-200 rounded bg-brand-50/40 animate-enter">
+                                <span className="text-sm truncate font-medium text-slate-500">{name}</span>
+                                <span className="text-xs text-brand-600 font-bold animate-pulse shrink-0">Uploading…</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
                 {loading ? <div className="p-4 text-center text-slate-400">{provider?.kind === 'sharepoint' ? 'Loading from SharePoint…' : 'Loading...'}</div> : (
                     <div className="space-y-2">
-                        {files.length === 0 ? <div className="text-sm text-slate-400 italic">No files found.</div> :
-                            files.map((f, i) => (
+                        {files.length === 0 ? (uploading.length ? null : <div className="text-sm text-slate-400 italic">No files found.</div>) :
+                            files.filter(f => !uploading.includes(f.name)).map((f, i) => (
                                 <div key={i} className="flex justify-between items-center p-2 border rounded hover:bg-slate-50 group">
                                     <span className="text-sm truncate font-medium">{f.name}</span>
                                     {confirmDelete === f.name ? (
@@ -382,6 +410,7 @@ export const AttachmentModal: React.FC<AttachmentModalProps> = ({ isOpen, onClos
                 )}
                 <div className="mt-4 pt-2 border-t text-[10px] text-slate-400">
                         Path: {rootName ? rootName : '[Project Root]'} / {pathParts.join(' / ')}
+                        {refreshing && <span className="ml-2 animate-pulse">· Checking SharePoint for changes…</span>}
                 </div>
             </div>
         </div>

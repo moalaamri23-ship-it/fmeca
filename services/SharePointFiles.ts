@@ -9,10 +9,14 @@
  * Contract: ai-router/docs/sp_files.md. Paths are server-relative
  * ("/sites/<Site>/Shared Documents/..."), exactly as `list` returns them.
  *
- * Calls take 3-20 s, so folder listings are cached for a short while and every
- * change invalidates the folder it touched.
+ * Calls take 3-20 s, so the client avoids them where the answer is already known:
+ * listings are cached for a minute and stored for the next page load (`cachedList`),
+ * a write or delete patches the cached listing instead of listing again, a folder
+ * seen to exist skips its mkdir, and opened or uploaded files are kept by etag
+ * (`readBlob`). The store is SharePointCache.ts.
  */
 import { routeFlowCall, hasFlowRoute, MISSING_FLOW_URL } from './AIRouter';
+import { SpPersistentCache, MemorySpCache, defaultSpCache } from './SharePointCache';
 
 export interface SpRoot { path: string; title: string }
 export interface SpSite { site: string; title: string; roots: SpRoot[] }
@@ -163,14 +167,33 @@ const LIST_TTL_MS = 60_000;
 /** Ops that change nothing, so one retry after a timeout is safe. */
 const RETRYABLE = new Set(['sites', 'list', 'fetch', 'fetch_many', 'mkdir']);
 
+/** Uploads in flight at once. The flow runs each call as its own run. */
+export const SP_UPLOAD_CONCURRENCY = 3;
+
+/** Run `work` over `items`, at most `limit` at a time, results in order. */
+export async function mapLimit<T, R>(items: T[], limit: number, work: (item: T, i: number) => Promise<R>): Promise<R[]> {
+    const out: R[] = new Array(items.length);
+    let next = 0;
+    const lane = async () => {
+        while (next < items.length) {
+            const i = next++;
+            out[i] = await work(items[i], i);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+    return out;
+}
+
 export class SharePointFiles {
     private listings = new Map<string, { at: number; value: Promise<SpListing> }>();
     private sitesCache: Promise<SpSite[]> | null = null;
+    /** Folders seen to exist this session, so an upload skips its mkdir call. */
+    private knownFolders = new Set<string>();
 
-    constructor(private transport: SpTransport) {}
+    constructor(private transport: SpTransport, private store: SpPersistentCache = new MemorySpCache()) {}
 
     static forFlow(flowUrl: string): SharePointFiles {
-        return new SharePointFiles(flowTransport(flowUrl));
+        return new SharePointFiles(flowTransport(flowUrl), defaultSpCache());
     }
 
     private async call<T>(body: Record<string, unknown>): Promise<T> {
@@ -219,9 +242,35 @@ export class SharePointFiles {
             folders: r.folders || [],
             files: r.files || [],
         }));
-        this.listings.set(key, { at: Date.now(), value });
-        value.catch(() => this.listings.delete(key));
+        const entry = { at: Date.now(), value };
+        this.listings.set(key, entry);
+        value.then(l => {
+            this.knownFolders.add(key);
+            for (const f of l.folders) this.knownFolders.add(this.key(site, f.path));
+            // A later patch replaced this entry: the patched value is the one to keep.
+            if (this.listings.get(key) === entry) void this.store.putListing(key, l);
+        }, e => {
+            if (this.listings.get(key) === entry) this.listings.delete(key);
+            if (e instanceof SpError && e.code === 'not_found') {
+                this.knownFolders.delete(key);
+                void this.store.deleteListing(key);
+            }
+        });
         return value;
+    }
+
+    /**
+     * The last listing of `path` this browser saw, at any age, without a call: the
+     * session's if there is one, else the stored one. For showing at once while
+     * `list` refreshes it.
+     */
+    async cachedList(site: string, path: string): Promise<SpListing | null> {
+        const key = this.key(site, path);
+        const hit = this.listings.get(key);
+        if (hit) {
+            try { return await hit.value; } catch { /* fall through to the store */ }
+        }
+        return this.store.getListing(key);
     }
 
     /** Drop cached listings of `path` (and, for a removed folder, everything under it). */
@@ -230,14 +279,36 @@ export class SharePointFiles {
         for (const k of [...this.listings.keys()]) {
             if (k === key || (withChildren && k.startsWith(key + '/'))) this.listings.delete(k);
         }
+        void this.store.deleteListing(key);
+        if (withChildren) {
+            for (const k of [...this.knownFolders]) if (k === key || k.startsWith(key + '/')) this.knownFolders.delete(k);
+        }
+    }
+
+    /**
+     * Change the session's listing of `folder` in place, when there is one, instead
+     * of listing it again: the change came from this client, so its result is known.
+     */
+    private patch(site: string, folder: string, change: (l: SpListing) => SpListing) {
+        const key = this.key(site, folder);
+        const hit = this.listings.get(key);
+        if (!hit) { void this.store.deleteListing(key); return; }
+        const value = hit.value.then(change);
+        this.listings.set(key, { at: hit.at, value });
+        value.then(l => this.store.putListing(key, l), () => this.listings.delete(key));
     }
 
     /** Create `path` and any missing parents. `created` is false when it already existed. */
     async mkdir(site: string, path: string): Promise<{ path: string; created: boolean }> {
+        const key = this.key(site, path);
+        if (this.knownFolders.has(key)) return { path, created: false };
         const r = await this.call<{ path: string; created: boolean }>({ op: 'mkdir', site, path });
-        // Every new level shows up in its parent's listing.
-        let p = path;
-        while (p.includes('/') && p !== spParent(p)) { this.invalidate(site, spParent(p)); p = spParent(p); }
+        this.knownFolders.add(key);
+        if (r.created) {
+            // Every new level shows up in its parent's listing.
+            let p = path;
+            while (p.includes('/') && p !== spParent(p)) { this.invalidate(site, spParent(p)); p = spParent(p); }
+        }
         return r;
     }
 
@@ -257,7 +328,18 @@ export class SharePointFiles {
             op: 'write', site, path: folder, name: fileName, contentBase64,
             overwrite: !!opts.overwrite, ...(opts.ifMatch ? { ifMatch: opts.ifMatch } : {}),
         });
-        this.invalidate(site, folder);
+        this.knownFolders.add(this.key(site, folder));
+        // The flow does not return SharePoint's modified time, and this clock is not
+        // SharePoint's: left empty, so anything that compares times asks for the real one.
+        const written: SpFile = { name: fileName, path: r.path, size: r.size, modified: '', etag: r.etag };
+        this.patch(site, folder, l => ({
+            ...l,
+            files: [...l.files.filter(f => f.name.toLowerCase() !== fileName.toLowerCase()), written],
+        }));
+        // The bytes just sent are the file's bytes: opening it next needs no call.
+        if (typeof data !== 'string') {
+            void this.store.putBlob(this.key(site, r.path), { etag: r.etag, contentType: guessContentType(fileName), blob: data });
+        }
         return r;
     }
 
@@ -268,7 +350,42 @@ export class SharePointFiles {
     /** The file as a Blob, typed from its name. */
     async fetchBlob(site: string, path: string): Promise<{ file: SpFetched; blob: Blob }> {
         const file = await this.fetch(site, path);
-        return { file, blob: base64ToBlob(file.contentBase64, guessContentType(file.name)) };
+        const blob = base64ToBlob(file.contentBase64, guessContentType(file.name));
+        void this.store.putBlob(this.key(site, path), { etag: file.etag, contentType: blob.type, blob });
+        return { file, blob };
+    }
+
+    /**
+     * The file's bytes, from this browser's store when `etag` (from a listing)
+     * says they have not changed since, else through the flow.
+     */
+    async readBlob(site: string, path: string, etag?: string): Promise<Blob> {
+        if (etag) {
+            const stored = await this.store.getBlob(this.key(site, path));
+            if (stored && stored.etag === etag) return stored.blob;
+        }
+        return (await this.fetchBlob(site, path)).blob;
+    }
+
+    /**
+     * The stored bytes of `path` whatever their etag, or null. Only for files that
+     * are never rewritten under the same name (FileLM's cache packs); anything else
+     * goes through `readBlob` with the listing's etag.
+     */
+    async storedBlob(site: string, path: string): Promise<Blob | null> {
+        return (await this.store.getBlob(this.key(site, path)))?.blob ?? null;
+    }
+
+    /** Keep bytes fetched some other way (fetchMany) for `storedBlob`/`readBlob`. */
+    keepBlob(site: string, path: string, etag: string, blob: Blob): void {
+        void this.store.putBlob(this.key(site, path), { etag, contentType: blob.type, blob });
+    }
+
+    /** The session's listing of `path` when it is under a minute old, else null. Never calls. */
+    async freshList(site: string, path: string): Promise<SpListing | null> {
+        const hit = this.listings.get(this.key(site, path));
+        if (!hit || Date.now() - hit.at >= LIST_TTL_MS) return null;
+        try { return await hit.value; } catch { return null; }
     }
 
     /**
@@ -298,7 +415,13 @@ export class SharePointFiles {
     /** Move a file or folder to the site's recycle bin. */
     async remove(site: string, path: string): Promise<void> {
         await this.call({ op: 'delete', site, path });
-        this.invalidate(site, spParent(path));
+        const key = this.key(site, path);
+        void this.store.deleteBlob(key);
+        this.patch(site, spParent(path), l => ({
+            ...l,
+            files: l.files.filter(f => this.key(site, f.path) !== key),
+            folders: l.folders.filter(f => this.key(site, f.path) !== key),
+        }));
         this.invalidate(site, path, true);
     }
 }

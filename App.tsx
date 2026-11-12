@@ -768,6 +768,17 @@ setProjects(
     const projectsRef = useRef(projects);
     projectsRef.current = projects;
 
+    // A SharePoint listing takes seconds. Selecting a subsystem lists its References
+    // folder behind, so the panel opens on a cached listing. Debounced, so clicking
+    // through cards does not queue a flow run per card.
+    const activeSubName = activeProject?.subsystems.find(s => s.id === activeSubId)?.name;
+    useEffect(() => {
+        const projectId = activeProjectRef.current?.id;
+        if (!activeSubName || !projectId || !storageProvider?.prefetch || !storageProvider.isLinkedSync(projectId)) return;
+        const t = window.setTimeout(() => storageProvider.prefetch?.(projectId, ['Subsystems', sanitizeName(activeSubName)]), 600);
+        return () => window.clearTimeout(t);
+    }, [activeSubName, storageProvider]);
+
     // Debounced sync of live editor edits into the projects array (persisted by the
     // effect below). Without this, activeProject edits only reach localStorage on
     // closeEditor — a reload mid-edit loses everything. Debounced so we don't

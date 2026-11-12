@@ -48,6 +48,34 @@ describe('SharePointStorageProvider', () => {
         expect(calls[1]).toMatchObject({ op: 'write', path: ROOT + '/Subsystems/Pump', name: 'spec 10pct.pdf', overwrite: true });
     });
 
+    it('uploads several files at once, after one mkdir, and skips mkdir once the folder was listed', async () => {
+        let live = 0, peak = 0;
+        const calls: any[] = [];
+        const transport: SpTransport = async b => {
+            calls.push(b);
+            if (b.op === 'list') return { status: 200, text: JSON.stringify({ path: b.path, folders: [], files: [] }) };
+            if (b.op === 'mkdir') return { status: 200, text: JSON.stringify({ path: b.path, created: false }) };
+            live++; peak = Math.max(peak, live);
+            await new Promise(r => setTimeout(r, 5));
+            live--;
+            return { status: 200, text: JSON.stringify({ path: b.path + '/' + b.name, size: 1, etag: 'e' }) };
+        };
+        const p = new SharePointStorageProvider({
+            client: new SharePointFiles(transport),
+            getRoot: () => ({ site: SITE, path: ROOT }), setRoot: () => {}, pickFolder: async () => null,
+        });
+        await p.listFiles('p1', ['Pump']);
+        const files = ['a', 'b', 'c', 'd'].map(n => new File(['x'], n + '.txt'));
+        expect(await p.writeChosenFiles('p1', ['Pump'], files)).toBe(4);
+        expect(calls.filter(c => c.op === 'mkdir')).toHaveLength(0);
+        expect(peak).toBe(3);
+        // The panel's reload after the upload is served from the patched listing.
+        expect((await p.listFiles('p1', ['Pump'])).map(f => f.name)).toEqual(['a.txt', 'b.txt', 'c.txt', 'd.txt']);
+        expect(calls.filter(c => c.op === 'list')).toHaveLength(1);
+        expect((await p.cachedFiles('p1', ['Pump']))?.length).toBe(4);
+        expect(await p.cachedFiles('p1', ['Other'])).toBeNull();
+    });
+
     it('reads a listed file through fetch, typed by name', async () => {
         const { p } = provider(b => b.op === 'list'
             ? { status: 200, body: { path: b.path, folders: [], files: [{ name: 'a.txt', path: b.path + '/a.txt', size: 2, modified: '', etag: 'e' }] } }

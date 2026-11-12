@@ -79,6 +79,10 @@ export interface AttachmentProvider {
     writeChosenFiles(projectId: string, pathParts: string[], files: File[], session?: WriteSession): Promise<number>;
     deleteFile(projectId: string, pathParts: string[], name: string, session?: WriteSession): Promise<void>;
     listFiles(projectId: string, pathParts: string[]): Promise<FileEntry[]>;
+    /** Last known files without a round trip (SharePoint), or null when unknown. */
+    cachedFiles?(projectId: string, pathParts: string[]): Promise<FileEntry[] | null>;
+    /** Warm the folder's listing in the background (SharePoint). */
+    prefetch?(projectId: string, pathParts: string[]): void;
     readFile(entry: FileEntry): Promise<Blob>;
 }
 
