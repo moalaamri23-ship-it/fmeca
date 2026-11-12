@@ -13,7 +13,7 @@
 export const AI_ROUTER_URL_KEY = 'fmeca_ai_router_url';
 
 /** Tasks this app uses. Tasks are defined by the flow, not here. */
-export type RouterTask = 'chat' | 'sp_read' | 'sp_register' | 'sp_files';
+export type RouterTask = 'chat' | 'sp_read' | 'sp_register' | 'sp_files' | 'sp_files_child';
 
 /** Where a `chat` task is forwarded: `flow` is the classic AI flow (attachments, session memory). */
 export type ChatTarget = 'agent' | 'flow' | 'light';

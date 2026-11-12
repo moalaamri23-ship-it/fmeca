@@ -768,15 +768,28 @@ setProjects(
     const projectsRef = useRef(projects);
     projectsRef.current = projects;
 
-    // A SharePoint listing takes seconds. Selecting a subsystem lists its References
-    // folder behind, so the panel opens on a cached listing. Debounced, so clicking
-    // through cards does not queue a flow run per card.
+    // A SharePoint listing takes seconds. Opening a project lists all of its
+    // References folders in one call, so every panel opens on a cached listing. A
+    // flow without that op (router before v1.4) answers false; selecting a subsystem
+    // then lists that subsystem's folder behind, debounced so clicking through
+    // cards does not queue a flow run per card.
     const activeSubName = activeProject?.subsystems.find(s => s.id === activeSubId)?.name;
+    const activeProjectId = activeProject?.id;
+    const spRootPath = activeProject?.spAttachmentRoot?.path;
+    const projectWarmed = useRef<{ id: string; ok: Promise<boolean> } | null>(null);
+    useEffect(() => {
+        if (!activeProjectId || !storageProvider?.warm || !storageProvider.isLinkedSync(activeProjectId)) return;
+        projectWarmed.current = { id: activeProjectId, ok: storageProvider.warm(activeProjectId) };
+    }, [activeProjectId, spRootPath, storageProvider]);
     useEffect(() => {
         const projectId = activeProjectRef.current?.id;
         if (!activeSubName || !projectId || !storageProvider?.prefetch || !storageProvider.isLinkedSync(projectId)) return;
-        const t = window.setTimeout(() => storageProvider.prefetch?.(projectId, ['Subsystems', sanitizeName(activeSubName)]), 600);
-        return () => window.clearTimeout(t);
+        let cancelled = false;
+        const t = window.setTimeout(async () => {
+            const warmed = projectWarmed.current?.id === projectId ? await projectWarmed.current.ok : false;
+            if (!warmed && !cancelled) storageProvider.prefetch?.(projectId, ['Subsystems', sanitizeName(activeSubName)]);
+        }, 600);
+        return () => { cancelled = true; window.clearTimeout(t); };
     }, [activeSubName, storageProvider]);
 
     // Debounced sync of live editor edits into the projects array (persisted by the

@@ -83,6 +83,8 @@ export interface AttachmentProvider {
     cachedFiles?(projectId: string, pathParts: string[]): Promise<FileEntry[] | null>;
     /** Warm the folder's listing in the background (SharePoint). */
     prefetch?(projectId: string, pathParts: string[]): void;
+    /** List the whole project's folders in one call (SharePoint, router v1.4). False when it could not. */
+    warm?(projectId: string): Promise<boolean>;
     readFile(entry: FileEntry): Promise<Blob>;
 }
 

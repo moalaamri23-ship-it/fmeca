@@ -15,6 +15,7 @@ function provider(answer: (b: any) => { status: number; body: unknown }, root: S
         getRoot: () => stored,
         setRoot: (_id, r) => { stored = r; },
         pickFolder: async () => ({ site: SITE, path: ROOT + '/picked' }),
+        preloadFiles: false,
     });
     return { p, calls, root: () => stored };
 }
@@ -74,6 +75,49 @@ describe('SharePointStorageProvider', () => {
         expect(calls.filter(c => c.op === 'list')).toHaveLength(1);
         expect((await p.cachedFiles('p1', ['Pump']))?.length).toBe(4);
         expect(await p.cachedFiles('p1', ['Other'])).toBeNull();
+    });
+
+    it('warms the whole project in one call and then lists every folder from the cache', async () => {
+        const { p, calls } = provider(b => b.op === 'tree' ? { status: 200, body: { path: ROOT, depth: 4, tree: {
+            Files: [], Folders: [{ Name: 'Subsystems', ServerRelativeUrl: ROOT + '/Subsystems', ItemCount: 1, Files: [], Folders: [
+                { Name: 'Pump', ServerRelativeUrl: ROOT + '/Subsystems/Pump', ItemCount: 2, Folders: [], Files: [
+                    { Name: 'spec.pdf', ServerRelativeUrl: ROOT + '/Subsystems/Pump/spec.pdf', Length: '9', TimeLastModified: '', ETag: 'e' }] },
+            ] }],
+        } } } : { status: 200, body: { path: b.path, folders: [], files: [] } });
+        expect(await p.warm('p1')).toBe(true);
+        expect(calls[0]).toMatchObject({ op: 'tree', path: ROOT, depth: 4 });
+        expect((await p.listFiles('p1', ['Subsystems', 'Pump'])).map(f => f.name)).toEqual(['spec.pdf']);
+        expect(calls).toHaveLength(1);
+
+        // An older flow has no tree op: nothing is cached and listing works as before.
+        const old = provider(b => b.op === 'tree'
+            ? { status: 400, body: { error: 'bad_request', message: 'Unknown op: tree.' } }
+            : { status: 200, body: { path: b.path, folders: [], files: [] } });
+        expect(await old.p.warm('p1')).toBe(false);
+        expect(await old.p.listFiles('p1', ['Subsystems', 'Pump'])).toEqual([]);
+        expect(old.calls.map(c => c.op)).toEqual(['tree', 'list']);
+    });
+
+    it('fetches a few small files behind the listing so Open needs no call', async () => {
+        const calls: any[] = [];
+        const transport: SpTransport = async b => {
+            calls.push(b);
+            if (b.op === 'list') return { status: 200, text: JSON.stringify({ path: b.path, folders: [], files: [
+                { name: 'small.txt', path: b.path + '/small.txt', size: 5, modified: '', etag: 'e1' },
+                { name: 'huge.pdf', path: b.path + '/huge.pdf', size: 5 * 1024 * 1024, modified: '', etag: 'e2' },
+            ] }) };
+            return { status: 200, text: JSON.stringify({ name: 'small.txt', path: b.path, size: 5, contentType: 'x', etag: 'e1', contentBase64: btoa('hello') }) };
+        };
+        const p = new SharePointStorageProvider({
+            client: new SharePointFiles(transport),
+            getRoot: () => ({ site: SITE, path: ROOT }), setRoot: () => {}, pickFolder: async () => null,
+        });
+        const files = await p.listFiles('p1', ['Pump']);
+        await new Promise(r => setTimeout(r, 5));
+        expect(calls.filter(c => c.op === 'fetch').map(c => c.path)).toEqual([ROOT + '/Pump/small.txt']);
+        // Opening it now is served from the browser.
+        expect(await (await p.readFile(files.find(f => f.name === 'small.txt')!)).text()).toBe('hello');
+        expect(calls.filter(c => c.op === 'fetch')).toHaveLength(1);
     });
 
     it('reads a listed file through fetch, typed by name', async () => {

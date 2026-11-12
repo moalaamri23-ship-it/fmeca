@@ -21,10 +21,13 @@ export interface SpPersistentCache {
     getBlob(key: string): Promise<SpStoredBlob | null>;
     putBlob(key: string, value: SpStoredBlob): Promise<void>;
     deleteBlob(key: string): Promise<void>;
+    /** Small values the client keeps between sessions (the sites list). */
+    getJson<T>(key: string): Promise<T | null>;
+    putJson(key: string, value: unknown): Promise<void>;
 }
 
-/** Stored file bytes are trimmed, oldest first, past this total. */
-export const SP_BLOB_CACHE_BYTES = 200 * 1024 * 1024;
+/** Stored file bytes are trimmed, least recently used first, past this total. */
+export const SP_BLOB_CACHE_BYTES = 1024 * 1024 * 1024;
 
 const DB_NAME = 'FmecaPro_SP';
 const LISTINGS = 'listings';
@@ -72,6 +75,18 @@ export class IndexedDbSpCache implements SpPersistentCache {
         return this.db;
     }
 
+    /**
+     * Ask the browser not to clear this origin's storage under pressure. Chromium
+     * grants it without a prompt for sites the user visits often; a refusal changes
+     * nothing here.
+     */
+    private persisted = false;
+    private keep() {
+        if (this.persisted) return;
+        this.persisted = true;
+        try { void navigator.storage?.persist?.().catch(() => {}); } catch { /* not available */ }
+    }
+
     private async quietly<T>(fallback: T, run: (db: IDBDatabase) => Promise<T>): Promise<T> {
         try { return await run(await this.open()); } catch { return fallback; }
     }
@@ -97,6 +112,20 @@ export class IndexedDbSpCache implements SpPersistentCache {
         });
     }
 
+    getJson<T>(key: string) {
+        // Shares the listings store; the prefix keeps it clear of "site|path" keys.
+        return this.quietly<T | null>(null, async db =>
+            ((await request(db.transaction(LISTINGS).objectStore(LISTINGS).get('json:' + key))) as T | undefined) ?? null);
+    }
+
+    putJson(key: string, value: unknown) {
+        return this.quietly(undefined, async db => {
+            const tx = db.transaction(LISTINGS, 'readwrite');
+            tx.objectStore(LISTINGS).put(value, 'json:' + key);
+            await done(tx);
+        });
+    }
+
     getBlob(key: string) {
         return this.quietly<SpStoredBlob | null>(null, async db => {
             const value: SpStoredBlob | undefined = await request(db.transaction(BLOBS).objectStore(BLOBS).get(key));
@@ -112,6 +141,7 @@ export class IndexedDbSpCache implements SpPersistentCache {
     putBlob(key: string, value: SpStoredBlob) {
         return this.quietly(undefined, async db => {
             if (value.blob.size > this.maxBlobBytes) return;
+            this.keep();
             const tx = db.transaction([BLOBS, BLOB_META], 'readwrite');
             tx.objectStore(BLOBS).put(value, key);
             tx.objectStore(BLOB_META).put({ size: value.blob.size, at: Date.now() } as BlobMeta, key);
@@ -158,6 +188,9 @@ export class MemorySpCache implements SpPersistentCache {
     async getBlob(key: string) { return this.blobs.get(key) ?? null; }
     async putBlob(key: string, value: SpStoredBlob) { this.blobs.set(key, value); }
     async deleteBlob(key: string) { this.blobs.delete(key); }
+    json = new Map<string, unknown>();
+    async getJson<T>(key: string) { return (this.json.get(key) as T | undefined) ?? null; }
+    async putJson(key: string, value: unknown) { this.json.set(key, value); }
 }
 
 /** IndexedDB in a browser, memory elsewhere. */

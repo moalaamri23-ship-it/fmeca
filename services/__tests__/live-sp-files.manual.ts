@@ -49,6 +49,36 @@ describe.skipIf(!URL)('SharePoint client, live', () => {
     });
 });
 
+describe.skipIf(!URL)('SharePoint tree op and write times, live (router v1.4; an older flow is reported, not failed)', () => {
+    it('warms a subtree in one call when the flow can, and falls back when it cannot', async () => {
+        const sp = SharePointFiles.forFlow(URL);
+        const folder = joinSpPath(ROOT, `_fmeca_tree_test_${Date.now()}`);
+        try {
+            await sp.mkdir(SITE, joinSpPath(folder, 'a', 'b'));
+            const written = await sp.write(SITE, joinSpPath(folder, 'a'), 'note.txt', new Blob(['hello']), { overwrite: true });
+            console.log('[live] write returned modified:', written.modified ?? '(none: flow before v1.4)');
+
+            const fresh = SharePointFiles.forFlow(URL);
+            const t0 = Date.now();
+            const warmed = await fresh.warm(SITE, folder, 3);
+            console.log(`[live] tree op: ${warmed ? 'supported' : 'not supported (flow before v1.4, or SharePoint refused the query)'} in ${Date.now() - t0} ms`);
+            const t1 = Date.now();
+            const a = await fresh.list(SITE, joinSpPath(folder, 'a'));
+            console.log(`[live] list after warm: ${Date.now() - t1} ms`);
+            expect(a.files.map(f => f.name)).toEqual(['note.txt']);
+            expect(a.folders.map(f => f.name)).toEqual(['b']);
+            if (warmed) {
+                expect(Date.now() - t1).toBeLessThan(50);            // served from the cache
+                expect(a.files[0].etag).toBe(written.etag);         // same etag form as list/write
+                expect((await fresh.list(SITE, joinSpPath(folder, 'a', 'b'))).files).toEqual([]);
+                if (written.modified) expect(a.files[0].modified).toBe(written.modified);
+            }
+        } finally {
+            await sp.remove(SITE, folder);
+        }
+    });
+});
+
 describe.skipIf(!URL)('SharePoint attachments provider, live', () => {
     it('links a folder, uploads to an entity, lists, reads and deletes', async () => {
         const { SharePointStorageProvider } = await import('../SharePointStorage');

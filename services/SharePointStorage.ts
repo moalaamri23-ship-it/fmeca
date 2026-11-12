@@ -27,7 +27,15 @@ export interface SharePointStorageOptions {
     setRoot: (projectId: string, root: SpLocation) => void;
     /** Show the picker; resolves with the chosen folder, or null when cancelled. */
     pickFolder: (projectId: string, current: SpLocation | null) => Promise<SpLocation | null>;
+    /** Fetch a listed folder's small files in the background (default true). */
+    preloadFiles?: boolean;
 }
+
+/** root / Subsystems / <sub> / Failures / <failure>. */
+const PROJECT_TREE_DEPTH = 4;
+/** Files fetched ahead of a click: each is one flow call, so only a few small ones. */
+const PRELOAD_MAX_BYTES = 1024 * 1024;
+const PRELOAD_MAX_FILES = 4;
 
 /** SharePoint's own errors as one sentence for the panel; anything else as it is. */
 async function plainly<T>(run: () => Promise<T>): Promise<T> {
@@ -136,6 +144,7 @@ export class SharePointStorageProvider implements AttachmentProvider {
             if (e instanceof SpError && e.code === 'not_found') return [];
             throw e instanceof SpError ? new Error(describeSpError(e)) : e;
         }
+        if (this.opts.preloadFiles !== false) this.preload(site, listing);
         return this.entries(site, listing);
     }
 
@@ -155,6 +164,34 @@ export class SharePointStorageProvider implements AttachmentProvider {
         if (!this.opts.getRoot(projectId)) return;
         const { site, path } = this.folder(projectId, pathParts);
         this.opts.client.list(site, path).catch(() => {});
+    }
+
+    /**
+     * List every References folder of the project in ONE call (the flow's `tree`
+     * op, router v1.4): root / Subsystems / <sub> / Failures / <failure> is four
+     * levels. Every panel then opens on a cached listing. False on an older flow,
+     * where `prefetch` warms one folder at a time instead.
+     */
+    async warm(projectId: string): Promise<boolean> {
+        const root = this.opts.getRoot(projectId);
+        if (!root) return false;
+        return this.opts.client.warm(root.site, root.path, PROJECT_TREE_DEPTH).catch(() => false);
+    }
+
+    /**
+     * Fetch the folder's small files behind the panel, so Open answers at once.
+     * A few files, the smallest first, and only those this browser does not hold.
+     */
+    private preload(site: string, listing: SpListing): void {
+        const client = this.opts.client;
+        const small = listing.files
+            .filter(f => !f.name.startsWith('.') && f.etag && f.size > 0 && f.size <= PRELOAD_MAX_BYTES)
+            .sort((a, b) => a.size - b.size)
+            .slice(0, PRELOAD_MAX_FILES);
+        void mapLimit(small, 2, async f => {
+            if (await client.hasBlob(site, f.path, f.etag)) return;
+            await client.readBlob(site, f.path, f.etag).catch(() => {});
+        }).catch(() => {});
     }
 
     private entries(site: string, listing: SpListing): FileEntry[] {

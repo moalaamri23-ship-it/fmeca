@@ -13,9 +13,15 @@
  * listings are cached for a minute and stored for the next page load (`cachedList`),
  * a write or delete patches the cached listing instead of listing again, a folder
  * seen to exist skips its mkdir, and opened or uploaded files are kept by etag
- * (`readBlob`). The store is SharePointCache.ts.
+ * (`readBlob`). `warm` lists a whole subtree in one call. The store is
+ * SharePointCache.ts.
+ *
+ * Router v1.4 runs these ops inside the router (no child-flow hop). If that route
+ * fails the client asks the child flow (`sp_files_child`), and stays on it for the
+ * session. Against an older router everything here still works: no `tree`, no
+ * `modified` on writes, and the plain retry.
  */
-import { routeFlowCall, hasFlowRoute, MISSING_FLOW_URL } from './AIRouter';
+import { routeFlowCall, hasFlowRoute, MISSING_FLOW_URL, RouterTask } from './AIRouter';
 import { SpPersistentCache, MemorySpCache, defaultSpCache } from './SharePointCache';
 
 export interface SpRoot { path: string; title: string }
@@ -25,7 +31,8 @@ export interface SpFile { name: string; path: string; size: number; modified: st
 export interface SpListing { path: string; folders: SpFolder[]; files: SpFile[] }
 export interface SpFetched { name: string; path: string; size: number; contentType: string; etag: string; contentBase64: string }
 export interface SpFetchFailure { path: string; error: string }
-export interface SpWritten { path: string; size: number; etag: string }
+/** `modified` is SharePoint's own time; a flow before router v1.4 does not return it. */
+export interface SpWritten { path: string; size: number; etag: string; modified?: string }
 
 /** A location the apps store: which site, and which folder in it. */
 export interface SpLocation { site: string; path: string }
@@ -46,14 +53,17 @@ export class SpError extends Error {
     }
 }
 
-/** One HTTP round trip to the router: the request body in, status and reply text out. */
-export type SpTransport = (body: Record<string, unknown>) => Promise<{ status: number; text: string }>;
+/**
+ * One HTTP round trip to the router: the request body in, status and reply text out.
+ * `task` names another router task for the same ops (the child-flow fallback).
+ */
+export type SpTransport = (body: Record<string, unknown>, task?: string) => Promise<{ status: number; text: string }>;
 
 /** The real transport: POST to the OXY Connection Flow URL as text/plain (no CORS preflight). */
 export function flowTransport(flowUrl: string): SpTransport {
-    return async body => {
+    return async (body, task) => {
         if (!hasFlowRoute(flowUrl)) throw new SpError(0, 'bad_request', MISSING_FLOW_URL);
-        const route = routeFlowCall(flowUrl, 'sp_files', body);
+        const route = routeFlowCall(flowUrl, (task as RouterTask) || 'sp_files', body);
         let res: Response;
         try {
             res = await fetch(route.url, {
@@ -163,12 +173,32 @@ export function describeSpError(err: unknown): string {
 // ----------------------------------------------------------------- client ---
 
 const LIST_TTL_MS = 60_000;
+/** The allowlist changes with a re-import, not from day to day. */
+const SITES_TTL_MS = 24 * 60 * 60 * 1000;
+const SITES_KEY = 'sites';
 
 /** Ops that change nothing, so one retry after a timeout is safe. */
-const RETRYABLE = new Set(['sites', 'list', 'fetch', 'fetch_many', 'mkdir']);
+const RETRYABLE = new Set(['sites', 'list', 'tree', 'fetch', 'fetch_many', 'mkdir']);
+/** Small reads worth asking twice when the first answer is slow (see `hedgeMs`). */
+const HEDGED = new Set(['sites', 'list', 'tree']);
+/** A flow failure this soon is the flow breaking, not its 120 s limit: a write did not happen. */
+const QUICK_FAILURE_MS = 60_000;
+/** The router task that runs the same ops in the child flow (router v1.4 and later). */
+export const SP_CHILD_TASK = 'sp_files_child';
 
 /** Uploads in flight at once. The flow runs each call as its own run. */
 export const SP_UPLOAD_CONCURRENCY = 3;
+/** Levels the flow's `tree` op goes below a folder. */
+export const SP_TREE_MAX_DEPTH = 4;
+
+export interface SpClientOptions {
+    /**
+     * Send a slow small read (sites, list, tree) a second time after this long and
+     * take whichever answers first. Flow calls now and then take 12-24 s for no
+     * reason of their own; a second run usually does not. 0 turns it off.
+     */
+    hedgeMs?: number;
+}
 
 /** Run `work` over `items`, at most `limit` at a time, results in order. */
 export async function mapLimit<T, R>(items: T[], limit: number, work: (item: T, i: number) => Promise<R>): Promise<R[]> {
@@ -184,45 +214,140 @@ export async function mapLimit<T, R>(items: T[], limit: number, work: (item: T, 
     return out;
 }
 
+/** SharePoint's own shape for a folder in a `tree` reply. */
+interface SpTreeNode {
+    Name?: string;
+    ServerRelativeUrl?: string;
+    ItemCount?: number;
+    Folders?: SpTreeNode[];
+    Files?: Array<{ Name: string; ServerRelativeUrl: string; Length?: string | number; TimeLastModified?: string; ETag?: string }>;
+}
+
+class UnknownTaskError extends SpError {}
+
 export class SharePointFiles {
     private listings = new Map<string, { at: number; value: Promise<SpListing> }>();
     private sitesCache: Promise<SpSite[]> | null = null;
     /** Folders seen to exist this session, so an upload skips its mkdir call. */
     private knownFolders = new Set<string>();
+    /** Reads of one file in flight, so two askers share one call. */
+    private reading = new Map<string, Promise<Blob>>();
+    private warming = new Map<string, { at: number; value: Promise<boolean> }>();
+    /** The flow has no `tree` op (router before v1.4), or SharePoint refused its query. */
+    private treeUnsupported = false;
+    /** The router's inline route failed and its child route answered: stay on the child. */
+    private preferChild = false;
 
-    constructor(private transport: SpTransport, private store: SpPersistentCache = new MemorySpCache()) {}
+    private transport: SpTransport;
+    private store: SpPersistentCache;
+    private hedgeMs: number;
+
+    constructor(transport: SpTransport, store: SpPersistentCache = new MemorySpCache(), options: SpClientOptions = {}) {
+        this.transport = transport;
+        this.store = store;
+        this.hedgeMs = options.hedgeMs ?? 0;
+    }
 
     static forFlow(flowUrl: string): SharePointFiles {
-        return new SharePointFiles(flowTransport(flowUrl), defaultSpCache());
+        return new SharePointFiles(flowTransport(flowUrl), defaultSpCache(), { hedgeMs: 8000 });
+    }
+
+    /** One round trip, with the reply turned into the result or an SpError. */
+    private async attempt<T>(body: Record<string, unknown>, task?: string): Promise<T> {
+        const { status, text } = await this.transport(body, task);
+        let parsed: { error?: unknown; message?: string; runId?: string; tasks?: unknown } | null = null;
+        try { parsed = text ? JSON.parse(text) : null; } catch { /* router or gateway text */ }
+        if (status >= 200 && status < 300 && parsed) return parsed as unknown as T;
+        if (status === 400 && parsed && Array.isArray(parsed.tasks)) {
+            throw new UnknownTaskError(400, 'bad_request', String(parsed.error || 'Unknown task'));
+        }
+        // The flow's own errors are {error: <code>, message}. Anything else from 5xx is
+        // the flow itself failing or timing out: the router's {error, runId} for a child,
+        // or the platform's reply when a run ends without answering.
+        const ours = !!parsed && typeof parsed.error === 'string' && !!parsed.message;
+        if (status >= 500 && !ours) {
+            const said = parsed && typeof parsed.error === 'string' ? parsed.error : '';
+            throw new SpError(status, 'flow_failed', said || 'The flow failed or timed out.');
+        }
+        // The platform's own refusals carry {error: {code, message}}: the flow is turned
+        // off, or its trigger refused the body. Say what it said, not "[object Object]".
+        const platform = parsed && typeof parsed.error === 'object' && parsed.error
+            ? parsed.error as { code?: string; message?: string } : null;
+        if (platform) {
+            const off = platform.code === 'WorkflowTriggerIsNotEnabled';
+            throw new SpError(status, 'sharepoint_error', off
+                ? 'The OXY Connection Flow is turned off. Turn the AI Router flow on in Power Automate.'
+                : String(platform.message || platform.code || `HTTP ${status}`).slice(0, 500));
+        }
+        const code = (typeof parsed?.error === 'string' && parsed.error as SpErrorCode) || (status === 404 ? 'not_found' : 'sharepoint_error');
+        throw new SpError(status, code, String(parsed?.message || parsed?.error || text || `HTTP ${status}`).slice(0, 500));
+    }
+
+    /** `run`, and a second `run` if the first has not answered after `hedgeMs`; the first answer wins. */
+    private hedged<T>(run: () => Promise<T>): Promise<T> {
+        if (!this.hedgeMs) return run();
+        return new Promise<T>((resolve, reject) => {
+            let settled = false;
+            let open = 1;
+            const watch = (p: Promise<T>): Promise<void> => p.then(
+                v => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } },
+                e => {
+                    open--;
+                    // The second try, if there is one, may still answer.
+                    if (!settled && open === 0) { settled = true; clearTimeout(timer); reject(e); }
+                },
+            );
+            const timer = setTimeout(() => { if (!settled) { open++; void watch(run()); } }, this.hedgeMs);
+            void watch(run());
+        });
     }
 
     private async call<T>(body: Record<string, unknown>): Promise<T> {
         const op = String(body.op);
-        const attempt = async (): Promise<T> => {
-            const { status, text } = await this.transport(body);
-            let parsed: any = null;
-            try { parsed = text ? JSON.parse(text) : null; } catch { /* router or gateway text */ }
-            if (status >= 200 && status < 300 && parsed) return parsed as T;
-            // Child failed or timed out inside the router: {error, runId} with no code of ours.
-            if (status === 502 && parsed && !parsed.message && parsed.runId) {
-                throw new SpError(502, 'flow_failed', parsed.error || 'The flow failed or timed out.');
-            }
-            const code = (parsed?.error as SpErrorCode) || (status === 404 ? 'not_found' : 'sharepoint_error');
-            throw new SpError(status, code, String(parsed?.message || parsed?.error || text || `HTTP ${status}`).slice(0, 500));
-        };
+        const once = (task?: string) => HEDGED.has(op) ? this.hedged(() => this.attempt<T>(body, task)) : this.attempt<T>(body, task);
+        const started = Date.now();
         try {
-            return await attempt();
+            return await once(this.preferChild ? SP_CHILD_TASK : undefined);
         } catch (e) {
-            const retry = e instanceof SpError && RETRYABLE.has(op) && (e.code === 'flow_failed' || e.code === 'network');
-            if (!retry) throw e;
-            return attempt();
+            if (!(e instanceof SpError) || (e.code !== 'flow_failed' && e.code !== 'network')) throw e;
+            // An overwrite can be sent again; so can anything that changes nothing.
+            const again = RETRYABLE.has(op)
+                || (op === 'write' && body.overwrite === true && !body.ifMatch && Date.now() - started < QUICK_FAILURE_MS);
+            if (!again) throw e;
+            if (e.code === 'network' || this.preferChild) return once(this.preferChild ? SP_CHILD_TASK : undefined);
+            // The flow failed: ask the child flow, which runs the same ops (router v1.4).
+            // An older router does not know that task; it gets the plain retry it always had.
+            try {
+                const r = await once(SP_CHILD_TASK);
+                this.preferChild = true;
+                return r;
+            } catch (viaChild) {
+                if (viaChild instanceof UnknownTaskError) return once();
+                throw viaChild;
+            }
         }
     }
 
-    /** Sites and roots the flow allows (its allowlist). Cached for the session. */
+    /**
+     * Sites and roots the flow allows (its allowlist). Kept for a day: answered from
+     * the store at once, and asked again behind it when the stored copy is older than
+     * the session.
+     */
     sites(): Promise<SpSite[]> {
         if (!this.sitesCache) {
-            this.sitesCache = this.call<{ sites: SpSite[] }>({ op: 'sites' }).then(r => r.sites || []);
+            const live = () => this.call<{ sites: SpSite[] }>({ op: 'sites' }).then(r => {
+                const sites = r.sites || [];
+                void this.store.putJson(SITES_KEY, { at: Date.now(), sites });
+                return sites;
+            });
+            this.sitesCache = this.store.getJson<{ at: number; sites: SpSite[] }>(SITES_KEY).then(kept => {
+                if (kept && Array.isArray(kept.sites) && Date.now() - kept.at < SITES_TTL_MS) {
+                    // Refresh behind: the next session, or the next call after it lands, sees it.
+                    live().then(sites => { this.sitesCache = Promise.resolve(sites); }, () => {});
+                    return kept.sites;
+                }
+                return live();
+            });
             this.sitesCache.catch(() => { this.sitesCache = null; });
         }
         return this.sitesCache;
@@ -230,6 +355,15 @@ export class SharePointFiles {
 
     private key(site: string, path: string) {
         return site.replace(/\/+$/, '').toLowerCase() + '|' + path.replace(/\/+$/, '').toLowerCase();
+    }
+
+    /** Put a listing this client just learned into the session cache and the store. */
+    private seed(site: string, listing: SpListing) {
+        const key = this.key(site, listing.path);
+        this.listings.set(key, { at: Date.now(), value: Promise.resolve(listing) });
+        this.knownFolders.add(key);
+        for (const f of listing.folders) this.knownFolders.add(this.key(site, f.path));
+        void this.store.putListing(key, listing);
     }
 
     /** Folders and files directly in `path`. Cached for a minute unless `fresh`. */
@@ -260,6 +394,52 @@ export class SharePointFiles {
     }
 
     /**
+     * List `path` and `depth` levels of folders below it in ONE call (the flow's
+     * `tree` op), and cache every folder's listing as if each had been listed. A
+     * caller warms a subtree, then lists and reads as usual and finds the answers
+     * cached.
+     *
+     * False when nothing was cached: an older flow without `tree`, a folder that is
+     * not there, or a failed call. The caller's own `list` calls then go out as before.
+     */
+    warm(site: string, path: string, depth = 2): Promise<boolean> {
+        if (this.treeUnsupported) return Promise.resolve(false);
+        const levels = Math.max(1, Math.min(SP_TREE_MAX_DEPTH, Math.floor(depth)));
+        const key = this.key(site, path) + '|' + levels;
+        const hit = this.warming.get(key);
+        if (hit && Date.now() - hit.at < LIST_TTL_MS) return hit.value;
+        const value = this.call<{ path: string; tree: SpTreeNode }>({ op: 'tree', site, path, depth: levels }).then(r => {
+            if (!r.tree || !Array.isArray(r.tree.Folders) || !Array.isArray(r.tree.Files)) return false;
+            // A library root holds the hidden "Forms" folder; /sites/X/Lib splits into 4 parts.
+            const atLibraryRoot = path.replace(/\/+$/, '').split('/').length === 4;
+            const walk = (node: SpTreeNode, at: string, top: boolean) => {
+                // A folder at the last level comes without its children: not a listing.
+                if (!Array.isArray(node.Folders) || !Array.isArray(node.Files)) return;
+                const folders = node.Folders.filter(f => !(top && atLibraryRoot && f.Name === 'Forms'));
+                this.seed(site, {
+                    path: at,
+                    folders: folders.map(f => ({ name: f.Name || '', path: f.ServerRelativeUrl || '', itemCount: f.ItemCount ?? 0 })),
+                    files: node.Files.map(f => ({
+                        name: f.Name, path: f.ServerRelativeUrl, size: Number(f.Length ?? 0) || 0,
+                        modified: f.TimeLastModified || '', etag: f.ETag || '',
+                    })),
+                });
+                for (const f of folders) if (f.ServerRelativeUrl) walk(f, f.ServerRelativeUrl, false);
+            };
+            walk(r.tree, r.path || path.replace(/\/+$/, ''), true);
+            return true;
+        }, e => {
+            // "Unknown op" from an older flow, or SharePoint refusing the nested query:
+            // either way asking again will not help.
+            if (e instanceof SpError && (e.code === 'bad_request' || e.code === 'sharepoint_error')) this.treeUnsupported = true;
+            return false;
+        });
+        this.warming.set(key, { at: Date.now(), value });
+        void value.then(ok => { if (!ok) this.warming.delete(key); });
+        return value;
+    }
+
+    /**
      * The last listing of `path` this browser saw, at any age, without a call: the
      * session's if there is one, else the stored one. For showing at once while
      * `list` refreshes it.
@@ -278,6 +458,10 @@ export class SharePointFiles {
         const key = this.key(site, path);
         for (const k of [...this.listings.keys()]) {
             if (k === key || (withChildren && k.startsWith(key + '/'))) this.listings.delete(k);
+        }
+        for (const k of [...this.warming.keys()]) {
+            const folder = k.slice(0, k.lastIndexOf('|'));
+            if (key === folder || key.startsWith(folder + '/') || (withChildren && folder.startsWith(key + '/'))) this.warming.delete(k);
         }
         void this.store.deleteListing(key);
         if (withChildren) {
@@ -324,14 +508,26 @@ export class SharePointFiles {
         if (bytes > SP_MAX_FILE_BYTES) {
             throw new SpError(413, 'too_large', `${name} is over ${SP_MAX_FILE_BYTES / 1024 / 1024} MB.`);
         }
-        const r = await this.call<SpWritten>({
+        const body = {
             op: 'write', site, path: folder, name: fileName, contentBase64,
             overwrite: !!opts.overwrite, ...(opts.ifMatch ? { ifMatch: opts.ifMatch } : {}),
-        });
-        this.knownFolders.add(this.key(site, folder));
-        // The flow does not return SharePoint's modified time, and this clock is not
-        // SharePoint's: left empty, so anything that compares times asks for the real one.
-        const written: SpFile = { name: fileName, path: r.path, size: r.size, modified: '', etag: r.etag };
+        };
+        const folderKey = this.key(site, folder);
+        let r: SpWritten;
+        try {
+            r = await this.call<SpWritten>(body);
+        } catch (e) {
+            // The folder was only believed to exist (seen earlier, removed since): make it, once.
+            if (!(e instanceof SpError && e.code === 'not_found' && this.knownFolders.has(folderKey))) throw e;
+            this.knownFolders.delete(folderKey);
+            await this.mkdir(site, folder);
+            r = await this.call<SpWritten>(body);
+        }
+        this.knownFolders.add(folderKey);
+        // SharePoint's own modified time when the flow returns it (router v1.4). An older
+        // flow does not, and this clock is not SharePoint's: left empty then, so anything
+        // that compares times asks for the real one.
+        const written: SpFile = { name: fileName, path: r.path, size: r.size, modified: r.modified || '', etag: r.etag };
         this.patch(site, folder, l => ({
             ...l,
             files: [...l.files.filter(f => f.name.toLowerCase() !== fileName.toLowerCase()), written],
@@ -357,14 +553,30 @@ export class SharePointFiles {
 
     /**
      * The file's bytes, from this browser's store when `etag` (from a listing)
-     * says they have not changed since, else through the flow.
+     * says they have not changed since, else through the flow. Two readers of one
+     * file share one call.
      */
-    async readBlob(site: string, path: string, etag?: string): Promise<Blob> {
-        if (etag) {
-            const stored = await this.store.getBlob(this.key(site, path));
-            if (stored && stored.etag === etag) return stored.blob;
-        }
-        return (await this.fetchBlob(site, path)).blob;
+    readBlob(site: string, path: string, etag?: string): Promise<Blob> {
+        const key = this.key(site, path) + '|' + (etag || '');
+        const flying = this.reading.get(key);
+        if (flying) return flying;
+        const read = (async () => {
+            if (etag) {
+                const stored = await this.store.getBlob(this.key(site, path));
+                if (stored && stored.etag === etag) return stored.blob;
+            }
+            return (await this.fetchBlob(site, path)).blob;
+        })();
+        this.reading.set(key, read);
+        const clear = () => { if (this.reading.get(key) === read) this.reading.delete(key); };
+        read.then(clear, clear);
+        return read;
+    }
+
+    /** Whether `readBlob(site, path, etag)` would answer without a call. */
+    async hasBlob(site: string, path: string, etag: string): Promise<boolean> {
+        if (!etag) return false;
+        return (await this.store.getBlob(this.key(site, path)))?.etag === etag;
     }
 
     /**
@@ -389,10 +601,12 @@ export class SharePointFiles {
     }
 
     /**
-     * Several files, in batches the flow accepts. Each entry is the file or a
-     * per-file error; one missing file does not fail the rest. A batch that would
-     * pass the flow's size cap returns the overflow as `too_large_for_batch`, which
-     * is fetched again in the next call.
+     * Several files in one call, in batches the flow accepts. For many SMALL files:
+     * the flow answers a batch more slowly per megabyte than separate `fetch` calls
+     * side by side, so large files go through `fetchBlob` under `mapLimit` instead.
+     * Each entry is the file or a per-file error; one missing file does not fail the
+     * rest. A batch that would pass the flow's size cap returns the overflow as
+     * `too_large_for_batch`, which is fetched again in the next call.
      */
     async fetchMany(site: string, paths: string[]): Promise<Array<SpFetched | SpFetchFailure>> {
         const out = new Map<string, SpFetched | SpFetchFailure>();
