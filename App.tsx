@@ -47,6 +47,7 @@ import {
     type SystemMode,
 } from './services/SystemModesService';
 import { AI_ROUTER_URL_KEY } from './services/AIRouter';
+import { listenForShellSettings } from './services/ShellSettings';
 
 // Utility functions
 const safeGet = (k: string, f: any) => { try { const i = localStorage.getItem(k); return i ? JSON.parse(i) : f; } catch (e) { return f; } };
@@ -731,6 +732,13 @@ setProjects(
     setSystemContextEnabled(localStorage.getItem('rcm_system_context_enabled') !== 'false');
     setAttachmentStorage(localStorage.getItem('fmeca_attachment_storage') === 'local' ? 'local' : 'sharepoint');
     }, []);
+
+    // Inside Reliability Shell, the flow URL and engineer email entered there replace
+    // these. Registered after the load above, so the shell's reply lands last.
+    useEffect(() => listenForShellSettings(({ aiRouterUrl, engineerEmail }) => {
+        if (aiRouterUrl) setAiRouterUrl(aiRouterUrl);
+        if (engineerEmail) setEngineerEmail(engineerEmail);
+    }), []);
 
 
 // 2) Select root node when project opens (do not override existing selection)
