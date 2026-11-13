@@ -53,6 +53,9 @@ export class SpError extends Error {
     }
 }
 
+/** Past the router's own limit of about 120 s for a synchronous reply. */
+export const SP_CALL_TIMEOUT_MS = 150_000;
+
 /**
  * One HTTP round trip to the router: the request body in, status and reply text out.
  * `task` names another router task for the same ops (the child-flow fallback).
@@ -64,17 +67,27 @@ export function flowTransport(flowUrl: string): SpTransport {
     return async (body, task) => {
         if (!hasFlowRoute(flowUrl)) throw new SpError(0, 'bad_request', MISSING_FLOW_URL);
         const route = routeFlowCall(flowUrl, (task as RouterTask) || 'sp_files', body);
+        // The router answers within about 120 s or not at all. Without a limit of our
+        // own a call the network has dropped waits for ever, and with it whatever was
+        // being saved.
+        const limit = new AbortController();
+        const timer = setTimeout(() => limit.abort(), SP_CALL_TIMEOUT_MS);
         let res: Response;
         try {
             res = await fetch(route.url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
                 body: JSON.stringify(route.body),
+                signal: limit.signal,
             });
+            return { status: res.status, text: await res.text() };
         } catch (e: any) {
-            throw new SpError(0, 'network', 'Could not reach the OXY Connection Flow: ' + (e?.message || e));
+            throw new SpError(0, 'network', limit.signal.aborted
+                ? `The OXY Connection Flow did not answer in ${SP_CALL_TIMEOUT_MS / 1000} s.`
+                : 'Could not reach the OXY Connection Flow: ' + (e?.message || e));
+        } finally {
+            clearTimeout(timer);
         }
-        return { status: res.status, text: await res.text() };
     };
 }
 
@@ -181,8 +194,6 @@ const SITES_KEY = 'sites';
 const RETRYABLE = new Set(['sites', 'list', 'tree', 'fetch', 'fetch_many', 'mkdir']);
 /** Small reads worth asking twice when the first answer is slow (see `hedgeMs`). */
 const HEDGED = new Set(['sites', 'list', 'tree']);
-/** A flow failure this soon is the flow breaking, not its 120 s limit: a write did not happen. */
-const QUICK_FAILURE_MS = 60_000;
 /** The router task that runs the same ops in the child flow (router v1.4 and later). */
 export const SP_CHILD_TASK = 'sp_files_child';
 
@@ -305,14 +316,14 @@ export class SharePointFiles {
     private async call<T>(body: Record<string, unknown>): Promise<T> {
         const op = String(body.op);
         const once = (task?: string) => HEDGED.has(op) ? this.hedged(() => this.attempt<T>(body, task)) : this.attempt<T>(body, task);
-        const started = Date.now();
         try {
             return await once(this.preferChild ? SP_CHILD_TASK : undefined);
         } catch (e) {
             if (!(e instanceof SpError) || (e.code !== 'flow_failed' && e.code !== 'network')) throw e;
-            // An overwrite can be sent again; so can anything that changes nothing.
-            const again = RETRYABLE.has(op)
-                || (op === 'write' && body.overwrite === true && !body.ifMatch && Date.now() - started < QUICK_FAILURE_MS);
+            // A plain overwrite can be sent again, whether or not the first one landed:
+            // the result is the same file. So can anything that changes nothing. One
+            // lost call must not fail a whole save.
+            const again = RETRYABLE.has(op) || (op === 'write' && body.overwrite === true && !body.ifMatch);
             if (!again) throw e;
             if (e.code === 'network' || this.preferChild) return once(this.preferChild ? SP_CHILD_TASK : undefined);
             // The flow failed: ask the child flow, which runs the same ops (router v1.4).
@@ -482,17 +493,31 @@ export class SharePointFiles {
         value.then(l => this.store.putListing(key, l), () => this.listings.delete(key));
     }
 
-    /** Create `path` and any missing parents. `created` is false when it already existed. */
+    /**
+     * Create `path` and any missing parents. `created` is false when it already existed.
+     *
+     * What this client then knows without asking: a folder it just created is empty,
+     * and each new level belongs in its parent's listing. Both go into the cache, so
+     * a save into a new folder does not list it, or its parent, again.
+     */
     async mkdir(site: string, path: string): Promise<{ path: string; created: boolean }> {
         const key = this.key(site, path);
         if (this.knownFolders.has(key)) return { path, created: false };
+        // Levels not known to exist before the call: any of them may be new.
+        const fresh: string[] = [];
+        for (let p = path.replace(/\/+$/, ''); p.includes('/') && p !== spParent(p) && !this.knownFolders.has(this.key(site, p)); p = spParent(p)) fresh.push(p);
         const r = await this.call<{ path: string; created: boolean }>({ op: 'mkdir', site, path });
-        this.knownFolders.add(key);
         if (r.created) {
-            // Every new level shows up in its parent's listing.
-            let p = path;
-            while (p.includes('/') && p !== spParent(p)) { this.invalidate(site, spParent(p)); p = spParent(p); }
+            for (const level of fresh) {
+                const name = spBaseName(level);
+                this.patch(site, spParent(level), l => l.folders.some(f => f.name.toLowerCase() === name.toLowerCase())
+                    ? l
+                    : { ...l, folders: [...l.folders, { name, path: level, itemCount: 0 }] });
+                this.knownFolders.add(this.key(site, level));
+            }
+            this.seed(site, { path: path.replace(/\/+$/, ''), folders: [], files: [] });
         }
+        this.knownFolders.add(key);
         return r;
     }
 

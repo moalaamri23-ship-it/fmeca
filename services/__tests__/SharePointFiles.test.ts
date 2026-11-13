@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
     SharePointFiles, SpError, SpTransport, joinSpPath, rootFor, spBaseName, spParent, toSpFileName,
-    describeSpError, SP_MAX_BATCH_FILES, mapLimit,
+    describeSpError, SP_MAX_BATCH_FILES, mapLimit, flowTransport, SP_CALL_TIMEOUT_MS,
 } from '../SharePointFiles';
 import { MemorySpCache } from '../SharePointCache';
 
@@ -151,7 +151,7 @@ describe('SharePointFiles client', () => {
         expect(calls).toHaveLength(2);
     });
 
-    it('mkdir invalidates every parent listing', async () => {
+    it('mkdir puts the new folders into the cached listings instead of listing again', async () => {
         const { calls, transport } = scripted(b => b.op === 'list'
             ? { status: 200, body: listing(b.path) }
             : { status: 200, body: { path: b.path, created: true } });
@@ -159,9 +159,46 @@ describe('SharePointFiles client', () => {
         await sp.list(SITE, ROOT);
         await sp.list(SITE, ROOT + '/a');
         await sp.mkdir(SITE, ROOT + '/a/b/c');
-        await sp.list(SITE, ROOT);
-        await sp.list(SITE, ROOT + '/a');
-        expect(calls.filter(c => c.op === 'list')).toHaveLength(4);
+        // Each new level is in its parent's listing, and the new leaf is known to be empty.
+        expect((await sp.list(SITE, ROOT + '/a')).folders.map(f => f.name)).toEqual(['b']);
+        expect((await sp.list(SITE, ROOT + '/a/b/c'))).toEqual({ path: ROOT + '/a/b/c', folders: [], files: [] });
+        // The root did not change: /a was already there.
+        expect((await sp.list(SITE, ROOT)).folders).toEqual([]);
+        expect(calls.filter(c => c.op === 'list')).toHaveLength(2);
+        // /a/b was created too but never listed: nothing is assumed about it.
+        await sp.list(SITE, ROOT + '/a/b');
+        expect(calls.filter(c => c.op === 'list')).toHaveLength(3);
+
+        // A folder that already existed changes no listing.
+        const there = scripted(b => b.op === 'list'
+            ? { status: 200, body: listing(b.path) } : { status: 200, body: { path: b.path, created: false } });
+        const sp2 = new SharePointFiles(there.transport);
+        await sp2.list(SITE, ROOT);
+        await sp2.mkdir(SITE, ROOT + '/x');
+        expect((await sp2.list(SITE, ROOT)).folders).toEqual([]);
+        await sp2.list(SITE, ROOT + '/x');
+        expect(there.calls.filter(c => c.op === 'list')).toHaveLength(2);
+    });
+
+    it('gives up on a call the network never answers, and sends an overwrite once more', async () => {
+        vi.useFakeTimers();
+        let n = 0;
+        vi.stubGlobal('fetch', (_url: string, init: { signal: AbortSignal }) => {
+            n++;
+            if (n === 1) return new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+            return Promise.resolve({ status: 200, text: async () => JSON.stringify({ path: ROOT + '/a.txt', size: 1, etag: 'e' }) });
+        });
+        try {
+            const sp = new SharePointFiles(flowTransport('https://flow.example/x'));
+            const writing = sp.write(SITE, ROOT, 'a.txt', btoa('x'), { overwrite: true });
+            await vi.advanceTimersByTimeAsync(SP_CALL_TIMEOUT_MS + 10);
+            // The first call was dropped after the limit; the overwrite went out again and landed.
+            expect((await writing).etag).toBe('e');
+            expect(n).toBeGreaterThanOrEqual(2);
+        } finally {
+            vi.unstubAllGlobals();
+            vi.useRealTimers();
+        }
     });
 
     it('turns flow errors into SpError with the contract code', async () => {
